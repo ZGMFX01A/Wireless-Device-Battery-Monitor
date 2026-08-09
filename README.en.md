@@ -1,142 +1,198 @@
-# 🔋 Wireless Device Battery Monitor
+# Wireless Device Battery Monitor — Windows Mouse, Keyboard and Bluetooth Battery Monitor
 
-English | [简体中文](README.md)
+[简体中文](README.md)
 
-A lightweight Windows tray utility for monitoring battery status across wireless mice, mechanical keyboards, and standard BLE devices, with quick access to refresh actions, settings, and low-battery alerts.
+**Wireless Device Battery Monitor** is a lightweight Windows system-tray battery monitor for Logitech and Razer wireless mice, mechanical keyboards, and Windows-paired Bluetooth LE devices that expose the standard Battery Service. See battery percentage, charging state, last update time, and low-battery alerts without keeping a vendor control panel open.
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue)
-![Platform](https://img.shields.io/badge/Platform-Windows-0078D6)
-![Usage](https://img.shields.io/badge/Usage-Non--Commercial-orange)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
+[![Latest Release](https://img.shields.io/github/v/release/ZGMFX01A/mouse-battery?display_name=tag&sort=semver)](https://github.com/ZGMFX01A/mouse-battery/releases)
+[![License](https://img.shields.io/badge/License-Non--Commercial-orange)](LICENSE)
 
-![Demo](assets/演示图.png)
+## Download
 
-## ✨ Features
+- [Download the latest Windows build from GitHub Releases](https://github.com/ZGMFX01A/mouse-battery/releases)
+- [Browse all releases and release notes](https://github.com/ZGMFX01A/mouse-battery/releases)
 
-- **Tray resident**: Runs in the Windows system tray and shows battery status at a glance.
-- **Automatic refresh**: Detects connected devices and refreshes battery data periodically.
-- **Multi-brand support**: Designed for Logitech and Razer 2.4G wireless mice.
-- **Mechanical keyboard extension**: Supports battery reading and binding for Weikav (Huafenda) dual-8K mechanical keyboard solutions.
-- **Standard BLE battery devices**: Add multiple Windows-paired devices and read battery levels through the standard Battery Service (GATT `0x180F`); sleeping devices remain visible in the picker.
-- **Quick tray actions**: Refresh now, open settings, or exit from the tray menu.
-- **Low-battery alerts**: Helps you avoid unexpected power loss during use.
-- **Persistent preferences**: Saves notification threshold, tray icon priority, auto update, and other settings.
-- **Bilingual UI**: Supports switching between Chinese and English in the settings window.
-- **Auto update**: Supports update checking and automatic update flow.
+Download `WirelessDeviceBatteryMonitor-<version>.exe` and run it directly. No installer is required; the app stays in the Windows system tray.
 
-## 🔌 Supported Devices
+## Product screenshot
 
-### Bluetooth LE
+![Wireless Device Battery Monitor Windows battery dashboard](assets/en.png)
 
-Supports paired devices that expose the standard BLE Battery Service (GATT `0x180F` / `0x2A19`) to Windows. Devices using vendor-private protocols or not exposing battery data to Windows are not supported.
+The screenshot shows multi-device battery cards, charging state, low-battery threshold, startup launch, automatic updates, tray icon priority, and manual refresh. It uses the English UI; the app can switch between English and Simplified Chinese.
 
-### Razer
+## Why Wireless Device Battery Monitor?
 
-| Device | Connection | Status |
-| :--- | :--- | :--- |
-| Basilisk V3 Pro | 2.4G wireless dongle | ✅ Verified |
-| Viper V2 Pro | 2.4G wireless dongle | 🔧 Theoretically supported |
-| Viper V3 Pro | 2.4G wireless dongle | 🔧 Theoretically supported |
-| DeathAdder V3 Hyperspeed | 2.4G wireless dongle | 🔧 Theoretically supported |
+- **At-a-glance battery status**: See device name, battery percentage, charging state, and last update time from the tray or settings window.
+- **Built for wireless peripherals**: Designed for Logitech and Razer 2.4 GHz wireless mice and compatible HID devices.
+- **Low-battery notifications**: Choose Off, 10%, 20%, or 30% and avoid unexpected power loss during work or gaming.
+- **Multiple devices**: Show several detected devices and bind multiple Windows-paired standard BLE battery devices.
+- **Keyboard support**: Read and bind battery status for Weikav (Huafenda) dual-8K mechanical keyboard solutions.
+- **Quiet background utility**: Device scanning, manual refresh, session auto-refresh, startup launch, and bilingual UI in a small tray application.
+- **Optional auto-update**: Check GitHub Releases and update the packaged app when you enable the option.
 
-### Logitech
+The project is also useful as a Windows mouse battery monitor, wireless mouse battery checker, Logitech battery monitor, Razer battery monitor, HID battery utility, system tray battery app, or Bluetooth LE battery monitor.
+
+## Supported devices
+
+### Razer wireless mice
 
 | Device | Connection | Status |
-| :--- | :--- | :--- |
-| G903 / G703 | Lightspeed | 🔧 Theoretically supported |
-| G502X | Lightspeed | 🔧 Theoretically supported |
-| G Pro Wireless | Lightspeed | 🔧 Theoretically supported |
-| Other Lightspeed receivers (PIDs `C53A`, `C53D`, `C545`, `C54D`) | Lightspeed | 🔧 Protocol-compatible candidate |
-| Unifying Receiver (PIDs `C52B`, `C532`) | 2.4G receiver | 🔧 Protocol-compatible candidate |
-| Nano Receiver (PIDs `C518`, `C51A`, `C51B`, `C521`, `C525`, `C526`, `C52E`, `C52F`, `C531`, `C534`, `C535`, `C537`) | 2.4G receiver | 🔧 Protocol-compatible candidate |
+| --- | --- | --- |
+| Basilisk V3 Pro | 2.4 GHz wireless dongle | ✅ Verified |
+| Viper V2 Pro | 2.4 GHz wireless dongle | 🔧 Theoretical support |
+| DeathAdder V3 Pro | 2.4 GHz wireless dongle | 🔧 Protocol support |
+| DeathAdder V3 | 2.4 GHz wireless dongle | 🔧 Protocol support |
+| Viper Ultimate | 2.4 GHz wireless dongle | 🔧 Protocol support |
+| Basilisk X Hyperspeed | 2.4 GHz wireless dongle | 🔧 Protocol support |
+| Basilisk Ultimate | 2.4 GHz wireless dongle | 🔧 Protocol support |
+| DeathAdder V2 Pro | 2.4 GHz wireless dongle | 🔧 Protocol support |
 
-> Logitech support is identified by receiver PID and HID++ battery features. The exact mouse paired with a receiver depends on the HID++ features it exposes. Newly added receivers have not been individually verified on real hardware.
+### Logitech wireless mice
 
-### Mechanical Keyboards
+| Device | Connection | Status |
+| --- | --- | --- |
+| G903 | LIGHTSPEED | ✅ Supported |
+| G502 X | LIGHTSPEED | ✅ Supported |
+| G703 | LIGHTSPEED | 🔧 Theoretical support |
+| G Pro Wireless | LIGHTSPEED | 🔧 Theoretical support |
 
-| Device / Solution | Connection | Status |
-| :--- | :--- | :--- |
-| Weikav (Huafenda) dual-8K mechanical keyboard solution | 2.4G receiver | ✅ Supported |
+Logitech G HUB may occupy the HID interface needed for battery reads. If a Logitech device is not detected, close G HUB and select **Refresh Battery**. The current code enumerates known Lightspeed, Bolt, and Unifying receiver PIDs; the paired mouse still needs to expose a readable HID++ battery feature.
 
-> Note: If Logitech battery data cannot be read, close Logitech G Hub first to avoid HID device conflicts.
->
-> Note: Mechanical keyboard support currently targets the Weikav dual-8K receiver path. The keyboard must be connected through its 2.4G receiver and bound manually in the settings window.
+### Bluetooth LE devices
 
-## 🚀 Quick Start
+The app supports devices that are already paired with Windows and expose the standard Bluetooth Battery Service:
 
-1. Download the latest `WirelessDeviceBatteryMonitor-<version>.exe` from [Releases](../../releases).
-2. Launch the program and look for its icon in the Windows system tray.
-3. Connect a supported 2.4G wireless mouse, mechanical keyboard, or paired standard BLE battery device.
-4. If the device is not detected, close vendor software that may occupy the HID interface. If needed, run the app as administrator.
+- Battery Service: `GATT 0x180F`
+- Battery Level: `GATT 0x2A19`
+- Multiple devices can be added; sleeping devices remain in the picker
 
-## 📖 How to Use
+Devices that use a vendor-private Bluetooth protocol or do not expose battery data to Windows are outside the current support boundary.
 
-### 1. Check battery status
+### Weikav dual-8K mechanical keyboards
 
-- After launch, the app stays in the tray.
-- Hover over the tray icon to see device name, battery percentage, and charging state.
+Current support targets the Weikav (Huafenda) dual-8K receiver path over a 2.4 GHz dongle. Because a keyboard may expose multiple HID interfaces, use **Add keyboard** in Settings to complete a one-time manual binding.
 
-### 2. Use the tray menu
+## Quick start
 
-- **Refresh now**: Trigger a manual device scan and battery refresh.
-- **Open settings**: Open the settings window to adjust preferences.
-- **Quit**: Exit the tray application.
+1. Open [Releases](https://github.com/ZGMFX01A/mouse-battery/releases) and download the latest `WirelessDeviceBatteryMonitor-<version>.exe`.
+2. Launch the executable and confirm that the Wireless Device Battery Monitor icon appears in the Windows system tray.
+3. Connect the mouse or keyboard through its 2.4 GHz receiver; pair BLE devices in Windows first.
+4. Wait for the first scan, then select **Refresh battery** when needed.
+5. Hover over the tray icon or open Settings to inspect detailed status.
 
-### 3. Adjust settings
+If Windows SmartScreen blocks the unsigned executable on first launch, verify that the file came from this repository's Releases page before selecting **More info → Run anyway**.
 
-The settings window is mainly used to:
+## Common tasks
 
-- change the low-battery notification threshold
-- configure tray icon priority
-- switch the UI language
-- enable or disable auto update
-- review currently detected device status
+### View battery status
 
-### 4. Bind a mechanical keyboard
+The settings window shows device name, battery percentage, charging state, and update time for each device. Choose the tray icon priority that fits your workflow:
 
-To enable battery display for a Weikav dual-8K mechanical keyboard:
+- Mouse first
+- Keyboard first
+- Lowest battery first
 
-1. Make sure the keyboard is connected through its **2.4G receiver**.
-2. Open the settings window.
-3. Click **Add Keyboard** and wait for candidate scanning to finish.
-4. Select the target keyboard from the list and complete the binding.
-5. After binding succeeds, the keyboard card will appear in the settings window and the tray status will also include keyboard battery information.
+### Configure low-battery alerts
 
-## ❓ FAQ
+Use the minus/plus control in Settings to choose Off, 10%, 20%, or 30%. Windows shows a low-battery notification when a device reaches the threshold; changing the threshold recalculates notification state.
 
-### My mouse is not detected. What should I do?
+### Control auto-refresh
 
-1. Make sure the mouse is connected through a **2.4G wireless receiver**. Bluetooth-only scenarios are not the main target here.
-2. Confirm that the model is listed above or belongs to a compatible protocol family.
-3. Logitech users should close G Hub and try again.
-4. If needed, run the app as administrator.
+The **Auto Refresh** switch controls the current settings-window session and is enabled by default. The GUI reads shared state from the tray process about every 3 seconds, while the tray hardware poll runs every 60 seconds by default. This session switch is not persisted and returns to enabled after restart.
 
-### Why does the tray show no battery value or `N/A`?
+### Add a Bluetooth LE device
 
-- The device may be sleeping, just connected, still waiting for the first scan, or temporarily unavailable for battery reading.
-- Try **Refresh now** and wait for the next synchronization.
+1. Pair the device in Windows Bluetooth settings.
+2. Open Wireless Device Battery Monitor Settings.
+3. Select **Add Bluetooth Device** and wait for the paired-device list.
+4. Choose a device that exposes the standard Battery Service and save it.
 
-### Can it monitor multiple devices at the same time?
+Added Bluetooth cards can be removed individually and added again later from the paired-device list.
 
-- Yes. Detected devices are shown through tray status and the settings window.
+### Bind a mechanical keyboard
 
-### Why does the mechanical keyboard need manual binding?
+1. Connect the keyboard through its 2.4 GHz receiver.
+2. Open Settings and select **Add keyboard**.
+3. Wait for candidate interfaces to be scanned.
+4. Select the target keyboard and save the binding.
 
-- A Weikav dual-8K keyboard may expose multiple HID interfaces. During the **Add Keyboard** flow, the app filters candidates automatically and binds the interface that is most suitable for battery reading.
+### Enable startup launch or auto-update
 
-### Is a small difference from the official driver normal?
+Both options can be enabled independently in Settings. Startup launch uses the current user's Windows startup entry. Auto-update checks GitHub Releases only after you enable it.
 
-- Yes. Minor differences can happen because of refresh timing or percentage conversion.
+### Switch the interface language
 
-## © Copyright
+Click the language button in the upper-right corner of the Settings card to switch between Simplified Chinese and English. By default, the app follows the Windows UI language.
 
-All rights reserved. **Commercial use is prohibited.** This project is for personal learning and non-commercial use only.
+## Troubleshooting
 
-Without explicit authorization from the author, this project and its derivative versions may not be used for:
+### My mouse is not detected
 
-- commercial sales
-- paid distribution
-- commercial integration
-- paid internal enterprise deployment
-- any other direct or indirect profit-making purpose
+Check the following in order:
 
-Please contact the author in advance if you need commercial authorization.
+1. Logitech and Razer mice are connected through a 2.4 GHz wireless receiver; standard BLE devices are added through **Add Bluetooth Device**.
+2. The model is listed above or belongs to a compatible protocol family.
+3. Logitech users have closed G HUB.
+4. Select **Refresh battery**; if the HID interface is still occupied, try running the app as administrator.
+
+### The battery shows `N/A` or does not update
+
+The device may be sleeping, newly connected, waiting for its first scan, or temporarily unavailable through HID. Select **Refresh battery** and wait for the next automatic refresh. Unreadable data is not presented as a fake successful value.
+
+### Why is the value different from the vendor driver?
+
+Small differences can result from refresh timing, device sleep state, or percentage conversion. Compare readings taken at the same time.
+
+### Why can’t I find my BLE device?
+
+Only Windows-paired devices exposing the standard `0x180F` / `0x2A19` battery service appear in the **Add Bluetooth Device** picker. Windows endpoints belonging to the same physical device are deduplicated. Vendor-private protocols and devices that do not expose battery data cannot be read through the generic BLE path.
+
+### The settings window says “Failed to Read Device Status”
+
+The settings window reads shared state written by the tray process and does not access HID directly. Make sure the main app is still running, then select **Refresh Battery**. Restart the main app if the tray process has exited.
+
+### What network does auto-update use?
+
+When enabled, the updater requests release metadata from this project's GitHub Releases and downloads updates. If the GitHub direct link is unavailable, the updater may use a backup download source. The app does not require an account or upload mouse, keyboard, or battery data.
+
+## Run from source (developers)
+
+For normal use, download a Release build. Running and packaging from source requires Windows, Python 3.10+, and the private `mouse-battery-core` package used by this public application shell. The core package contains HID, device-protocol, and BLE reading implementations and is not published in this repository.
+
+```powershell
+git clone https://github.com/ZGMFX01A/mouse-battery.git
+cd mouse-battery
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m pip install -r .private-requirements.txt
+python main.py
+```
+
+Build a single-file Windows executable:
+
+```powershell
+python -m pip install pyinstaller
+python build.py
+```
+
+The build output is `dist/WirelessDeviceBatteryMonitor.exe`. If `.private-requirements.txt` is missing, create it from `.private-requirements.example.txt` and make sure `mouse-battery-core` is available as a sibling checkout or private source. Without access to the private core, the build fails explicitly; normal users should use a prebuilt Release.
+
+## Search keywords
+
+Windows mouse battery monitor, wireless mouse battery checker, Logitech G903 battery, Logitech G502 X battery, Razer battery monitor, wireless keyboard battery monitor, mechanical keyboard battery status, Bluetooth LE Battery Service, HID++ battery, Windows system tray utility, low-battery notification.
+
+## Privacy, security, and license
+
+- No account is required. The app does not collect or upload device names, battery levels, or HID data.
+- Network access is used for GitHub Releases version checks and update downloads.
+- This project uses a non-commercial license. Personal learning, modification, and non-commercial use are allowed. Commercial sales, paid distribution, commercial integration, paid enterprise deployment, and other profit-making use require prior written permission from the copyright holder.
+- Read the full terms in [LICENSE](LICENSE).
+
+## Feedback and contributions
+
+When reporting a compatibility issue, include your Windows version, device model, connection method, app version, and reproduction steps. Do not attach personal files, complete raw HID captures, or other sensitive information.
+
+Compatibility reports and user feedback are welcome through Issues. Protocol implementations and the private core package are maintained outside this public repository.
