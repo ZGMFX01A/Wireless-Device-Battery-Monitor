@@ -8,6 +8,7 @@ import re
 import sys
 import json
 import hashlib
+import base64
 import logging
 import socket
 import subprocess
@@ -409,6 +410,54 @@ def _build_swap_script_lines(exe_path: str, target_exe_path: str, old_exe_path: 
     ]
 
 
+def _powershell_literal(value: str) -> str:
+    """以 PowerShell 单引号字面量安全嵌入本地路径。"""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _build_swap_powershell_script(exe_path: str, target_exe_path: str, old_exe_path: str,
+                                  new_exe_path: str, target_pid: int,
+                                  expected_size: int) -> str:
+    """构造 Unicode 安全的进程外更新脚本。"""
+    return "\n".join([
+        "$ErrorActionPreference = 'Stop'",
+        f"$exePath = {_powershell_literal(exe_path)}",
+        f"$targetPath = {_powershell_literal(target_exe_path)}",
+        f"$oldPath = {_powershell_literal(old_exe_path)}",
+        f"$newPath = {_powershell_literal(new_exe_path)}",
+        f"$targetPid = {target_pid}",
+        f"$expectedSize = {expected_size}",
+        "for ($i = 0; $i -lt 15 -and (Get-Process -Id $targetPid -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Seconds 1 }",
+        "$process = Get-Process -Id $targetPid -ErrorAction SilentlyContinue",
+        "if ($process) { Stop-Process -Id $targetPid -Force -ErrorAction Stop; $process.WaitForExit() }",
+        "if (-not (Test-Path -LiteralPath $newPath)) { throw '更新文件不存在。' }",
+        "if ((Get-Item -LiteralPath $newPath).Length -ne $expectedSize) { throw '更新文件大小校验失败。' }",
+        "if (($targetPath -ne $exePath) -and (Test-Path -LiteralPath $targetPath)) { throw '目标版本文件已存在。' }",
+        "if (Test-Path -LiteralPath $oldPath) { Remove-Item -LiteralPath $oldPath -Force }",
+        "Move-Item -LiteralPath $exePath -Destination $oldPath -Force",
+        "try {",
+        "  for ($i = 0; $i -lt 20; $i++) {",
+        "    try { Move-Item -LiteralPath $newPath -Destination $targetPath -Force; break }",
+        "    catch { if ($i -eq 19) { throw }; Start-Sleep -Seconds 1 }",
+        "  }",
+        "  if (-not (Test-Path -LiteralPath $targetPath)) { throw '更新文件替换失败。' }",
+        "  $env:PYINSTALLER_RESET_ENVIRONMENT = '1'",
+        "  Start-Process -FilePath $targetPath",
+        "} catch {",
+        "  if (Test-Path -LiteralPath $targetPath) { Remove-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue }",
+        "  if (Test-Path -LiteralPath $oldPath) { Move-Item -LiteralPath $oldPath -Destination $exePath -Force }",
+        "  $env:PYINSTALLER_RESET_ENVIRONMENT = '1'",
+        "  if (Test-Path -LiteralPath $exePath) { Start-Process -FilePath $exePath }",
+        "  throw",
+        "}",
+    ])
+
+
+def _encode_powershell_command(script: str) -> str:
+    """PowerShell -EncodedCommand 规定脚本文本必须为 UTF-16LE Base64。"""
+    return base64.b64encode(script.encode('utf-16le')).decode('ascii')
+
+
 def download_and_install(download_url: str, on_progress=None, host_pid: Optional[int] = None,
                          expected_size: int = 0, expected_digest: str = '', on_status=None):
     """
@@ -444,10 +493,6 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
         return False
     old_exe_path = target_exe_path + ".old"
     new_exe_path = target_exe_path + ".new"
-    swap_script_path = os.path.join(
-        tempfile.gettempdir(),
-        f"mouse_battery_swap_{current_pid}.cmd"
-    )
     # 优先由外部传入宿主主进程 PID（GUI 热更新场景），否则用自身 PID
     target_pid = host_pid if isinstance(host_pid, int) and host_pid > 0 else current_pid
     skip_gui_pid = os.getppid() if target_pid != current_pid else None
@@ -505,22 +550,20 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
             f"sha256={actual_sha256}"
         )
 
-        # 2. 通过外部脚本完成替换与拉起，避免当前进程内自改名引发冻结
-        #    路径全部加引号，避免含空格/中文路径出错；编码使用本地 OEM 兼容
-        script_lines = _build_swap_script_lines(
+        # 2. 通过 PowerShell 的 UTF-16LE EncodedCommand 在进程外完成替换。
+        #    不落盘 .cmd，避免 cmd.exe 对 UTF-8 / 中文路径的错误解码。
+        script = _build_swap_powershell_script(
             exe_path=exe_path,
             target_exe_path=target_exe_path,
             old_exe_path=old_exe_path,
             new_exe_path=new_exe_path,
-            swap_script_path=swap_script_path,
             target_pid=target_pid,
             expected_size=actual_size,
         )
-        with open(swap_script_path, 'w', encoding='utf-8', newline='\r\n') as f:
-            f.write("\r\n".join(script_lines) + "\r\n")
 
         subprocess.Popen(
-            ['cmd', '/c', swap_script_path],
+            ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+             '-EncodedCommand', _encode_powershell_command(script)],
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         )
 
@@ -543,7 +586,6 @@ def download_and_install(download_url: str, on_progress=None, host_pid: Optional
         logger.error(f"应用更新失败: {type(e).__name__}: {e}")
         _notify_status(on_status, 'error', str(e))
         _safe_remove(new_exe_path)
-        _safe_remove(swap_script_path)
         return False
 
 def clean_old_version():

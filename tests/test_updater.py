@@ -1,4 +1,5 @@
 import hashlib
+import base64
 import io
 import json
 import os
@@ -123,7 +124,7 @@ class UpdaterTests(unittest.TestCase):
                 mock.patch.object(updater.tempfile, 'gettempdir', return_value=temp_dir),
                 mock.patch.object(updater, '_download_to_path', side_effect=fake_download) as download,
                 mock.patch.object(updater, 'request_process_shutdown', return_value=False),
-                mock.patch.object(updater.subprocess, 'Popen'),
+                mock.patch.object(updater.subprocess, 'Popen') as popen,
             ):
                 success = updater.download_and_install(
                     'https://github.com/example/app.exe',
@@ -279,7 +280,7 @@ class UpdaterTests(unittest.TestCase):
                 mock.patch.object(updater.tempfile, 'gettempdir', return_value=temp_dir),
                 mock.patch.object(updater, '_download_to_path', side_effect=fake_download),
                 mock.patch.object(updater, 'request_process_shutdown', return_value=True) as shutdown,
-                mock.patch.object(updater.subprocess, 'Popen'),
+                mock.patch.object(updater.subprocess, 'Popen') as popen,
             ):
                 success = updater.download_and_install(
                     'https://github.com/example/WirelessDeviceBatteryMonitor-v2.3.6.exe',
@@ -296,9 +297,26 @@ class UpdaterTests(unittest.TestCase):
                 reason='update',
                 skip_gui_pid=321,
             )
-            with open(os.path.join(temp_dir, 'mouse_battery_swap_456.cmd'), encoding='utf-8') as script:
-                script_text = script.read()
-            self.assertIn(f'start "" "{target_path}"', script_text)
+            launched = popen.call_args.args[0]
+            self.assertEqual(launched[:6], [
+                'powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand',
+            ])
+            script_text = base64.b64decode(launched[6]).decode('utf-16le')
+            self.assertIn(f"$targetPath = '{target_path}'", script_text)
+            self.assertIn('Start-Process -FilePath $targetPath', script_text)
+
+    def test_powershell_update_script_preserves_unicode_paths(self):
+        script = updater._build_swap_powershell_script(
+            exe_path=r'C:\用户\电量工具\旧版.exe',
+            target_exe_path=r'C:\用户\电量工具\新版.exe',
+            old_exe_path=r'C:\用户\电量工具\新版.exe.old',
+            new_exe_path=r'C:\用户\电量工具\新版.exe.new',
+            target_pid=123,
+            expected_size=456,
+        )
+        encoded = updater._encode_powershell_command(script)
+        self.assertEqual(base64.b64decode(encoded).decode('utf-16le'), script)
+        self.assertIn("$targetPath = 'C:\\用户\\电量工具\\新版.exe'", script)
 
     def test_rejects_unsafe_or_existing_release_target_before_download(self):
         with tempfile.TemporaryDirectory() as temp_dir:

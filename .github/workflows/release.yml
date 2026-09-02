@@ -97,6 +97,12 @@ jobs:
           pip install -r .private-requirements.txt
           pip install pyinstaller
 
+      - name: Run public shell and private core tests
+        run: |
+          $env:PYTHONDONTWRITEBYTECODE = "1"
+          python -m unittest discover -s tests -v
+          python -m unittest discover -s "$env:PRIVATE_CORE_CHECKOUT_PATH/tests" -v
+
       - name: Inject version from tag
         run: |
           if ("${{ github.ref_type }}" -eq "tag") {

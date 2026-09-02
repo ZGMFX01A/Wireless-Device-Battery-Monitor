@@ -8,6 +8,12 @@ import os
 import sys
 import json
 import logging
+import hashlib
+import subprocess
+import tempfile
+import threading
+import ctypes
+from contextlib import contextmanager
 import winreg
 
 import updater
@@ -58,6 +64,41 @@ REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 REG_NAME = "MouseBatteryMonitor"
 
 
+def _autostart_command(app_path: str = APP_PATH) -> str:
+    """返回可安全存入 Run 键的 Windows 命令行。"""
+    return subprocess.list2cmdline([app_path])
+
+
+_config_process_lock = threading.RLock()
+
+
+@contextmanager
+def _config_file_lock(config_file: str):
+    """串行化 tray 与 GUI 对同一配置文件的 read-modify-write。"""
+    with _config_process_lock:
+        if os.name != 'nt':
+            yield
+            return
+
+        lock_id = hashlib.sha256(os.path.abspath(config_file).encode('utf-8')).hexdigest()[:24]
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.CreateMutexW(None, False, f'Local\\MouseBatteryConfig_{lock_id}')
+        if not handle:
+            raise OSError('无法创建配置文件互斥体')
+        acquired = False
+        try:
+            result = kernel32.WaitForSingleObject(handle, 10_000)
+            # WAIT_OBJECT_0 / WAIT_ABANDONED 都意味着本线程已拥有 mutex。
+            if result not in (0, 0x80):
+                raise TimeoutError(f'等待配置文件锁超时或失败: {result}')
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                kernel32.ReleaseMutex(handle)
+            kernel32.CloseHandle(handle)
+
+
 class ConfigManager:
     """管理应用的用户配置和自启状态"""
 
@@ -65,8 +106,13 @@ class ConfigManager:
         # 启动时先清理上次热更新可能遗留的旧版执行文件被占用导致的残留
         updater.clean_old_version()
 
-        # 默认配置
-        self.config = {
+        self.config = self._default_config()
+        self.load()
+        self._refresh_autostart_path_if_needed()
+
+    @staticmethod
+    def _default_config() -> dict:
+        return {
             "low_battery_notify": 20, # 默认 20%
             "notified_levels": {}, # 记录每个鼠标上次被通知时的电量，防重复弹窗
             "auto_update": False, # 默认不自动更新
@@ -75,8 +121,51 @@ class ConfigManager:
             "tray_icon_priority": TRAY_ICON_PRIORITY_MOUSE_FIRST, # 托盘图标显示逻辑
             "ui_language": LANGUAGE_AUTO, # 界面语言策略：默认跟随系统语言，手动切换后写入显式覆盖值
         }
-        self.load()
-        self._refresh_autostart_path_if_needed()
+
+    def _load_unlocked(self):
+        """在已获得配置锁时从磁盘完整刷新内存配置。"""
+        config = self._default_config()
+        if not os.path.exists(CONFIG_FILE):
+            self.config = config
+            return
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError('配置文件根节点必须是对象')
+            config.update(data)
+            self.config = config
+        except Exception as e:
+            logger.error(f"读取配置异常: {e}")
+            # 损坏配置不能与旧内存状态混合，更不能在下次保存时把旧键写回。
+            self.config = config
+
+    def _save_unlocked(self):
+        """在已获得配置锁时以原子替换保存当前配置。"""
+        directory = os.path.dirname(CONFIG_FILE) or '.'
+        temp_path = ''
+        try:
+            fd, temp_path = tempfile.mkstemp(prefix='.config.', suffix='.tmp', dir=directory)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(self.config, f, indent=4, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, CONFIG_FILE)
+        except Exception as e:
+            logger.error(f"保存配置异常: {e}")
+            if temp_path:
+                try:
+                    os.remove(temp_path)
+                except FileNotFoundError:
+                    pass
+
+    def _mutate(self, mutator):
+        """执行不可拆分的 reload → mutate → atomic save。"""
+        with _config_file_lock(CONFIG_FILE):
+            self._load_unlocked()
+            result = mutator()
+            self._save_unlocked()
+            return result
 
     def _reload_from_disk(self):
         """跨进程读取最新配置。
@@ -102,15 +191,12 @@ class ConfigManager:
             logger.error(f"读取启动项错误: {e}")
             return
 
-        current_value = str(value).strip().strip('"')
-        current_norm = os.path.normcase(os.path.abspath(current_value))
-        app_norm = os.path.normcase(os.path.abspath(APP_PATH))
-        if current_norm == app_norm:
+        if str(value).strip() == _autostart_command(APP_PATH):
             return
 
         try:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_SET_VALUE)
-            winreg.SetValueEx(key, REG_NAME, 0, winreg.REG_SZ, APP_PATH)
+            winreg.SetValueEx(key, REG_NAME, 0, winreg.REG_SZ, _autostart_command(APP_PATH))
             winreg.CloseKey(key)
             logger.info(f"已同步开机自启路径到新版本程序: {APP_PATH}")
         except Exception as e:
@@ -118,21 +204,13 @@ class ConfigManager:
 
     def load(self):
         """读取配置文件"""
-        if os.path.exists(CONFIG_FILE):
-            try:
-                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    self.config.update(data)
-            except Exception as e:
-                logger.error(f"读取配置异常: {e}")
+        with _config_file_lock(CONFIG_FILE):
+            self._load_unlocked()
 
     def save(self):
         """写入配置文件"""
-        try:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.config, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"保存配置异常: {e}")
+        with _config_file_lock(CONFIG_FILE):
+            self._save_unlocked()
 
     @property
     def low_battery_notify(self) -> int:
@@ -141,10 +219,11 @@ class ConfigManager:
 
     @low_battery_notify.setter
     def low_battery_notify(self, val: int):
-        self.config["low_battery_notify"] = val
-        # 重置所有已经通知过的状态，即使用户修改了阈值，也能重新触发一次
-        self.config["notified_levels"] = {}
-        self.save()
+        def apply():
+            self.config["low_battery_notify"] = val
+            # 重置所有已经通知过的状态，即使用户修改了阈值，也能重新触发一次
+            self.config["notified_levels"] = {}
+        self._mutate(apply)
 
     @property
     def auto_update(self) -> bool:
@@ -153,8 +232,7 @@ class ConfigManager:
 
     @auto_update.setter
     def auto_update(self, val: bool):
-        self.config["auto_update"] = val
-        self.save()
+        self._mutate(lambda: self.config.__setitem__("auto_update", val))
 
     @property
     def keyboard_binding(self) -> dict | None:
@@ -188,8 +266,7 @@ class ConfigManager:
         tray 进程后续可用这些元数据重新回收真实接口，而不是让绑定永久失效。
         """
         if binding is None:
-            self.config["keyboard_binding"] = None
-            self.save()
+            self._mutate(lambda: self.config.__setitem__("keyboard_binding", None))
             return
 
         device_id = str(binding.get("device_id", "") or "").strip()
@@ -197,7 +274,7 @@ class ConfigManager:
             logger.warning("忽略空的键盘绑定配置")
             return
 
-        self.config["keyboard_binding"] = {
+        normalized = {
             "device_id": device_id,
             "vendor_id": int(binding.get("vendor_id", 0) or 0),
             "product_id": int(binding.get("product_id", 0) or 0),
@@ -206,7 +283,7 @@ class ConfigManager:
             "interface_number": int(binding.get("interface_number", -1) or -1),
             "product_name": str(binding.get("product_name", "") or ""),
         }
-        self.save()
+        self._mutate(lambda: self.config.__setitem__("keyboard_binding", normalized))
 
     @property
     def bluetooth_bindings(self) -> list[dict]:
@@ -236,26 +313,28 @@ class ConfigManager:
         if not device_id:
             logger.warning('忽略空的蓝牙设备绑定')
             return False
-        bindings = self.bluetooth_bindings
-        if any(item['device_id'] == device_id for item in bindings):
-            return False
-        bindings.append({
-            'device_id': device_id,
-            'name': str(binding.get('name', '') or '未知蓝牙设备'),
-        })
-        self.config['bluetooth_bindings'] = bindings
-        self.save()
-        return True
+        def apply():
+            bindings = self.bluetooth_bindings
+            if any(item['device_id'] == device_id for item in bindings):
+                return False
+            bindings.append({
+                'device_id': device_id,
+                'name': str(binding.get('name', '') or '未知蓝牙设备'),
+            })
+            self.config['bluetooth_bindings'] = bindings
+            return True
+        return self._mutate(apply)
 
     def remove_bluetooth_binding(self, device_id: str) -> bool:
         device_id = str(device_id or '').strip()
-        bindings = self.bluetooth_bindings
-        remaining = [item for item in bindings if item['device_id'] != device_id]
-        if len(remaining) == len(bindings):
-            return False
-        self.config['bluetooth_bindings'] = remaining
-        self.save()
-        return True
+        def apply():
+            bindings = self.bluetooth_bindings
+            remaining = [item for item in bindings if item['device_id'] != device_id]
+            if len(remaining) == len(bindings):
+                return False
+            self.config['bluetooth_bindings'] = remaining
+            return True
+        return self._mutate(apply)
 
     @property
     def tray_icon_priority(self) -> str:
@@ -276,8 +355,7 @@ class ConfigManager:
         if val not in TRAY_ICON_PRIORITY_VALUES:
             logger.warning(f"托盘图标优先级非法值: {val!r}")
             return
-        self.config["tray_icon_priority"] = val
-        self.save()
+        self._mutate(lambda: self.config.__setitem__("tray_icon_priority", val))
 
     @property
     def ui_language(self) -> str:
@@ -304,8 +382,7 @@ class ConfigManager:
         if normalized not in SUPPORTED_UI_LANGUAGE_VALUES:
             logger.warning(f"界面语言非法值: {val!r}")
             return
-        self.config["ui_language"] = normalized
-        self.save()
+        self._mutate(lambda: self.config.__setitem__("ui_language", normalized))
 
     @property
     def effective_ui_language(self) -> str:
@@ -319,7 +396,7 @@ class ConfigManager:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_READ)
             value, _ = winreg.QueryValueEx(key, REG_NAME)
             winreg.CloseKey(key)
-            return value == APP_PATH
+            return str(value).strip() == _autostart_command(APP_PATH)
         except FileNotFoundError:
             return False
         except Exception as e:
@@ -331,7 +408,7 @@ class ConfigManager:
         try:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_SET_VALUE)
             if enable:
-                winreg.SetValueEx(key, REG_NAME, 0, winreg.REG_SZ, APP_PATH)
+                winreg.SetValueEx(key, REG_NAME, 0, winreg.REG_SZ, _autostart_command(APP_PATH))
                 logger.info("已打开开机自启动")
             else:
                 try:
@@ -355,43 +432,31 @@ class ConfigManager:
         - last_notified 默认为 101，使首次跌穿阈值能正确触发
         - 仅在电量真正下降时才更新计数，避免回升/持平重复刷新
         """
-        threshold = self.low_battery_notify
-        if threshold == 0 or current_pct <= 0:
-            # 阈值关闭或读到无效应量，永不通知
-            return False
+        def apply():
+            threshold = self.config.get("low_battery_notify", 20)
+            if threshold == 0 or current_pct <= 0:
+                return False, False
 
-        notified_levels = self.config.setdefault("notified_levels", {})
-        last_notified = notified_levels.get(device_name, 101)
-
-        # 电量回升到安全水位以上，重置通知标记，下次跌穿时重新提醒
-        if current_pct > threshold:
-            if last_notified <= threshold:
+            notified_levels = self.config.setdefault("notified_levels", {})
+            last_notified = notified_levels.get(device_name, 101)
+            if current_pct > threshold:
+                if last_notified <= threshold:
+                    notified_levels[device_name] = current_pct
+                    return False, True
+                return False, False
+            if last_notified > threshold:
                 notified_levels[device_name] = current_pct
-                self.save()
-            return False
+                return True, True
+            if current_pct >= last_notified:
+                return False, False
+            if current_pct <= 5 or (last_notified - current_pct) >= 5:
+                notified_levels[device_name] = current_pct
+                return True, True
+            return False, False
 
-        # current_pct <= threshold 的告警区
-        if last_notified > threshold:
-            # 首次跌穿阈值，立即提醒
-            notified_levels[device_name] = current_pct
-            self.save()
-            return True
-
-        # 已在告警区，仅当电量进一步下降到更小区间才再次提醒
-        if current_pct >= last_notified:
-            # 电量未下降（回升或持平），不重复告警
-            return False
-
-        if current_pct <= 5:
-            # 极低电量每掉 1% 提醒一次
-            notified_levels[device_name] = current_pct
-            self.save()
-            return True
-
-        # 普通低电量每掉 5% 提醒一次
-        if (last_notified - current_pct) >= 5:
-            notified_levels[device_name] = current_pct
-            self.save()
-            return True
-
-        return False
+        with _config_file_lock(CONFIG_FILE):
+            self._load_unlocked()
+            should_show, changed = apply()
+            if changed:
+                self._save_unlocked()
+            return should_show

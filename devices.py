@@ -85,6 +85,11 @@ def get_device_command_path() -> str:
     return os.path.join(base, '.device_command.json')
 
 
+def get_device_command_queue_path() -> str:
+    """获取 GUI→tray 命令队列目录；保留旧单文件路径以兼容已启动的旧 GUI。"""
+    return f'{get_device_command_path()}.queue'
+
+
 def request_device_command(action: str, payload: Optional[dict] = None):
     """由 GUI 写入一次性命令文件，请求 tray 进程执行硬件相关动作。
 
@@ -93,9 +98,11 @@ def request_device_command(action: str, payload: Optional[dict] = None):
     - tray 进程负责真正执行 HID 枚举与电量探测
     从而保持项目既有的进程边界不被打破。
     """
-    command_file = get_device_command_path()
-    temp_file = f'{command_file}.{os.getpid()}.tmp'
     request_id = time.time_ns()
+    queue_dir = get_device_command_queue_path()
+    os.makedirs(queue_dir, exist_ok=True)
+    command_file = os.path.join(queue_dir, f'{request_id:020d}-{os.getpid()}.json')
+    temp_file = f'{command_file}.tmp'
     data = {
         'request_id': request_id,
         'action': action,
@@ -372,21 +379,21 @@ class DeviceManager:
         self._notify_update()
 
     def _bind_bluetooth(self, device_id: str, request_id: int = 0):
-        candidates = self.bluetooth_candidates or enumerate_bluetooth_candidates()
-        target = next((item for item in candidates if item.device_id == device_id), None)
-        if target is None:
-            raise ValueError('未找到对应的 Windows 已配对蓝牙设备。')
-        if any(item['device_id'] == device_id for item in self.config_manager.bluetooth_bindings):
-            raise ValueError('该蓝牙设备已经添加。')
-
-        with self._lock:
-            self._bluetooth_scan_state = 'binding'
-            self._bluetooth_scan_message = f'正在读取蓝牙设备电量：{target.name}'
-            self._bluetooth_request_id = request_id
-        self._notify_update()
         with self._io_lock:
+            candidates = self.bluetooth_candidates or enumerate_bluetooth_candidates()
+            target = next((item for item in candidates if item.device_id == device_id), None)
+            if target is None:
+                raise ValueError('未找到对应的 Windows 已配对蓝牙设备。')
+            if any(item['device_id'] == device_id for item in self.config_manager.bluetooth_bindings):
+                raise ValueError('该蓝牙设备已经添加。')
+
+            with self._lock:
+                self._bluetooth_scan_state = 'binding'
+                self._bluetooth_scan_message = f'正在读取蓝牙设备电量：{target.name}'
+                self._bluetooth_request_id = request_id
+            self._notify_update()
             snapshot = probe_bluetooth_candidate(target)
-        self.config_manager.add_bluetooth_binding(bluetooth_binding_from_candidate(target))
+            self.config_manager.add_bluetooth_binding(bluetooth_binding_from_candidate(target))
         with self._lock:
             self._bluetooth_devices.append(snapshot)
             self._bluetooth_scan_state = 'bound'
@@ -406,7 +413,8 @@ class DeviceManager:
         self._notify_update()
 
         try:
-            candidates = enumerate_keyboard_candidates()
+            with self._io_lock:
+                candidates = enumerate_keyboard_candidates()
         except Exception as e:
             # 候选枚举失败时必须显式落成 error 状态，
             # 否则 GUI 会一直停留在 loading，用户既看不到失败原因，也无法判断是否需要重试。
@@ -429,19 +437,18 @@ class DeviceManager:
 
     def _bind_keyboard(self, device_id: str):
         """保存指定键盘绑定，并立即刷新一份电量快照。"""
-        candidates = self.keyboard_candidates or enumerate_keyboard_candidates()
-        target = next((candidate for candidate in candidates if candidate.device_id == device_id), None)
-        if target is None:
-            logger.warning('未找到待绑定的键盘候选: %s', device_id)
-            with self._lock:
-                self._keyboard_scan_state = 'error'
-                self._keyboard_scan_message = '绑定失败：未找到对应的键盘设备'
-            self._notify_update()
-            return
-
-        self.config_manager.keyboard_binding = keyboard_binding_from_candidate(target)
-
         with self._io_lock:
+            candidates = self.keyboard_candidates or enumerate_keyboard_candidates()
+            target = next((candidate for candidate in candidates if candidate.device_id == device_id), None)
+            if target is None:
+                logger.warning('未找到待绑定的键盘候选: %s', device_id)
+                with self._lock:
+                    self._keyboard_scan_state = 'error'
+                    self._keyboard_scan_message = '绑定失败：未找到对应的键盘设备'
+                self._notify_update()
+                return
+
+            self.config_manager.keyboard_binding = keyboard_binding_from_candidate(target)
             self._refresh_keyboard_locked()
 
         with self._lock:
@@ -459,10 +466,29 @@ class DeviceManager:
         self._notify_update()
 
     def _consume_device_command(self):
-        """轮询并消费 GUI 写入的一次性命令文件。"""
-        command_file = get_device_command_path()
-        if not os.path.exists(command_file):
-            return
+        """按请求顺序消费 GUI 命令；兼容旧版的单文件命令。"""
+        command_files: list[str] = []
+        legacy_file = get_device_command_path()
+        if os.path.exists(legacy_file):
+            command_files.append(legacy_file)
+
+        queue_dir = get_device_command_queue_path()
+        try:
+            command_files.extend(
+                os.path.join(queue_dir, name)
+                for name in sorted(os.listdir(queue_dir))
+                if name.endswith('.json')
+            )
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.error('读取设备命令队列失败: %s', exc)
+
+        for command_file in command_files:
+            self._consume_device_command_file(command_file)
+
+    def _consume_device_command_file(self, command_file: str):
+        """读取并执行单个已经原子落盘的命令。"""
 
         try:
             with open(command_file, 'r', encoding='utf-8') as f:
