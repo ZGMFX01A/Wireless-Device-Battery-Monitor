@@ -37,6 +37,34 @@ TRAY_ICON_PRIORITY_VALUES = {
     TRAY_ICON_PRIORITY_LOWEST_BATTERY,
 }
 
+# 界面外观主题枚举值：支持自动跟随系统、明亮浅色、深色磨砂
+THEME_MODE_AUTO = "auto"
+THEME_MODE_LIGHT = "light"
+THEME_MODE_DARK = "dark"
+SUPPORTED_THEME_MODES = {
+    THEME_MODE_AUTO,
+    THEME_MODE_LIGHT,
+    THEME_MODE_DARK,
+}
+
+
+def is_windows_dark_mode() -> bool:
+    """检测 Windows 系统当前应用主题是否为深色模式。"""
+    if os.name != 'nt':
+        return False
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            0,
+            winreg.KEY_READ,
+        )
+        val, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        winreg.CloseKey(key)
+        return val == 0
+    except Exception:
+        return False
+
 def _read_version() -> str:
     """从 VERSION 文件读取版本号，兼容打包与源码环境"""
     if getattr(sys, 'frozen', False):
@@ -120,6 +148,7 @@ class ConfigManager:
             "bluetooth_bindings": [], # 多个标准 BLE Battery Service 设备绑定
             "tray_icon_priority": TRAY_ICON_PRIORITY_MOUSE_FIRST, # 托盘图标显示逻辑
             "ui_language": LANGUAGE_AUTO, # 界面语言策略：默认跟随系统语言，手动切换后写入显式覆盖值
+            "theme_mode": THEME_MODE_AUTO, # 界面外观风格：默认跟随系统，支持 light/dark 显式指定
         }
 
     def _load_unlocked(self):
@@ -389,6 +418,31 @@ class ConfigManager:
         """返回当前实际生效的界面语言。"""
         self._reload_from_disk()
         return resolve_ui_language(self.config.get("ui_language", LANGUAGE_AUTO))
+
+    @property
+    def theme_mode(self) -> str:
+        """返回当前设置的外观模式偏好（'auto' / 'light' / 'dark'）。"""
+        self._reload_from_disk()
+        val = str(self.config.get("theme_mode", THEME_MODE_AUTO) or "")
+        if val not in SUPPORTED_THEME_MODES:
+            return THEME_MODE_AUTO
+        return val
+
+    @theme_mode.setter
+    def theme_mode(self, val: str):
+        """保存外观模式偏好。"""
+        if val not in SUPPORTED_THEME_MODES:
+            logger.warning(f"界面外观模式非法值: {val!r}")
+            return
+        self._mutate(lambda: self.config.__setitem__("theme_mode", val))
+
+    @property
+    def effective_theme_mode(self) -> str:
+        """返回当前实际生效的主题模式（'light' 或 'dark'）。"""
+        mode = self.theme_mode
+        if mode == THEME_MODE_AUTO:
+            return THEME_MODE_DARK if is_windows_dark_mode() else THEME_MODE_LIGHT
+        return mode
 
     def check_autostart(self) -> bool:
         """检查是否已注册开机自启"""

@@ -37,6 +37,9 @@ from config import (
     TRAY_ICON_PRIORITY_MOUSE_FIRST,
     TRAY_ICON_PRIORITY_KEYBOARD_FIRST,
     TRAY_ICON_PRIORITY_LOWEST_BATTERY,
+    THEME_MODE_AUTO,
+    THEME_MODE_LIGHT,
+    THEME_MODE_DARK,
 )
 import updater
 from i18n import (
@@ -50,49 +53,118 @@ from i18n import (
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 颜色主题 — Light Minimal 设计系统
-# 目标：浅色、克制、工具感、科技感，不依赖深色和霓虹色制造氛围。
+# 颜色主题 — Apple Glass 玻璃拟态设计系统
+# 支持：明亮白霜玻璃 (Light Glass) 与 暗夜烟熏磨砂 (Dark Glass)
+# 特性：顶部受光微高光边框、柔和半透明表面与大羽化微弥散阴影
 # ============================================================
 
-COLORS = {
-    # —— 背景 / 表面 ——
-    'bg_app': '#F6F8FB',           # 窗口底色：柔和浅灰
-    'bg_card': '#FFFFFF',          # 主卡片：纯白
-    'bg_card_soft': '#F9FAFB',     # 次级卡片 / 输入背景
-    'bg_card_hover': '#F3F6FA',    # 卡片悬停
-    'bg_line': '#E5E7EB',          # 分割线 / 边框
-    'bg_line_soft': '#EEF2F7',     # 更轻的分割线
-    'bg_input': '#FFFFFF',         # 下拉框 / 输入框
+THEME_LIGHT = {
+    # —— 背景与纯净卡片表面 ——
+    'bg_app': '#F1F5F9',           # 窗口底色：纯净高级冷灰白
+    'bg_card': '#FFFFFF',          # 主卡片：纯净温润白
+    'bg_card_soft': '#F8FAFC',     # 次级表面 / 按钮 / 图标底
+    'bg_card_hover': '#FFFFFF',    # 悬停表面
+    'bg_card_offline': '#F8FAFC',  # 离线设备卡片：沉静纯净微灰
+    'bg_line': '#E2E8F0',          # 基础边框与分割线
+    'bg_line_soft': '#F1F5F9',     # 内部轻分割线
+    'glass_border_top': '#E2E8F0', # 统一精致边框
+    'glass_border_side': '#E2E8F0',
+    'bg_input': '#F8FAFC',         # 下拉框 / 输入框表面
+    'titlebar_hover': '#E2E8F0',   # 标题栏最小化悬停底色
+    'titlebar_close_hover': '#FEE2E2', # 标题栏关闭悬停底色
+    'titlebar_close_hover_fg': '#EF4444', # 标题栏关闭悬停文字
+
+    # —— 纯净轻量环境阴影体系 ——
+    'shadow_card': '#0F172A0A',    # 极轻柔环境微阴影（干净不脏）
+    'shadow_card_hover': '#0F172A14', # 悬浮时的加深阴影
 
     # —— 主强调色 ——
-    'accent_green': '#22C55E',     # 电量 / 开关 / 主操作
-    'accent_green_dark': '#16A34A',
-    'accent_green_soft': '#EAFBF1',
+    'accent_green': '#10B981',     # 苹果风格翡翠绿
+    'accent_green_dark': '#059669',
+    'accent_green_soft': '#E6FDF4',
 
     # —— 文本层级 ——
-    'text_primary': '#111827',
-    'text_secondary': '#64748B',
+    'text_primary': '#0F172A',
+    'text_secondary': '#475569',
     'text_dim': '#94A3B8',
 
     # —— 电量阶梯色 ——
-    'battery_full': '#22C55E',
+    'battery_full': '#10B981',
     'battery_good': '#65A30D',
     'battery_mid': '#EAB308',
     'battery_low': '#F97316',
-    'battery_critical': '#DC2626',
-    'charging': '#0EA5E9',
+    'battery_critical': '#EF4444',
+    'charging': '#06B6D4',
     'offline': '#94A3B8',
 
     # —— 语义色 ——
-    'destructive': '#DC2626',
+    'destructive': '#EF4444',
 
     # —— 品牌标识色 ——
     'logitech_blue': '#2563EB',
     'razer_green': '#16A34A',
 
-    # 作者信息高亮色：用于底部署名，提升浅色背景中的可见性。
+    'author_glow_blue': '#0284C7',
+}
+
+THEME_DARK = {
+    # —— 深色曜石高级表面 ——
+    'bg_app': '#0B0F17',           # 窗口底色：暗夜曜黑
+    'bg_card': '#161F2E',          # 主卡片：深空石墨灰
+    'bg_card_soft': '#1F2C40',     # 次级表面 / 按钮 / 图标底
+    'bg_card_hover': '#1D283A',    # 悬停表面
+    'bg_card_offline': '#111824',  # 离线设备卡片：沉静深邃黑
+    'bg_line': '#263447',          # 分割线 / 基础边框
+    'bg_line_soft': '#1B2533',     # 更轻的分割线
+    'glass_border_top': '#263447', # 统一精致边框
+    'glass_border_side': '#263447',
+    'bg_input': '#1F2C40',         # 下拉框 / 输入框表面
+    'titlebar_hover': '#1F2C40',   # 标题栏最小化悬停底色
+    'titlebar_close_hover': '#5C1D24', # 标题栏关闭悬停底色
+    'titlebar_close_hover_fg': '#FCA5A5', # 标题栏关闭悬停文字
+
+    # —— 弥散阴影体系 ——
+    'shadow_card': '#00000033',    # 静态深层阴影
+    'shadow_card_hover': '#00000059', # 悬浮加深阴影
+
+    # —— 主强调色 ——
+    'accent_green': '#10B981',
+    'accent_green_dark': '#059669',
+    'accent_green_soft': '#064E3B',
+
+    # —— 文本层级 ——
+    'text_primary': '#F8FAFC',
+    'text_secondary': '#94A3B8',
+    'text_dim': '#64748B',
+
+    # —— 电量阶梯色 ——
+    'battery_full': '#10B981',
+    'battery_good': '#84CC16',
+    'battery_mid': '#F59E0B',
+    'battery_low': '#F97316',
+    'battery_critical': '#EF4444',
+    'charging': '#22D3EE',
+    'offline': '#64748B',
+
+    # —— 语义色 ——
+    'destructive': '#EF4444',
+
+    # —— 品牌标识色 ——
+    'logitech_blue': '#3B82F6',
+    'razer_green': '#22C55E',
+
     'author_glow_blue': '#38BDF8',
 }
+
+# 当前激活色彩映射字典，支持动态切换
+COLORS = dict(THEME_LIGHT)
+
+
+def set_active_theme(theme_mode: str):
+    """切换全局激活的主题调色板"""
+    source = THEME_DARK if theme_mode == 'dark' else THEME_LIGHT
+    COLORS.clear()
+    COLORS.update(source)
 
 
 # 右侧控件列宽统一常量：右侧只放轻量控件，不再放宽大的下拉框。
@@ -146,23 +218,100 @@ def build_icon_box(icon_name, color: str = None, size: int = 38) -> ft.Container
     )
 
 
-def build_card(content, padding=None, margin=None) -> ft.Container:
-    """统一白色卡片样式：轻边框、轻阴影、较大圆角。"""
-    return ft.Container(
+def build_card(content, padding=None, margin=None, is_offline: bool = False) -> ft.Container:
+    """统一 macOS 高级质感卡片样式：
+    极简微边框、纯净温润表面、大羽化超轻量环境阴影，以及优雅悬停微浮动动效。
+    通过 alignment=CENTER 保证卡片横向自适应撑满父级，杜绝上下卡片宽度不一致。
+    """
+    card_bg = COLORS['bg_card_offline'] if is_offline else COLORS['bg_card']
+    card_hover_bg = COLORS['bg_card_offline'] if is_offline else COLORS['bg_card_hover']
+    card_shadow = COLORS['shadow_card']
+    card_shadow_hover = COLORS['shadow_card_hover']
+
+    card = ft.Container(
         content=content,
-        bgcolor=COLORS['bg_card'],
+        bgcolor=card_bg,
         border_radius=20,
         border=ft.Border.all(1, COLORS['bg_line']),
-        padding=padding or ft.Padding.symmetric(horizontal=24, vertical=22),
+        alignment=ft.Alignment.CENTER,
+        padding=padding or ft.Padding.symmetric(horizontal=24, vertical=20),
         margin=margin,
         shadow=ft.BoxShadow(
             spread_radius=0,
             blur_radius=18,
-            color='#0000000A',
-            offset=ft.Offset(0, 6),
+            color=card_shadow,
+            offset=ft.Offset(0, 4),
         ),
-        animate=ft.Animation(180, ft.AnimationCurve.EASE_OUT),
-        on_hover=lambda e: _on_card_hover(e),
+        animate_scale=ft.Animation(220, ft.AnimationCurve.EASE_OUT_CUBIC),
+        animate_offset=ft.Animation(220, ft.AnimationCurve.EASE_OUT_CUBIC),
+        animate=ft.Animation(220, ft.AnimationCurve.EASE_OUT_CUBIC),
+        scale=1.0,
+        offset=ft.Offset(0, 0),
+    )
+
+    def _on_hover(e: ft.ControlEvent):
+        if e.data == 'true':
+            card.scale = 1.018
+            card.offset = ft.Offset(0, -0.015)  # 悬停轻柔上浮约 3-4px
+            card.bgcolor = card_hover_bg
+            card.shadow = ft.BoxShadow(
+                spread_radius=0,
+                blur_radius=26,
+                color=card_shadow_hover,
+                offset=ft.Offset(0, 8),
+            )
+        else:
+            card.scale = 1.0
+            card.offset = ft.Offset(0, 0)
+            card.bgcolor = card_bg
+            card.shadow = ft.BoxShadow(
+                spread_radius=0,
+                blur_radius=18,
+                color=card_shadow,
+                offset=ft.Offset(0, 4),
+            )
+        try:
+            card.update()
+        except Exception:
+            pass
+
+    card.on_hover = _on_hover
+    return card
+
+
+def build_offline_status_block(app_ref: "MouseBatteryApp" = None, width: int = 132) -> ft.Column:
+    """构建离线 / 未连接设备紧凑状态区。
+    优化目标：去除冰冷突兀的大号 52px '--' 与空横条，改为温和精致的胶囊徽标与说明。
+    """
+    badge_text = app_ref._t('device.offline_badge') if app_ref else '未连接'
+    hint_text = app_ref._t('device.offline_no_data') if app_ref else '暂无电量数据'
+
+    return ft.Column(
+        controls=[
+            ft.Container(
+                content=ft.Text(
+                    badge_text,
+                    size=13,
+                    weight=ft.FontWeight.W_600,
+                    color=COLORS['offline'],
+                ),
+                padding=ft.Padding.symmetric(horizontal=14, vertical=6),
+                border_radius=12,
+                bgcolor=_alpha(COLORS['offline'], '18'),
+                border=ft.Border.all(1, _alpha(COLORS['offline'], '30')),
+                alignment=ft.Alignment.CENTER,
+            ),
+            ft.Text(
+                hint_text,
+                size=11,
+                color=COLORS['text_dim'],
+                text_align=ft.TextAlign.CENTER,
+            ),
+        ],
+        spacing=8,
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        alignment=ft.MainAxisAlignment.CENTER,
+        width=width,
     )
 
 
@@ -179,10 +328,9 @@ def build_battery_bar(percentage: int, charging: bool, width: int = 132) -> ft.C
 
     return ft.Column(
         controls=[
-            # 用单个 Text 展示百分比，避免数字和 % 在 Flet 布局中发生错位/丢失。
             ft.Text(
                 value_text,
-                size=52,
+                size=50,
                 weight=ft.FontWeight.W_700,
                 color=color,
                 text_align=ft.TextAlign.CENTER,
@@ -198,14 +346,26 @@ def build_battery_bar(percentage: int, charging: bool, width: int = 132) -> ft.C
                 ),
             ),
         ],
-        spacing=12,
+        spacing=10,
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         alignment=ft.MainAxisAlignment.CENTER,
     )
 
+
 def build_status_dot(color: str) -> ft.Container:
     """状态圆点：比彩色大标签更轻。"""
-    return ft.Container(width=8, height=8, border_radius=4, bgcolor=color)
+    return ft.Container(
+        width=8,
+        height=8,
+        border_radius=4,
+        bgcolor=color,
+        shadow=ft.BoxShadow(
+            spread_radius=0,
+            blur_radius=6,
+            color=_alpha(color, '66'),
+            offset=ft.Offset(0, 0),
+        ),
+    )
 
 
 def build_setting_row(icon_name, title: str, subtitle: str, trailing, icon_color: str = None) -> ft.Container:
@@ -232,15 +392,7 @@ def build_setting_row(icon_name, title: str, subtitle: str, trailing, icon_color
 
 
 def build_select_box(value: str, options: list[tuple[str, str]], on_change=None) -> ft.Container:
-    """构建与设置卡片右侧列宽一致的轻量选择器。
-
-    当前项目锁定的 Flet 版本对 [`ft.Dropdown`](gui.py:216) 支持不稳定，
-    继续使用下拉框会导致初始化报错或界面异常撑开。因此这里改成
-    「单框点击轮换选项」方案：
-    - 宽度仍严格使用 [`TRAILING_WIDTH`](gui.py:81)
-    - 不引入额外弹层，避免再触发版本兼容问题
-    - 每次点击在三种优先级间循环切换
-    """
+    """构建与设置卡片右侧列宽一致的轻量选择器。"""
     option_map = {key: label for key, label in options}
     option_keys = [key for key, _ in options]
     current_value = value if value in option_map else option_keys[0]
@@ -275,7 +427,6 @@ def build_select_box(value: str, options: list[tuple[str, str]], on_change=None)
         alignment=ft.Alignment.CENTER,
     )
 
-    # 通过给容器挂载 value，保持调用方仍可像读取普通控件一样获取当前值。
     control.value = current_value
 
     def handle_click(e):
@@ -308,10 +459,7 @@ def build_trailing_box(content, width: int = TRAILING_WIDTH) -> ft.Container:
 
 
 def build_threshold_stepper(value: int, off_label: str = '关闭', on_decrease=None, on_increase=None) -> ft.Container:
-    """
-    低电量阈值调节器。
-    用 - / 数值 / + 代替下拉框，避免下拉框在窄列里挤压文字，视觉上也更轻。
-    """
+    """低电量阈值调节器。"""
     label = off_label if value <= 0 else f'{value}%'
     return ft.Container(
         width=TRAILING_WIDTH,
@@ -347,25 +495,156 @@ def build_threshold_stepper(value: int, off_label: str = '关闭', on_decrease=N
         ),
     )
 
+
 def build_action_button(content, primary: bool = False, on_click=None, expand: bool = True):
-    """底部动作按钮：统一白底圆角矩形，避免主按钮过度抢眼或变成胶囊形。"""
-    return ft.Container(
+    """底部动作按钮：统一半透明磨砂质感，带明显的悬停上浮位移 (Offset Y -4px)、微缩放与加深弥散阴影反馈。"""
+    btn = ft.Container(
         content=content,
         expand=expand,
         height=48,
-        bgcolor=COLORS['bg_card'],
+        bgcolor=COLORS['bg_card_soft'],
         border=ft.Border.all(1, COLORS['bg_line']),
-        border_radius=12,
+        border_radius=14,
         alignment=ft.Alignment.CENTER,
-        # 按钮内部去掉偏重的左右留白，避免视觉上出现“文字整体偏左”的错觉。
         padding=ft.Padding.symmetric(horizontal=6, vertical=0),
         shadow=ft.BoxShadow(
             spread_radius=0,
-            blur_radius=10,
-            color='#00000008',
+            blur_radius=12,
+            color=COLORS['shadow_card'],
             offset=ft.Offset(0, 4),
         ),
+        animate_scale=ft.Animation(180, ft.AnimationCurve.EASE_OUT_CUBIC),
+        animate_offset=ft.Animation(180, ft.AnimationCurve.EASE_OUT_CUBIC),
+        animate=ft.Animation(180, ft.AnimationCurve.EASE_OUT_CUBIC),
+        scale=1.0,
+        offset=ft.Offset(0, 0),
         on_click=on_click,
+    )
+
+    def _on_btn_hover(e: ft.ControlEvent):
+        if e.data == 'true':
+            btn.scale = 1.04
+            btn.offset = ft.Offset(0, -0.04)  # 悬停明显上浮约 3-4px
+            btn.bgcolor = COLORS['bg_card_hover']
+            btn.shadow = ft.BoxShadow(
+                spread_radius=0,
+                blur_radius=20,
+                color=COLORS['shadow_card_hover'],
+                offset=ft.Offset(0, 8),
+            )
+        else:
+            btn.scale = 1.0
+            btn.offset = ft.Offset(0, 0)
+            btn.bgcolor = COLORS['bg_card_soft']
+            btn.shadow = ft.BoxShadow(
+                spread_radius=0,
+                blur_radius=12,
+                color=COLORS['shadow_card'],
+                offset=ft.Offset(0, 4),
+            )
+        try:
+            btn.update()
+        except Exception:
+            pass
+
+    btn.on_hover = _on_btn_hover
+    return btn
+
+
+def build_custom_titlebar(page: ft.Page, title: str, app_ref: "MouseBatteryApp" = None) -> ft.Container:
+    """构建沉浸式无边框标题栏：全栏可平滑拖拽移动，右侧提供极简最小化与关闭按钮。"""
+    # 最小化按钮
+    min_icon = ft.Icon(ft.Icons.REMOVE, size=15, color=COLORS['text_secondary'])
+    min_btn = ft.Container(
+        content=min_icon,
+        width=38,
+        height=32,
+        border_radius=8,
+        alignment=ft.Alignment.CENTER,
+        animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
+        on_click=lambda _: setattr(page.window, 'minimized', True),
+    )
+
+    def _on_min_hover(e):
+        min_btn.bgcolor = COLORS['titlebar_hover'] if e.data == 'true' else None
+        try:
+            min_btn.update()
+        except Exception:
+            pass
+    min_btn.on_hover = _on_min_hover
+
+    # 关闭按钮（悬停柔和浅红反馈）
+    close_icon = ft.Icon(ft.Icons.CLOSE, size=15, color=COLORS['text_secondary'])
+    close_btn = ft.Container(
+        content=close_icon,
+        width=38,
+        height=32,
+        border_radius=8,
+        alignment=ft.Alignment.CENTER,
+        animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
+        on_click=lambda _: page.window.close(),
+    )
+
+    def _on_close_hover(e):
+        if e.data == 'true':
+            close_btn.bgcolor = COLORS['titlebar_close_hover']
+            close_icon.color = COLORS['titlebar_close_hover_fg']
+        else:
+            close_btn.bgcolor = None
+            close_icon.color = COLORS['text_secondary']
+        try:
+            close_btn.update()
+        except Exception:
+            pass
+    close_btn.on_hover = _on_close_hover
+
+    # 左侧微小品牌指示灯 + 标题
+    status_dot = ft.Container(
+        width=8,
+        height=8,
+        border_radius=4,
+        bgcolor=COLORS['accent_green'],
+        shadow=ft.BoxShadow(
+            spread_radius=0,
+            blur_radius=8,
+            color=_alpha(COLORS['accent_green'], '80'),
+            offset=ft.Offset(0, 0),
+        ),
+    )
+    title_text = ft.Text(
+        title,
+        size=12,
+        weight=ft.FontWeight.W_600,
+        color=COLORS['text_secondary'],
+    )
+    version_text = ft.Text(
+        f'v{APP_VERSION}' if not str(APP_VERSION).startswith('v') else str(APP_VERSION),
+        size=11,
+        weight=ft.FontWeight.NORMAL,
+        color=COLORS['text_dim'],
+    )
+
+    drag_content = ft.Row(
+        controls=[
+            ft.Row(controls=[status_dot, title_text, version_text], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Container(expand=True),
+        ],
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+    # WindowDragArea 使得整个标题栏除按钮外均可拖拽
+    drag_area = ft.WindowDragArea(content=drag_content, expand=True)
+
+    return ft.Container(
+        content=ft.Row(
+            controls=[
+                drag_area,
+                ft.Row(controls=[min_btn, close_btn], spacing=2),
+            ],
+            spacing=0,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+        height=36,
+        padding=ft.Padding.only(left=18, right=10, top=4, bottom=0),
     )
 
 # ============================================================
@@ -443,12 +722,19 @@ def build_mouse_card(mouse: MouseInfo, app_ref: "MouseBatteryApp" = None) -> ft.
         expand=True,
     )
 
+    is_offline = (not mouse.online) or (mouse.percentage < 0)
+    left_block = (
+        build_offline_status_block(app_ref=app_ref, width=132)
+        if is_offline
+        else build_battery_bar(mouse.percentage, mouse.charging, width=132)
+    )
+
     return build_card(
         content=ft.Row(
             controls=[
                 # 当前行按 4:7 分配：电量约 36%，设备详情约 64%。
                 ft.Container(
-                    content=build_battery_bar(mouse.percentage, mouse.charging, width=132),
+                    content=left_block,
                     expand=4,
                     alignment=ft.Alignment.CENTER,
                 ),
@@ -465,12 +751,15 @@ def build_mouse_card(mouse: MouseInfo, app_ref: "MouseBatteryApp" = None) -> ft.
         ),
         padding=ft.Padding.symmetric(horizontal=26, vertical=18),
         margin=ft.Margin.only(bottom=8),
+        is_offline=is_offline,
     )
 
 
 def build_keyboard_card(keyboard: KeyboardInfo, on_remove=None, app_ref: "MouseBatteryApp" = None) -> ft.Container:
-    """构建键盘设备信息卡片，沿用鼠标卡片版式保持界面一致性。"""
-    if not keyboard.online:
+    """构建键盘设备信息卡片，沿用统一 Apple 玻璃拟态版式。"""
+    is_offline = (not keyboard.online) or (keyboard.percentage < 0)
+
+    if is_offline:
         dot_color = COLORS['offline']
     elif keyboard.charging:
         dot_color = COLORS['charging']
@@ -542,6 +831,12 @@ def build_keyboard_card(keyboard: KeyboardInfo, on_remove=None, app_ref: "MouseB
         on_click=on_remove,
     )
 
+    left_block = (
+        build_offline_status_block(app_ref=app_ref, width=132)
+        if is_offline
+        else build_battery_bar(keyboard.percentage, keyboard.charging, width=132)
+    )
+
     return build_card(
         content=ft.Column(
             controls=[
@@ -553,7 +848,7 @@ def build_keyboard_card(keyboard: KeyboardInfo, on_remove=None, app_ref: "MouseB
                 ft.Row(
                     controls=[
                         ft.Container(
-                            content=build_battery_bar(keyboard.percentage, keyboard.charging, width=132),
+                            content=left_block,
                             expand=4,
                             alignment=ft.Alignment.CENTER,
                         ),
@@ -573,20 +868,8 @@ def build_keyboard_card(keyboard: KeyboardInfo, on_remove=None, app_ref: "MouseB
         ),
         padding=ft.Padding.symmetric(horizontal=26, vertical=18),
         margin=ft.Margin.only(bottom=8),
+        is_offline=is_offline,
     )
-
-
-def _on_card_hover(e: ft.ControlEvent):
-    """卡片悬停效果：浅色界面只做非常轻的背景变化，不抢主要信息。"""
-    container = e.control
-    if e.data == 'true':
-        container.bgcolor = COLORS['bg_card_hover']
-    else:
-        container.bgcolor = COLORS['bg_card']
-    try:
-        container.update()
-    except Exception:
-        pass
 
 
 # ============================================================
@@ -603,12 +886,28 @@ def build_empty_state(title: str = '未发现鼠标设备',
     避免不同分支各自拼文案导致界面反馈风格不一致。
     """
     icon_badge = ft.Container(
-        content=ft.Icon(icon_name, size=42, color=COLORS['text_secondary']),
+        content=ft.Icon(
+            icon_name,
+            size=40,
+            color=COLORS['text_secondary'],
+            animate_rotation=ft.Animation(800, ft.AnimationCurve.EASE_IN_OUT_CUBIC),
+        ),
         width=84,
         height=84,
-        border_radius=24,
+        border_radius=26,
         bgcolor=COLORS['bg_card_soft'],
-        border=ft.Border.all(1, COLORS['bg_line']),
+        border=ft.Border(
+            top=ft.BorderSide(1.5, COLORS['glass_border_top']),
+            bottom=ft.BorderSide(1.0, COLORS['glass_border_side']),
+            left=ft.BorderSide(1.0, COLORS['glass_border_side']),
+            right=ft.BorderSide(1.0, COLORS['glass_border_side']),
+        ),
+        shadow=ft.BoxShadow(
+            spread_radius=0,
+            blur_radius=16,
+            color=COLORS['shadow_card'],
+            offset=ft.Offset(0, 4),
+        ),
         alignment=ft.Alignment.CENTER,
     )
     return build_card(
@@ -632,7 +931,7 @@ def build_empty_state(title: str = '未发现鼠标设备',
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=12,
         ),
-        padding=ft.Padding.symmetric(vertical=46, horizontal=30),
+        padding=ft.Padding.symmetric(vertical=32, horizontal=28),
         margin=ft.Margin.only(bottom=8),
     )
 
@@ -670,6 +969,7 @@ class MouseBatteryApp:
         self.add_bluetooth_btn_row: Optional[ft.Row] = None
         self.notify_threshold_control: Optional[ft.Container] = None
         self.tray_icon_priority_control: Optional[ft.Container] = None
+        self.theme_control: Optional[ft.Container] = None
         self.status_text: Optional[ft.Text] = None
         self.auto_switch: Optional[ft.Switch] = None
         self._keyboard_dialog: Optional[ft.AlertDialog] = None
@@ -739,6 +1039,7 @@ class MouseBatteryApp:
         self.add_bluetooth_btn_row = None
         self.notify_threshold_control = None
         self.tray_icon_priority_control = None
+        self.theme_control = None
         self.status_text = None
         self.auto_switch = None
         self._keyboard_dialog = None
@@ -754,6 +1055,16 @@ class MouseBatteryApp:
 
     def _on_autoupdate_toggle(self, e):
         self.config_manager.auto_update = e.control.value
+
+    def _on_theme_mode_change(self, mode: str):
+        """用户切换外观风格（跟随系统 / 浅色玻璃 / 暗夜磨砂）"""
+        self.config_manager.theme_mode = mode
+        effective_theme = self.config_manager.effective_theme_mode
+        set_active_theme(effective_theme)
+        if self.page:
+            self.page.theme_mode = ft.ThemeMode.DARK if effective_theme == 'dark' else ft.ThemeMode.LIGHT
+            self.page.bgcolor = COLORS['bg_app']
+        self._rebuild_page()
 
     def _on_language_toggle(self, e):
         """切换中英界面，并持久化为显式语言偏好。"""
@@ -796,11 +1107,11 @@ class MouseBatteryApp:
         if disabled:
             color = self._disabled_color
             btn_row.controls[0] = ft.Icon(icon_default, size=18, color=color)
-            btn_row.controls[1] = ft.Text(label_default, size=14, weight=ft.FontWeight.W_500, color=color)
+            btn_row.controls[1] = ft.Text(label_default, size=14, weight=ft.FontWeight.NORMAL, color=color)
         else:
             color = COLORS['text_primary']
             btn_row.controls[0] = ft.Icon(icon_default, size=18, color=color)
-            btn_row.controls[1] = ft.Text(label_default, size=14, weight=ft.FontWeight.W_500, color=color)
+            btn_row.controls[1] = ft.Text(label_default, size=14, weight=ft.FontWeight.NORMAL, color=color)
 
     def _set_view_state(self, state: str, message: str = ''):
         """记录当前界面状态。
@@ -1521,14 +1832,13 @@ class MouseBatteryApp:
                     render_state()
                     success = False
                 finally:
-                    if success:
-                        # 正常关闭 Flet 桌面运行时，确保其子进程先释放 PyInstaller
-                        # onefile 的共享 _MEI 目录；不要在下载线程里用 os._exit() 硬退。
-                        if self.page:
-                            await self.page.window.close()
-                        return
-                    dialog.actions[1].disabled = False
-                    self._safe_update()
+                    if not success:
+                        dialog.actions[1].disabled = False
+                        self._safe_update()
+                if success:
+                    if self.page:
+                        await self.page.window.close()
+                    return
 
             self.page.run_task(worker)
 
@@ -1559,12 +1869,18 @@ class MouseBatteryApp:
         return dialog
 
     def _make_btn_content(self, icon_name, label: str, color: str = None) -> ft.Row:
-        """创建按钮内部内容（icon + text）。"""
+        """创建按钮内部内容（icon + text），图标支持 360 度平滑回旋动效。"""
         text_color = color or COLORS['text_primary']
         return ft.Row(
             controls=[
-                ft.Icon(icon_name, size=18, color=text_color),
-                ft.Text(label, size=14, weight=ft.FontWeight.W_500, color=text_color),
+                ft.Icon(
+                    icon_name,
+                    size=18,
+                    color=text_color,
+                    rotate=0,
+                    animate_rotation=ft.Animation(600, ft.AnimationCurve.EASE_IN_OUT_CUBIC),
+                ),
+                ft.Text(label, size=14, weight=ft.FontWeight.NORMAL, color=text_color),
             ],
             spacing=8,
             tight=True,
@@ -1572,28 +1888,44 @@ class MouseBatteryApp:
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
+    def _spin_btn_icon(self, btn_row: Optional[ft.Row]):
+        """触发按钮图标平滑旋转 360 度明显动效。"""
+        if btn_row and len(btn_row.controls) > 0:
+            icon = btn_row.controls[0]
+            if isinstance(icon, ft.Icon):
+                icon.rotate = (getattr(icon, 'rotate', 0) or 0) + 6.283185307179586
+                try:
+                    icon.update()
+                except Exception:
+                    pass
+
     def build(self, page: ft.Page, initial_scan: bool = True, auto_refresh_enabled: bool = True):
         """
-        构建主界面（浅色极简风格）。
-        从上到下：头部 → 电量卡片 → 设置卡片 → 操作按钮 → 设备状态栏。
+        构建主界面（Apple 玻璃拟态设计系统）。
+        从上到下：沉浸式标题栏 → 头部 → 电量卡片 → 设置卡片 → 操作按钮 → 设备状态栏。
         """
         self.page = page
 
-        # —— 窗口配置 ——
+        # —— 应用外观主题 ——
+        effective_theme = self.config_manager.effective_theme_mode
+        set_active_theme(effective_theme)
+
+        # —— 沉浸式无边框窗口配置 ——
         page.title = self._t('app.window_title')
         ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app.ico')
         if os.path.exists(ico_path):
             page.window.icon = ico_path
         page.window.width = 520
-        # 增加默认高度，并配合滚动容器，避免用户首次打开时看不到底部区域。
-        page.window.height = 860
+        page.window.height = 880
         page.window.min_width = 460
-        page.window.min_height = 780
+        page.window.min_height = 760
+        page.window.title_bar_hidden = True
+        page.window.title_bar_buttons_hidden = True
         page.bgcolor = COLORS['bg_app']
         page.padding = 0
-        page.theme_mode = ft.ThemeMode.LIGHT
+        page.theme_mode = ft.ThemeMode.DARK if effective_theme == 'dark' else ft.ThemeMode.LIGHT
         page.theme = ft.Theme(
-            font_family='Segoe UI',
+            font_family='Microsoft YaHei UI',
             color_scheme=ft.ColorScheme(
                 primary=COLORS['accent_green'],
                 on_primary='#FFFFFF',
@@ -1643,7 +1975,8 @@ class MouseBatteryApp:
         # 设备卡片列表。通常只有一个设备，但保留多设备扩展能力。
         self.card_list = ft.Column(
             controls=[],
-            spacing=0,
+            spacing=8,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
 
         # 状态文本（底部状态栏左侧的设备计数）
@@ -1732,11 +2065,28 @@ class MouseBatteryApp:
             on_change=self._on_tray_icon_priority_change,
         )
 
+        theme_options = [
+            (THEME_MODE_AUTO, self._t('settings.theme.auto')),
+            (THEME_MODE_LIGHT, self._t('settings.theme.light')),
+            (THEME_MODE_DARK, self._t('settings.theme.dark')),
+        ]
+        self.theme_control = build_select_box(
+            self.config_manager.theme_mode,
+            theme_options,
+            on_change=self._on_theme_mode_change,
+        )
+
         settings_card = build_card(
             content=ft.Column(
                 controls=[
                     settings_title,
                     ft.Container(height=1, bgcolor=COLORS['bg_line'], margin=ft.Margin.only(top=6, bottom=4)),
+                    build_setting_row(
+                        ft.Icons.PALETTE_OUTLINED,
+                        self._t('settings.theme.title'),
+                        self._t('settings.theme.subtitle'),
+                        build_trailing_box(self.theme_control),
+                    ),
                     build_setting_row(
                         ft.Icons.POWER_SETTINGS_NEW,
                         self._t('settings.autostart.title'),
@@ -1745,7 +2095,7 @@ class MouseBatteryApp:
                     ),
                     build_setting_row(
                         ft.Icons.SYNC,
-                        self._t('settings.auto_update.title', version=APP_VERSION),
+                        self._t('settings.auto_update.title'),
                         self._t('settings.auto_update.subtitle'),
                         build_trailing_box(auto_update_switch),
                     ),
@@ -1839,7 +2189,8 @@ class MouseBatteryApp:
                     action_row,
                 ],
                 spacing=10,
-                scroll=ft.ScrollMode.AUTO,
+                scroll=ft.ScrollMode.HIDDEN,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                 expand=True,
             ),
             padding=ft.Padding.only(left=28, right=28, bottom=10),
@@ -1854,9 +2205,12 @@ class MouseBatteryApp:
             padding=ft.Padding.only(left=28, right=28, bottom=12),
         )
 
+        custom_titlebar = build_custom_titlebar(page, self._t('app.window_title'), app_ref=self)
+
         page.add(
             ft.Column(
                 controls=[
+                    custom_titlebar,
                     header,
                     main_content,
                     footer,
@@ -1865,6 +2219,18 @@ class MouseBatteryApp:
                 spacing=0,
             )
         )
+
+        page.window.visible = True
+        page.window.focused = True
+
+        async def _activate_window():
+            try:
+                await page.window.center()
+                await page.window.to_front()
+            except Exception:
+                pass
+
+        page.run_task(_activate_window)
 
         if initial_scan:
             # 首次扫描
@@ -1878,7 +2244,7 @@ class MouseBatteryApp:
         if btn_row and len(btn_row.controls) >= 2:
             color = COLORS['text_primary']
             btn_row.controls[0] = ft.Icon(icon_name, size=18, color=color)
-            btn_row.controls[1] = ft.Text(label, size=14, weight=ft.FontWeight.W_500, color=color)
+            btn_row.controls[1] = ft.Text(label, size=14, weight=ft.FontWeight.NORMAL, color=color)
 
     def _start_scan(self):
         """后台扫描设备。
@@ -1966,6 +2332,7 @@ class MouseBatteryApp:
         self._safe_update()
 
     def _on_scan_click(self, e):
+        self._spin_btn_icon(self.scan_btn_row)
         self._start_scan()
 
     def _on_refresh_click(self, e):
@@ -1975,6 +2342,7 @@ class MouseBatteryApp:
         因为 refresh_only 失败并不会触发 _refresh_ui（_notify_update 仍会回调，
         但回调内若抛异常按钮就不可恢复），这里兜底处理。
         """
+        self._spin_btn_icon(self.refresh_btn_row)
         if self._refresh_busy or self._scan_busy:
             return
         self._refresh_busy = True

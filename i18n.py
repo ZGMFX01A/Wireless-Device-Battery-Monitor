@@ -87,8 +87,8 @@ _TRANSLATIONS = {
         LANGUAGE_EN_US: 'Start with Windows and keep running quietly in the background',
     },
     'settings.auto_update.title': {
-        LANGUAGE_ZH_CN: '自动检查更新 · 当前 {version}',
-        LANGUAGE_EN_US: 'Auto Update Check · Current {version}',
+        LANGUAGE_ZH_CN: '自动检查更新',
+        LANGUAGE_EN_US: 'Auto Update Check',
     },
     'settings.auto_update.subtitle': {
         LANGUAGE_ZH_CN: '启动时自动下载新版本并静默升级',
@@ -125,6 +125,38 @@ _TRANSLATIONS = {
     'settings.off': {
         LANGUAGE_ZH_CN: '关闭',
         LANGUAGE_EN_US: 'Off',
+    },
+    'settings.theme.title': {
+        LANGUAGE_ZH_CN: '外观风格',
+        LANGUAGE_EN_US: 'Appearance',
+    },
+    'settings.theme.subtitle': {
+        LANGUAGE_ZH_CN: '选择浅色玻璃、暗夜磨砂或跟随系统',
+        LANGUAGE_EN_US: 'Choose Light Glass, Dark Smoked Glass, or System',
+    },
+    'settings.theme.auto': {
+        LANGUAGE_ZH_CN: '跟随系统',
+        LANGUAGE_EN_US: 'System',
+    },
+    'settings.theme.light': {
+        LANGUAGE_ZH_CN: '浅色玻璃',
+        LANGUAGE_EN_US: 'Light Glass',
+    },
+    'settings.theme.dark': {
+        LANGUAGE_ZH_CN: '暗夜磨砂',
+        LANGUAGE_EN_US: 'Dark Glass',
+    },
+    'device.offline_badge': {
+        LANGUAGE_ZH_CN: '未连接',
+        LANGUAGE_EN_US: 'Offline',
+    },
+    'device.offline_hint': {
+        LANGUAGE_ZH_CN: '设备离线或未配对，请检查电源与连接',
+        LANGUAGE_EN_US: 'Device offline or unpaired, check power & connection',
+    },
+    'device.offline_no_data': {
+        LANGUAGE_ZH_CN: '暂无电量数据',
+        LANGUAGE_EN_US: 'No Data',
     },
     'status.auto_refresh': {
         LANGUAGE_ZH_CN: '自动刷新',
