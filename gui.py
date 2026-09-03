@@ -173,8 +173,9 @@ PROJECT_HOME_URL = 'https://github.com/ZGMFX01A/mouse-battery/'
 
 
 def _alpha(hex_color: str, alpha_hex: str) -> str:
-    """给 6 位 HEX 颜色追加透明度，便于保持 Flet 颜色写法统一。"""
-    return hex_color + alpha_hex
+    """给 6 位 HEX 颜色追加透明度：Flutter 规范为 #AARRGGBB（前两位为透明度 Alpha）。"""
+    raw = hex_color.lstrip('#')
+    return f'#{alpha_hex}{raw}'
 
 
 def get_battery_color(percentage: int, charging: bool) -> str:
@@ -291,14 +292,14 @@ def build_offline_status_block(app_ref: "MouseBatteryApp" = None, width: int = 1
             ft.Container(
                 content=ft.Text(
                     badge_text,
-                    size=13,
-                    weight=ft.FontWeight.W_600,
-                    color=COLORS['offline'],
+                    size=12,
+                    weight=ft.FontWeight.NORMAL,
+                    color=COLORS['text_secondary'],
                 ),
-                padding=ft.Padding.symmetric(horizontal=14, vertical=6),
-                border_radius=12,
-                bgcolor=_alpha(COLORS['offline'], '18'),
-                border=ft.Border.all(1, _alpha(COLORS['offline'], '30')),
+                padding=ft.Padding.symmetric(horizontal=14, vertical=5),
+                border_radius=10,
+                bgcolor=COLORS['bg_card_soft'],
+                border=ft.Border.all(1, COLORS['bg_line']),
                 alignment=ft.Alignment.CENTER,
             ),
             ft.Text(
@@ -377,7 +378,7 @@ def build_setting_row(icon_name, title: str, subtitle: str, trailing, icon_color
                 build_icon_box(icon_name, color=icon_color),
                 ft.Column(
                     controls=[
-                        ft.Text(title, size=15, weight=ft.FontWeight.W_600, color=COLORS['text_primary']),
+                        ft.Text(title, size=14, weight=ft.FontWeight.NORMAL, color=COLORS['text_primary']),
                         ft.Text(subtitle, size=12, color=COLORS['text_secondary']),
                     ],
                     spacing=3,
@@ -400,7 +401,7 @@ def build_select_box(value: str, options: list[tuple[str, str]], on_change=None)
     label_text = ft.Text(
         option_map[current_value],
         size=12,
-        weight=ft.FontWeight.W_600,
+        weight=ft.FontWeight.NORMAL,
         color=COLORS['text_primary'],
         text_align=ft.TextAlign.CENTER,
         max_lines=2,
@@ -477,7 +478,7 @@ def build_threshold_stepper(value: int, off_label: str = '关闭', on_decrease=N
                     on_click=on_decrease,
                 ),
                 ft.Container(
-                    content=ft.Text(label, size=13, weight=ft.FontWeight.W_600, color=COLORS['text_primary'], text_align=ft.TextAlign.CENTER),
+                    content=ft.Text(label, size=13, weight=ft.FontWeight.NORMAL, color=COLORS['text_primary'], text_align=ft.TextAlign.CENTER),
                     width=38,
                     alignment=ft.Alignment.CENTER,
                     expand=True,
@@ -573,6 +574,16 @@ def build_custom_titlebar(page: ft.Page, title: str, app_ref: "MouseBatteryApp" 
             pass
     min_btn.on_hover = _on_min_hover
 
+    def _on_close_click(e):
+        try:
+            page.run_task(page.window.close)
+        except Exception:
+            pass
+        try:
+            page.window.destroy()
+        except Exception:
+            pass
+
     # 关闭按钮（悬停柔和浅红反馈）
     close_icon = ft.Icon(ft.Icons.CLOSE, size=15, color=COLORS['text_secondary'])
     close_btn = ft.Container(
@@ -582,7 +593,7 @@ def build_custom_titlebar(page: ft.Page, title: str, app_ref: "MouseBatteryApp" 
         border_radius=8,
         alignment=ft.Alignment.CENTER,
         animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
-        on_click=lambda _: page.window.close(),
+        on_click=_on_close_click,
     )
 
     def _on_close_hover(e):
@@ -614,7 +625,7 @@ def build_custom_titlebar(page: ft.Page, title: str, app_ref: "MouseBatteryApp" 
     title_text = ft.Text(
         title,
         size=12,
-        weight=ft.FontWeight.W_600,
+        weight=ft.FontWeight.NORMAL,
         color=COLORS['text_secondary'],
     )
     version_text = ft.Text(
@@ -687,10 +698,10 @@ def build_mouse_card(mouse: MouseInfo, app_ref: "MouseBatteryApp" = None) -> ft.
         content=ft.Text(
             brand_text,
             size=12,
-            weight=ft.FontWeight.W_600,
+            weight=ft.FontWeight.NORMAL,
             color=brand_color,
         ),
-        padding=ft.Padding.symmetric(horizontal=12, vertical=5),
+        padding=ft.Padding.symmetric(horizontal=12, vertical=4),
         border_radius=14,
         bgcolor=_alpha(brand_color, '10'),
         border=ft.Border.all(1, _alpha(brand_color, '20')),
@@ -701,8 +712,8 @@ def build_mouse_card(mouse: MouseInfo, app_ref: "MouseBatteryApp" = None) -> ft.
             brand_badge,
             ft.Text(
                 name_text,
-                size=22,
-                weight=ft.FontWeight.W_700,
+                size=20,
+                weight=ft.FontWeight.NORMAL,
                 color=COLORS['text_primary'],
                 max_lines=2,
                 overflow=ft.TextOverflow.ELLIPSIS,
@@ -785,10 +796,10 @@ def build_keyboard_card(keyboard: KeyboardInfo, on_remove=None, app_ref: "MouseB
         content=ft.Text(
             brand_text,
             size=12,
-            weight=ft.FontWeight.W_600,
+            weight=ft.FontWeight.NORMAL,
             color=brand_color,
         ),
-        padding=ft.Padding.symmetric(horizontal=12, vertical=5),
+        padding=ft.Padding.symmetric(horizontal=12, vertical=4),
         border_radius=14,
         bgcolor=_alpha(brand_color, '10'),
         border=ft.Border.all(1, _alpha(brand_color, '20')),
@@ -799,8 +810,8 @@ def build_keyboard_card(keyboard: KeyboardInfo, on_remove=None, app_ref: "MouseB
             brand_badge,
             ft.Text(
                 name_text,
-                size=22,
-                weight=ft.FontWeight.W_700,
+                size=20,
+                weight=ft.FontWeight.NORMAL,
                 color=COLORS['text_primary'],
                 max_lines=2,
                 overflow=ft.TextOverflow.ELLIPSIS,
@@ -1959,7 +1970,7 @@ class MouseBatteryApp:
                     header_icon,
                     ft.Column(
                         controls=[
-                            ft.Text(self._t('app.header_title'), size=24, weight=ft.FontWeight.W_700, color=COLORS['text_primary']),
+                            ft.Text(self._t('app.header_title'), size=22, weight=ft.FontWeight.W_600, color=COLORS['text_primary']),
                             ft.Text(self._t('app.header_subtitle'), size=14, color=COLORS['text_secondary']),
                         ],
                         spacing=6,
@@ -2027,8 +2038,8 @@ class MouseBatteryApp:
         # ========= 设置面板 =========
         settings_title = ft.Row(
             controls=[
-                ft.Icon(ft.Icons.SETTINGS_OUTLINED, color=COLORS['text_secondary'], size=24),
-                ft.Text(self._t('settings.title'), size=20, weight=ft.FontWeight.W_700, color=COLORS['text_primary']),
+                ft.Icon(ft.Icons.SETTINGS_OUTLINED, color=COLORS['text_secondary'], size=22),
+                ft.Text(self._t('settings.title'), size=18, weight=ft.FontWeight.W_600, color=COLORS['text_primary']),
                 ft.Container(expand=True),
                 language_toggle,
             ],
