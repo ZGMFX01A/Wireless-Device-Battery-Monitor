@@ -1,7 +1,7 @@
 {
   "distribution_name": "mouse-battery-core",
   "import_name": "mouse_battery_core",
-  "ref": "06e02b3ec27f93b779c901521e1e511cac632659",
+  "ref": "8947361f21901e714f120e6a63fe6c2754cf05ff",
   "ci_checkout_path": "mouse-battery-core",
   "local_editable_path": "../mouse-battery-core"
 }
