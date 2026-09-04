@@ -290,6 +290,10 @@ _TRANSLATIONS = {
         LANGUAGE_ZH_CN: '雷蛇',
         LANGUAGE_EN_US: 'Razer',
     },
+    'brand.rog': {
+        LANGUAGE_ZH_CN: 'ROG',
+        LANGUAGE_EN_US: 'ROG',
+    },
     'status.disconnected': {
         LANGUAGE_ZH_CN: '未连接',
         LANGUAGE_EN_US: 'Disconnected',
@@ -301,6 +305,10 @@ _TRANSLATIONS = {
     'status.sleep_or_disconnected': {
         LANGUAGE_ZH_CN: '休眠或连接中断',
         LANGUAGE_EN_US: 'Sleeping or disconnected',
+    },
+    'status.not_connected_or_asleep': {
+        LANGUAGE_ZH_CN: '未连接或处于休眠状态',
+        LANGUAGE_EN_US: 'Not connected or asleep',
     },
     'status.sleeping': {
         LANGUAGE_ZH_CN: '休眠中',
@@ -349,6 +357,10 @@ _TRANSLATIONS = {
     'keyboard.read_failed': {
         LANGUAGE_ZH_CN: '读取失败',
         LANGUAGE_EN_US: 'Read failed',
+    },
+    'keyboard.rog_not_connected_or_asleep': {
+        LANGUAGE_ZH_CN: 'ROG 键盘未连接或处于休眠状态',
+        LANGUAGE_EN_US: 'ROG keyboard not connected or asleep',
     },
     'shared_state.missing': {
         LANGUAGE_ZH_CN: '尚未收到托盘进程写入的设备状态，请确认主程序正在运行。',
@@ -668,6 +680,7 @@ _RUNTIME_TEXT_KEYS = {
     '未连接': 'status.disconnected',
     '已连接，读取中...': 'status.connected_reading',
     '休眠或连接中断': 'status.sleep_or_disconnected',
+    '未连接或处于休眠状态': 'status.not_connected_or_asleep',
     '休眠中': 'status.sleeping',
     '读取超时，沿用上次有效电量': 'status.read_timeout_keep_last',
     '读取错误': 'status.read_error',
@@ -680,6 +693,7 @@ _RUNTIME_TEXT_KEYS = {
     '放电中': 'status.discharging',
     '未找到已绑定键盘': 'keyboard.bound_not_found',
     '读取失败': 'keyboard.read_failed',
+    'ROG 键盘未连接或处于休眠状态': 'keyboard.rog_not_connected_or_asleep',
     '已连接': 'bluetooth.status.connected',
     '已配对，未连接或休眠': 'bluetooth.state.paired_sleeping',
     '未在 Windows 已配对设备中找到': 'bluetooth.state.not_paired',
@@ -715,6 +729,7 @@ def translate_brand_name(name: str, language: str) -> str:
     brand_key = {
         '罗技': 'brand.logitech',
         '雷蛇': 'brand.razer',
+        'ROG': 'brand.rog',
     }.get(str(name or '').strip())
     if not brand_key:
         return str(name or '')

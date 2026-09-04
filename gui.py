@@ -103,6 +103,7 @@ THEME_LIGHT = {
     # —— 品牌标识色 ——
     'logitech_blue': '#2563EB',
     'razer_green': '#16A34A',
+    'rog_red': '#FF0033',
 
     'author_glow_blue': '#0284C7',
 }
@@ -152,6 +153,7 @@ THEME_DARK = {
     # —— 品牌标识色 ——
     'logitech_blue': '#3B82F6',
     'razer_green': '#22C55E',
+    'rog_red': '#FF4D67',
 
     'author_glow_blue': '#38BDF8',
 }
@@ -197,6 +199,8 @@ def get_brand_color(brand: Brand) -> str:
     """根据品牌返回对应的官方强调色；浅色界面里降低品牌色存在感。"""
     if brand == Brand.LOGITECH:
         return COLORS['logitech_blue']
+    if brand == Brand.ROG:
+        return COLORS['rog_red']
     return COLORS['razer_green']
 
 

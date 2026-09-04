@@ -22,11 +22,21 @@ from mouse_battery_core.razer_hid import (
     RazerDevice,
     find_razer_devices,
 )
+from mouse_battery_core.asus_hid import (
+    AsusBatteryInfo,
+    AsusMouseDevice,
+    create_asus_mouse_device,
+    find_asus_mouse_devices,
+)
 from mouse_battery_core.keyboard_hid import (
     KeyboardCandidate,
     KeyboardInfo,
-    enumerate_keyboard_candidates,
-    read_keyboard_battery,
+    enumerate_keyboard_candidates as enumerate_weikav_keyboard_candidates,
+    read_keyboard_battery as read_weikav_keyboard_battery,
+)
+from mouse_battery_core.asus_keyboard_hid import (
+    enumerate_asus_keyboard_candidates,
+    read_asus_keyboard_battery,
 )
 from mouse_battery_core.bluetooth_gatt import (
     BluetoothCandidate,
@@ -39,7 +49,7 @@ from mouse_battery_core.bluetooth_gatt import (
 
 # 公开壳只需要知道“这是哪个品牌的后端”，
 # 不需要感知私有核心内部更细的模块拆分。
-MouseBackendBrand = Literal["logitech", "razer"]
+MouseBackendBrand = Literal["logitech", "razer", "asus"]
 
 
 @dataclass
@@ -52,7 +62,7 @@ class MouseBackendHandle:
     """
 
     brand: MouseBackendBrand
-    device: LogitechReceiver | RazerDevice
+    device: LogitechReceiver | RazerDevice | AsusMouseDevice
     product_id: int
     product_name: str
     path: object
@@ -88,6 +98,19 @@ def enumerate_mouse_backends() -> list[MouseBackendHandle]:
                 )
             )
 
+    for dev_info in find_asus_mouse_devices():
+        device = create_asus_mouse_device(dev_info)
+        if device.open():
+            handles.append(
+                MouseBackendHandle(
+                    brand="asus",
+                    device=device,
+                    product_id=dev_info["product_id"],
+                    product_name=device.product_name,
+                    path=device.path,
+                )
+            )
+
     return handles
 
 
@@ -96,7 +119,7 @@ def close_mouse_backend(handle: MouseBackendHandle):
     handle.device.close()
 
 
-def read_mouse_battery(handle: MouseBackendHandle) -> Optional[BatteryInfo | RazerBatteryInfo]:
+def read_mouse_battery(handle: MouseBackendHandle) -> Optional[BatteryInfo | RazerBatteryInfo | AsusBatteryInfo]:
     """统一读取鼠标后端电量。
 
     公开壳不再直接分品牌 import 私有对象，只通过桥接层拿到读电结果。
@@ -107,7 +130,22 @@ def read_mouse_battery(handle: MouseBackendHandle) -> Optional[BatteryInfo | Raz
             return receiver.get_battery_legacy_long()
         return receiver.get_battery()
 
+    if handle.brand == "razer":
+        return handle.device.get_battery()
+
     return handle.device.get_battery()
+
+
+def enumerate_keyboard_candidates() -> list[KeyboardCandidate]:
+    """枚举现有 Weikav 键盘与 ROG 2.4G/Omni 键盘候选。"""
+    return enumerate_weikav_keyboard_candidates() + enumerate_asus_keyboard_candidates()
+
+
+def read_keyboard_battery(binding: dict) -> KeyboardInfo:
+    """按 VID/PID 将键盘电量读取分派到 Weikav 或 ROG 协议。"""
+    if int(binding.get("vendor_id", 0) or 0) == 0x0B05:
+        return read_asus_keyboard_battery(binding)
+    return read_weikav_keyboard_battery(binding)
 
 
 def keyboard_binding_from_candidate(candidate: KeyboardCandidate) -> dict:

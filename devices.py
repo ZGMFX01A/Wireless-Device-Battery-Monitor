@@ -1,7 +1,7 @@
 """
 设备扫描与管理模块
 
-统一管理罗技和雷蛇鼠标设备的扫描、连接和电池状态查询。
+统一管理罗技、雷蛇和 ROG 鼠标设备的扫描、连接和电池状态查询。
 """
 
 import json
@@ -16,6 +16,7 @@ from enum import Enum
 
 from config import ConfigManager
 from core_bridge import (
+    AsusBatteryInfo,
     BatteryInfo,
     BluetoothCandidate,
     BluetoothInfo,
@@ -39,6 +40,12 @@ from core_bridge import (
 logger = logging.getLogger(__name__)
 
 
+# 不同厂商的电量协议存在离散步进，ROG 经典型号允许 25% 步进造成的 50% 跳变。
+MAX_NON_CHARGING_BATTERY_DELTA = 40
+MAX_ROG_NON_CHARGING_BATTERY_DELTA = 50
+MAX_CHARGING_BATTERY_DELTA = 60
+
+
 # GUI -> tray 的轻量命令动作：请求枚举键盘候选接口。
 DEVICE_COMMAND_SCAN_KEYBOARD_CANDIDATES = 'scan_keyboard_candidates'
 # GUI -> tray 的轻量命令动作：绑定指定的键盘 HID 设备。
@@ -55,6 +62,7 @@ DEVICE_COMMAND_REFRESH_TRAY_ICON = 'refresh_tray_icon'
 class Brand(Enum):
     LOGITECH = "罗技"
     RAZER = "雷蛇"
+    ROG = "ROG"
 
 
 @dataclass
@@ -628,8 +636,11 @@ class DeviceManager:
             if backend.brand == 'logitech':
                 brand = Brand.LOGITECH
                 name = self._get_logitech_name(backend.product_id)
-            else:
+            elif backend.brand == 'razer':
                 brand = Brand.RAZER
+                name = backend.product_name
+            else:
+                brand = Brand.ROG
                 name = backend.product_name
 
             mouse = MouseInfo(
@@ -705,8 +716,10 @@ class DeviceManager:
                 # 按品牌分叉获取 BatteryInfo
                 if brand == Brand.LOGITECH:
                     battery = self._get_logitech_battery_safe(device_obj)
-                else:
+                elif brand == Brand.RAZER:
                     battery = self._get_razer_battery_safe(device_obj)
+                else:
+                    battery = self._get_asus_battery_safe(device_obj)
 
                 # 统一处理结果更新
                 if battery:
@@ -749,10 +762,17 @@ class DeviceManager:
                                 f"pid=0x{mouse.product_id:04X}"
                             )
                 else:
-                    # 通信暂时失败时保留最后一次有效电量，避免误判离线导致电量闪烁
+                    # 老协议保留最后一次有效电量；ROG 没有有效响应时必须明确标记离线。
                     with self._lock:
                         if brand == Brand.LOGITECH:
                             mouse.status_text = "休眠中"
+                        elif brand == Brand.ROG:
+                            # ROG 查询响应本身是下挂设备在线证据；Omni 接收器在线但设备休眠时，
+                            # 必须清空在线状态，不能沿用上一轮在线快照。
+                            mouse.percentage = -1
+                            mouse.charging = False
+                            mouse.online = False
+                            mouse.status_text = "未连接或处于休眠状态"
                         else:
                             mouse.status_text = "读取超时，沿用上次有效电量"
                         mouse.last_update = time.time()
@@ -787,6 +807,12 @@ class DeviceManager:
         return battery if isinstance(battery, RazerBatteryInfo) else None
 
     @staticmethod
+    def _get_asus_battery_safe(device: MouseBackendHandle) -> Optional[AsusBatteryInfo]:
+        """通过桥接层安全获取 ROG 直连或 Omni 鼠标电量。"""
+        battery = read_mouse_battery(device)
+        return battery if isinstance(battery, AsusBatteryInfo) else None
+
+    @staticmethod
     def _is_battery_sample_valid(mouse: MouseInfo, percentage: int, charging: bool) -> bool:
         """校验电量样本合法性，过滤明显异常跳变。"""
         if percentage < 0 or percentage > 100:
@@ -798,15 +824,19 @@ class DeviceManager:
 
         delta = abs(percentage - mouse.percentage)
 
-        # 非充电状态下，单次跳变超过 40% 基本可判定为噪声帧
-        if not charging and delta > 40:
+        max_non_charging_delta = (
+            MAX_ROG_NON_CHARGING_BATTERY_DELTA
+            if mouse.brand == Brand.ROG
+            else MAX_NON_CHARGING_BATTERY_DELTA
+        )
+        if not charging and delta > max_non_charging_delta:
             logger.warning(
                 f"过滤异常电量跳变: {mouse.name} {mouse.percentage}% -> {percentage}% (charging={charging})"
             )
             return False
 
-        # 充电状态下允许稍大波动，但超过 60% 仍视为异常
-        if charging and delta > 60:
+        # 充电状态下允许稍大波动，但超过统一上限仍视为异常。
+        if charging and delta > MAX_CHARGING_BATTERY_DELTA:
             logger.warning(
                 f"过滤异常充电跳变: {mouse.name} {mouse.percentage}% -> {percentage}% (charging={charging})"
             )

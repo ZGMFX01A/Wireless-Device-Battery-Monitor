@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-**无线设备电量监控（Wireless Device Battery Monitor）** 是一个轻量、常驻 Windows 系统托盘的电量监控工具，用于查看 Logitech、Razer 无线鼠标、机械键盘和兼容蓝牙设备的实时电量、充电状态和低电量提醒。
+**无线设备电量监控（Wireless Device Battery Monitor）** 是一个轻量、常驻 Windows 系统托盘的电量监控工具，用于查看 Logitech、Razer、ASUS ROG 无线鼠标键盘、机械键盘和兼容蓝牙设备的实时电量、充电状态和低电量提醒。
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
@@ -25,14 +25,14 @@
 ## 为什么使用无线设备电量监控？
 
 - **一眼查看电量**：在托盘图标或设置窗口中查看设备名称、电量百分比、充电状态和最近更新时间。
-- **适合无线外设**：面向 Logitech、Razer 2.4G 无线鼠标和部分 HID 无线外设设计。
+- **适合无线外设**：面向 Logitech、Razer、ASUS ROG 2.4G/Omni 无线鼠标和部分 HID 无线外设设计。
 - **低电量提醒**：在关闭、10%、20%、30% 四档中选择提醒阈值，减少工作或游戏中突然断电的情况。
 - **多设备管理**：可同时展示多个已识别设备，也可添加多个 Windows 已配对的标准 BLE 电量设备。
-- **键盘扩展**：支持 Weikav（华奋达）双 8K 方案机械键盘的电量读取与手动绑定。
+- **键盘扩展**：支持 ASUS ROG 无线机械键盘（直连 / Omni）以及 Weikav（华奋达）双 8K 方案机械键盘的电量读取与绑定。
 - **轻量常驻**：系统托盘运行，支持扫描设备、手动刷新、会话级自动刷新、开机自启和中英文界面。
 - **可选自动更新**：从 GitHub Releases 检查新版本并完成更新，是否启用由用户决定。
 
-这些能力也使它适合作为 Windows mouse battery monitor、wireless mouse battery checker、Logitech battery monitor、Razer battery monitor、HID battery utility 和 Bluetooth LE battery monitor 使用。
+这些能力也使它适合作为 Windows mouse battery monitor、wireless mouse battery checker、Logitech battery monitor、Razer battery monitor、ASUS ROG battery monitor、HID battery utility 和 Bluetooth LE battery monitor 使用。
 
 ## 支持范围
 
@@ -59,6 +59,30 @@
 | G Pro Wireless | LIGHTSPEED | 🔧 理论支持 |
 
 Logitech 设备的电量读取可能会与 Logitech G HUB 争用 HID 接口。读取失败时，请先退出 G HUB，再点击“刷新电量”。当前代码按已知接收器 PID 枚举 Lightspeed、Bolt 和 Unifying 接收器，具体鼠标仍取决于设备暴露的 HID++ 电量能力。
+
+### ASUS ROG 2.4G / Omni 无线鼠标
+
+| 设备系列 / 型号 | 连接方式 | 状态 |
+| --- | --- | --- |
+| ROG Harpe Ace 系列（Aim Lab / Extreme / Mini / II Ace） | 2.4G 接收器 / Omni 接收器 | ✅ 已支持 |
+| ROG Keris 系列（Wireless / AimPoint / II Ace / Origin） | 2.4G 接收器 / Omni 接收器 | ✅ 已支持 |
+| ROG Gladius III 系列（Wireless / AimPoint / EVA-02） | 2.4G 接收器 / Omni 接收器 | ✅ 已支持 |
+| ROG Gladius II Wireless / Strix Carry | 2.4G 接收器 | ✅ 已支持 |
+| ROG Chakram / Chakram X Wireless | 2.4G 接收器 | ✅ 已支持 |
+| ROG Spatha X Wireless | 2.4G 接收器 | ✅ 已支持 |
+| ROG Pugio II / Strix Impact II / Impact III | 2.4G 接收器 / Omni 接收器 | ✅ 已支持 |
+
+直连 2.4G 鼠标与 Omni 鼠标均自动识别。设备开机或从休眠唤醒后会自动同步电量；设备关机或休眠时，状态卡片将明确提示“未连接或处于休眠状态”，不会伪造历史电量。
+
+### ASUS ROG 无线机械键盘
+
+| 设备系列 / 型号 | 连接方式 | 状态 |
+| --- | --- | --- |
+| ROG Azoth 系列（Azoth / Extreme / Extreme SE / X） | 2.4G 接收器 / Omni 接收器 | ✅ 已支持（通过“新增键盘”绑定） |
+| ROG Strix Scope 系列（Scope RX TKL / Scope II 96 / 96 RX） | 2.4G 接收器 / Omni 接收器 | ✅ 已支持（通过“新增键盘”绑定） |
+| ROG Falchion RX Low Profile | Omni 接收器 | ✅ 已支持（通过“新增键盘”绑定） |
+
+直连 2.4G 与 Omni 键盘均可在设置窗口中通过“新增键盘”一键识别并保存绑定。键盘休眠或断开连接时同样会显示离线休眠状态。
 
 ### Bluetooth LE 设备
 
@@ -113,9 +137,9 @@ Logitech 设备的电量读取可能会与 Logitech G HUB 争用 HID 接口。�
 
 ### 绑定机械键盘
 
-1. 确认键盘通过 2.4G 接收器连接。
+1. 确认键盘通过 2.4G 接收器或 Omni 接收器连接。
 2. 打开设置窗口并点击“新增键盘”。
-3. 等待候选接口扫描完成。
+3. 等待候选接口扫描完成（自动识别 ASUS ROG 无线键盘及 Weikav 双 8K 键盘）。
 4. 选择目标键盘并保存绑定。
 
 ### 开机自启与自动更新
@@ -132,7 +156,7 @@ Logitech 设备的电量读取可能会与 Logitech G HUB 争用 HID 接口。�
 
 请依次确认：
 
-1. Logitech、Razer 鼠标通过 2.4G 无线接收器连接；标准 BLE 设备则通过“添加蓝牙设备”流程绑定。
+1. Logitech、Razer、ASUS ROG 鼠标通过 2.4G / Omni 无线接收器连接；标准 BLE 设备则通过“添加蓝牙设备”流程绑定。
 2. 设备属于支持列表或同一协议系列。
 3. Logitech 用户已经退出 G HUB。
 4. 点击“刷新电量”；若 HID 接口仍被占用，可尝试以管理员身份运行。
@@ -182,7 +206,7 @@ python build.py
 
 ## 搜索关键词
 
-Windows 无线鼠标电量监控、Windows 鼠标电池监控、Logitech G903 电量、Logitech G502 X 电量、Razer 鼠标电量、无线键盘电量、机械键盘电量、Bluetooth LE Battery Service、HID++ 电量、系统托盘电量工具、低电量提醒、Windows battery monitor、mouse battery checker。
+Windows 无线鼠标电量监控、Windows 鼠标电池监控、Logitech G903 电量、Logitech G502 X 电量、Razer 鼠标电量、ASUS ROG 鼠标电量、ROG 键盘电量、ROG Omni Receiver、无线键盘电量、机械键盘电量、Bluetooth LE Battery Service、HID++ 电量、系统托盘电量工具、低电量提醒、Windows battery monitor、mouse battery checker、ASUS ROG battery monitor。
 
 ## 隐私、安全与许可证
 

@@ -2,7 +2,7 @@
 
 [简体中文](README.md)
 
-**Wireless Device Battery Monitor** is a lightweight Windows system-tray battery monitor for Logitech and Razer wireless mice, mechanical keyboards, and Windows-paired Bluetooth LE devices that expose the standard Battery Service. See battery percentage, charging state, last update time, and low-battery alerts without keeping a vendor control panel open.
+**Wireless Device Battery Monitor** is a lightweight Windows system-tray battery monitor for Logitech, Razer, and ASUS ROG wireless mice and keyboards, mechanical keyboards, and Windows-paired Bluetooth LE devices that expose the standard Battery Service. See battery percentage, charging state, last update time, and low-battery alerts without keeping a vendor control panel open.
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
@@ -25,14 +25,14 @@ The screenshot shows multi-device battery cards, charging state, low-battery thr
 ## Why Wireless Device Battery Monitor?
 
 - **At-a-glance battery status**: See device name, battery percentage, charging state, and last update time from the tray or settings window.
-- **Built for wireless peripherals**: Designed for Logitech and Razer 2.4 GHz wireless mice and compatible HID devices.
+- **Built for wireless peripherals**: Designed for Logitech, Razer, and ASUS ROG 2.4 GHz / Omni wireless mice and compatible HID devices.
 - **Low-battery notifications**: Choose Off, 10%, 20%, or 30% and avoid unexpected power loss during work or gaming.
 - **Multiple devices**: Show several detected devices and bind multiple Windows-paired standard BLE battery devices.
-- **Keyboard support**: Read and bind battery status for Weikav (Huafenda) dual-8K mechanical keyboard solutions.
+- **Keyboard support**: Read and bind battery status for ASUS ROG wireless keyboards (direct / Omni) and Weikav (Huafenda) dual-8K mechanical keyboard solutions.
 - **Quiet background utility**: Device scanning, manual refresh, session auto-refresh, startup launch, and bilingual UI in a small tray application.
 - **Optional auto-update**: Check GitHub Releases and update the packaged app when you enable the option.
 
-The project is also useful as a Windows mouse battery monitor, wireless mouse battery checker, Logitech battery monitor, Razer battery monitor, HID battery utility, system tray battery app, or Bluetooth LE battery monitor.
+The project is also useful as a Windows mouse battery monitor, wireless mouse battery checker, Logitech battery monitor, Razer battery monitor, ASUS ROG battery monitor, HID battery utility, system tray battery app, or Bluetooth LE battery monitor.
 
 ## Supported devices
 
@@ -59,6 +59,30 @@ The project is also useful as a Windows mouse battery monitor, wireless mouse ba
 | G Pro Wireless | LIGHTSPEED | 🔧 Theoretical support |
 
 Logitech G HUB may occupy the HID interface needed for battery reads. If a Logitech device is not detected, close G HUB and select **Refresh Battery**. The current code enumerates known Lightspeed, Bolt, and Unifying receiver PIDs; the paired mouse still needs to expose a readable HID++ battery feature.
+
+### ASUS ROG 2.4 GHz / Omni wireless mice
+
+| Device Series / Model | Connection | Status |
+| --- | --- | --- |
+| ROG Harpe Ace Series (Aim Lab / Extreme / Mini / II Ace) | 2.4 GHz dongle / Omni Receiver | ✅ Supported |
+| ROG Keris Series (Wireless / AimPoint / II Ace / Origin) | 2.4 GHz dongle / Omni Receiver | ✅ Supported |
+| ROG Gladius III Series (Wireless / AimPoint / EVA-02) | 2.4 GHz dongle / Omni Receiver | ✅ Supported |
+| ROG Gladius II Wireless / Strix Carry | 2.4 GHz dongle | ✅ Supported |
+| ROG Chakram / Chakram X Wireless | 2.4 GHz dongle | ✅ Supported |
+| ROG Spatha X Wireless | 2.4 GHz dongle | ✅ Supported |
+| ROG Pugio II / Strix Impact II / Impact III | 2.4 GHz dongle / Omni Receiver | ✅ Supported |
+
+Direct 2.4 GHz mice and Omni mice are detected automatically. The battery percentage syncs automatically when the mouse is powered on or wakes from sleep. When the mouse is powered off or asleep, the card explicitly displays **Not connected or asleep** without fabricating historical battery levels.
+
+### ASUS ROG wireless mechanical keyboards
+
+| Device Series / Model | Connection | Status |
+| --- | --- | --- |
+| ROG Azoth Series (Azoth / Extreme / Extreme SE / X) | 2.4 GHz dongle / Omni Receiver | ✅ Supported (via "Add keyboard") |
+| ROG Strix Scope Series (Scope RX TKL / Scope II 96 / 96 RX) | 2.4 GHz dongle / Omni Receiver | ✅ Supported (via "Add keyboard") |
+| ROG Falchion RX Low Profile | Omni Receiver | ✅ Supported (via "Add keyboard") |
+
+Both direct 2.4 GHz and Omni keyboards can be identified and bound with a single click in Settings via **Add keyboard**. The card indicates offline/sleeping state whenever the keyboard goes to sleep or disconnects.
 
 ### Bluetooth LE devices
 
@@ -113,9 +137,9 @@ Added Bluetooth cards can be removed individually and added again later from the
 
 ### Bind a mechanical keyboard
 
-1. Connect the keyboard through its 2.4 GHz receiver.
+1. Connect the keyboard through its 2.4 GHz receiver or Omni Receiver.
 2. Open Settings and select **Add keyboard**.
-3. Wait for candidate interfaces to be scanned.
+3. Wait for candidate interfaces to be scanned (automatically recognizes ASUS ROG wireless keyboards and Weikav dual-8K keyboards).
 4. Select the target keyboard and save the binding.
 
 ### Enable startup launch or auto-update
@@ -132,7 +156,7 @@ Click the language button in the upper-right corner of the Settings card to swit
 
 Check the following in order:
 
-1. Logitech and Razer mice are connected through a 2.4 GHz wireless receiver; standard BLE devices are added through **Add Bluetooth Device**.
+1. Logitech, Razer, and ASUS ROG mice are connected through a 2.4 GHz / Omni wireless receiver; standard BLE devices are added through **Add Bluetooth Device**.
 2. The model is listed above or belongs to a compatible protocol family.
 3. Logitech users have closed G HUB.
 4. Select **Refresh battery**; if the HID interface is still occupied, try running the app as administrator.
@@ -182,7 +206,7 @@ The build output is `dist/WirelessDeviceBatteryMonitor.exe`. If `.private-requir
 
 ## Search keywords
 
-Windows mouse battery monitor, wireless mouse battery checker, Logitech G903 battery, Logitech G502 X battery, Razer battery monitor, wireless keyboard battery monitor, mechanical keyboard battery status, Bluetooth LE Battery Service, HID++ battery, Windows system tray utility, low-battery notification.
+Windows mouse battery monitor, wireless mouse battery checker, Logitech G903 battery, Logitech G502 X battery, Razer battery monitor, ASUS ROG battery monitor, ROG mouse battery, ROG keyboard battery, ROG Omni Receiver, wireless keyboard battery monitor, mechanical keyboard battery status, Bluetooth LE Battery Service, HID++ battery, Windows system tray utility, low-battery notification.
 
 ## Privacy, security, and license
 
