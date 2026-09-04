@@ -181,29 +181,6 @@ The settings window reads shared state written by the tray process and does not 
 
 When enabled, the updater requests release metadata from this project's GitHub Releases and downloads updates. If the GitHub direct link is unavailable, the updater may use a backup download source. The app does not require an account or upload mouse, keyboard, or battery data.
 
-## Run from source (developers)
-
-For normal use, download a Release build. Running and packaging from source requires Windows, Python 3.10+, and the private `mouse-battery-core` package used by this public application shell. The core package contains HID, device-protocol, and BLE reading implementations and is not published in this repository.
-
-```powershell
-git clone https://github.com/ZGMFX01A/mouse-battery.git
-cd mouse-battery
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python -m pip install -r .private-requirements.txt
-python main.py
-```
-
-Build a single-file Windows executable:
-
-```powershell
-python -m pip install pyinstaller
-python build.py
-```
-
-The build output is `dist/WirelessDeviceBatteryMonitor.exe`. If `.private-requirements.txt` is missing, create it from `.private-requirements.example.txt` and make sure `mouse-battery-core` is available as a sibling checkout or private source. Without access to the private core, the build fails explicitly; normal users should use a prebuilt Release.
-
 ## Search keywords
 
 Windows mouse battery monitor, wireless mouse battery checker, Logitech G903 battery, Logitech G502 X battery, Razer battery monitor, ASUS ROG battery monitor, ROG mouse battery, ROG keyboard battery, ROG Omni Receiver, wireless keyboard battery monitor, mechanical keyboard battery status, Bluetooth LE Battery Service, HID++ battery, Windows system tray utility, low-battery notification.

@@ -181,29 +181,6 @@ Logitech 设备的电量读取可能会与 Logitech G HUB 争用 HID 接口。�
 
 开启自动更新后，程序会访问本项目的 GitHub Releases 检查版本并下载更新。GitHub 直链不可用时，更新模块可能使用备用下载源；应用不会要求账号，也不会上传鼠标、键盘或电量数据。
 
-## 从源码运行（开发者）
-
-普通用户建议直接下载 Releases。源码运行和构建需要 Windows、Python 3.10+，以及本项目使用的私有核心包 `mouse-battery-core`；该核心包包含 HID、设备协议和 BLE 读取实现，不随公开壳仓库发布。
-
-```powershell
-git clone https://github.com/ZGMFX01A/mouse-battery.git
-cd mouse-battery
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python -m pip install -r .private-requirements.txt
-python main.py
-```
-
-构建 Windows 单文件程序：
-
-```powershell
-python -m pip install pyinstaller
-python build.py
-```
-
-构建产物为 `dist/WirelessDeviceBatteryMonitor.exe`。如果本地没有 `.private-requirements.txt`，请先参考 `.private-requirements.example.txt` 创建，并确保 `mouse-battery-core` 位于相邻目录或配置为可访问的私有源。没有私有核心访问权限时，构建会明确失败；普通用户请使用 Releases 中的预构建版本。
-
 ## 搜索关键词
 
 Windows 无线鼠标电量监控、Windows 鼠标电池监控、Logitech G903 电量、Logitech G502 X 电量、Razer 鼠标电量、ASUS ROG 鼠标电量、ROG 键盘电量、ROG Omni Receiver、无线键盘电量、机械键盘电量、Bluetooth LE Battery Service、HID++ 电量、系统托盘电量工具、低电量提醒、Windows battery monitor、mouse battery checker、ASUS ROG battery monitor。
