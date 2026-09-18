@@ -141,18 +141,12 @@ jobs:
           $version = "${{ steps.rename.outputs.VERSION }}"
           $candidatePath = Join-Path "docs/releases" "$version.md"
 
-          if (Test-Path $candidatePath) {
+          if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
             echo "BODY_PATH=$candidatePath" >> $env:GITHUB_OUTPUT
             exit 0
           }
 
-          $fallbackPath = "release-body-fallback.md"
-          @(
-            "# $version"
-            ""
-            "- 本次发布未提供单独的版本说明文件，请回看对应提交记录与仓库文档。"
-          ) | Out-File -FilePath $fallbackPath -Encoding utf8
-          echo "BODY_PATH=$fallbackPath" >> $env:GITHUB_OUTPUT
+          throw "Missing release notes file: $candidatePath. Add it before pushing the release tag."
 
       - name: Release to GitHub
         uses: softprops/action-gh-release@v2
