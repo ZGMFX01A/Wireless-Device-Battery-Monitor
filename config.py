@@ -78,6 +78,43 @@ def _read_version() -> str:
     except FileNotFoundError:
         return "dev"
 
+
+def _normalize_bluetooth_binding(item: dict) -> dict:
+    """保留蓝牙端点元数据，兼容旧版只保存 device_id/name 的配置。"""
+    transport = str(item.get('transport', 'ble') or 'ble').strip().lower()
+    if transport not in {'ble', 'classic', 'dual'}:
+        transport = 'ble'
+    try:
+        bluetooth_address = int(item.get('bluetooth_address', 0) or 0)
+    except (TypeError, ValueError):
+        bluetooth_address = 0
+    normalized = {
+        'device_id': str(item.get('device_id', '') or '').strip(),
+        'name': str(item.get('name', '') or '未知蓝牙设备'),
+        'transport': transport,
+        'container_id': str(item.get('container_id', '') or '').strip(),
+        'bluetooth_address': bluetooth_address,
+    }
+    if not any(key in item for key in ('transport', 'container_id', 'bluetooth_address')):
+        return {key: normalized[key] for key in ('device_id', 'name')}
+    return normalized
+
+
+def _bluetooth_binding_keys(item: dict) -> set[str]:
+    """生成绑定的稳定身份键，避免 BLE 与经典 endpoint 被重复保存。"""
+    device_id = str(item.get('device_id', '') or '').strip().casefold()
+    keys = {f'device:{device_id}'} if device_id else set()
+    container_id = str(item.get('container_id', '') or '').strip().casefold()
+    if container_id:
+        keys.add(f'container:{container_id}')
+    try:
+        address = int(item.get('bluetooth_address', 0) or 0)
+    except (TypeError, ValueError):
+        address = 0
+    if address:
+        keys.add(f'address:{address:x}')
+    return keys
+
 APP_VERSION = _read_version()
 
 # 获取当前程序实际路径，如果被 PyInstaller 打包，获取的是生成的 exe 路径
@@ -86,8 +123,42 @@ if getattr(sys, 'frozen', False):
 else:
     APP_PATH = os.path.abspath(sys.argv[0])
 
-# 在同级目录存储配额
-CONFIG_FILE = os.path.join(os.path.dirname(APP_PATH), "config.json")
+def _resolve_config_file() -> str:
+    r"""解析持久化配置文件路径。
+
+    默认收拢到 Windows 标准应用漫游目录：%APPDATA%\WirelessDeviceBatteryMonitor\config.json，
+    彻底避免在 exe 运行目录散落配置文件。
+    同时平滑迁移历史版本遗留在当前目录下的旧 config.json。
+    """
+    app_data = os.environ.get('APPDATA')
+    if app_data:
+        target_dir = os.path.join(app_data, 'WirelessDeviceBatteryMonitor')
+    else:
+        target_dir = os.path.join(tempfile.gettempdir(), 'WirelessDeviceBatteryMonitor')
+    os.makedirs(target_dir, exist_ok=True)
+    target_file = os.path.join(target_dir, 'config.json')
+
+    # 历史迁移：如果当前目录下存在旧的 config.json，且目标位置尚未创建，则平滑迁移
+    local_file = os.path.join(os.path.dirname(APP_PATH), "config.json")
+    if os.path.isfile(local_file) and not os.path.isfile(target_file):
+        try:
+            with open(local_file, 'r', encoding='utf-8') as src, open(target_file, 'w', encoding='utf-8') as dst:
+                dst.write(src.read())
+            os.remove(local_file)
+            logger.info("已将旧配置平滑迁移至: %s", target_file)
+        except Exception as e:
+            logger.warning("迁移旧配置失败，保留原位置: %s", e)
+            return local_file
+    elif os.path.isfile(local_file) and os.path.isfile(target_file):
+        try:
+            os.remove(local_file)
+        except OSError:
+            pass
+
+    return target_file
+
+
+CONFIG_FILE = _resolve_config_file()
 REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 REG_NAME = "MouseBatteryMonitor"
 
@@ -316,40 +387,38 @@ class ConfigManager:
 
     @property
     def bluetooth_bindings(self) -> list[dict]:
-        """返回按 Windows device ID 去重后的 BLE 设备绑定。"""
+        """返回按物理设备身份去重后的蓝牙设备绑定。"""
         self._reload_from_disk()
         raw_bindings = self.config.get('bluetooth_bindings', [])
         if not isinstance(raw_bindings, list):
             return []
 
         bindings: list[dict] = []
-        seen_ids: set[str] = set()
+        seen_keys: set[str] = set()
         for item in raw_bindings:
             if not isinstance(item, dict):
                 continue
-            device_id = str(item.get('device_id', '') or '').strip()
-            if not device_id or device_id in seen_ids:
+            normalized = _normalize_bluetooth_binding(item)
+            binding_keys = _bluetooth_binding_keys(normalized)
+            if not binding_keys or seen_keys.intersection(binding_keys):
                 continue
-            seen_ids.add(device_id)
-            bindings.append({
-                'device_id': device_id,
-                'name': str(item.get('name', '') or '未知蓝牙设备'),
-            })
+            seen_keys.update(binding_keys)
+            bindings.append(normalized)
         return bindings
 
     def add_bluetooth_binding(self, binding: dict) -> bool:
-        device_id = str(binding.get('device_id', '') or '').strip()
+        normalized = _normalize_bluetooth_binding(binding)
+        device_id = normalized['device_id']
         if not device_id:
             logger.warning('忽略空的蓝牙设备绑定')
             return False
+        binding_keys = _bluetooth_binding_keys(normalized)
+
         def apply():
             bindings = self.bluetooth_bindings
-            if any(item['device_id'] == device_id for item in bindings):
+            if any(binding_keys.intersection(_bluetooth_binding_keys(item)) for item in bindings):
                 return False
-            bindings.append({
-                'device_id': device_id,
-                'name': str(binding.get('name', '') or '未知蓝牙设备'),
-            })
+            bindings.append(normalized)
             self.config['bluetooth_bindings'] = bindings
             return True
         return self._mutate(apply)

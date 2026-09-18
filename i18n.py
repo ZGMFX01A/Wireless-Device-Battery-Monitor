@@ -72,7 +72,7 @@ _TRANSLATIONS = {
     },
     'app.header_subtitle': {
         LANGUAGE_ZH_CN: '实时查看鼠标、键盘与蓝牙设备电量',
-        LANGUAGE_EN_US: 'Live battery status for mice, keyboards, and Bluetooth devices',
+        LANGUAGE_EN_US: 'Live battery status for your devices',
     },
     'settings.title': {
         LANGUAGE_ZH_CN: '设置',
@@ -84,7 +84,7 @@ _TRANSLATIONS = {
     },
     'settings.autostart.subtitle': {
         LANGUAGE_ZH_CN: '跟随 Windows 启动，在后台静默运行',
-        LANGUAGE_EN_US: 'Start with Windows and keep running quietly in the background',
+        LANGUAGE_EN_US: 'Start automatically with Windows',
     },
     'settings.auto_update.title': {
         LANGUAGE_ZH_CN: '自动检查更新',
@@ -92,7 +92,7 @@ _TRANSLATIONS = {
     },
     'settings.auto_update.subtitle': {
         LANGUAGE_ZH_CN: '启动时自动下载新版本并静默升级',
-        LANGUAGE_EN_US: 'Automatically download new releases at startup and upgrade silently',
+        LANGUAGE_EN_US: 'Automatically keep the app up to date',
     },
     'settings.low_battery.title': {
         LANGUAGE_ZH_CN: '低电量提醒',
@@ -100,7 +100,7 @@ _TRANSLATIONS = {
     },
     'settings.low_battery.subtitle': {
         LANGUAGE_ZH_CN: '系统右下角弹出通知，阶梯防漏式告警',
-        LANGUAGE_EN_US: 'Show a desktop notification with step-based repeat alerts',
+        LANGUAGE_EN_US: 'Get notified when battery runs low',
     },
     'settings.tray_priority.title': {
         LANGUAGE_ZH_CN: '托盘图标显示逻辑',
@@ -108,7 +108,7 @@ _TRANSLATIONS = {
     },
     'settings.tray_priority.subtitle': {
         LANGUAGE_ZH_CN: '控制多台设备同时存在时托盘图标优先显示哪台设备',
-        LANGUAGE_EN_US: 'Choose which device the tray icon should prefer when multiple devices are present',
+        LANGUAGE_EN_US: 'Choose which device to show in the tray',
     },
     'settings.tray_priority.mouse_first': {
         LANGUAGE_ZH_CN: '优先鼠标',
@@ -120,7 +120,7 @@ _TRANSLATIONS = {
     },
     'settings.tray_priority.lowest_battery': {
         LANGUAGE_ZH_CN: '低电量优先',
-        LANGUAGE_EN_US: 'Lowest Battery First',
+        LANGUAGE_EN_US: 'Lowest First',
     },
     'settings.off': {
         LANGUAGE_ZH_CN: '关闭',
@@ -132,7 +132,7 @@ _TRANSLATIONS = {
     },
     'settings.theme.subtitle': {
         LANGUAGE_ZH_CN: '选择浅色玻璃、暗夜磨砂或跟随系统',
-        LANGUAGE_EN_US: 'Choose Light Glass, Dark Smoked Glass, or System',
+        LANGUAGE_EN_US: 'Select your preferred theme',
     },
     'settings.theme.auto': {
         LANGUAGE_ZH_CN: '跟随系统',
@@ -228,7 +228,7 @@ _TRANSLATIONS = {
     },
     'view.loading.message': {
         LANGUAGE_ZH_CN: '正在从托盘进程读取最新电量信息，请稍候…',
-        LANGUAGE_EN_US: 'Reading the latest battery data from the tray process. Please wait…',
+        LANGUAGE_EN_US: 'Fetching the latest battery status...',
     },
     'view.error.title': {
         LANGUAGE_ZH_CN: '读取设备状态失败',
@@ -236,7 +236,7 @@ _TRANSLATIONS = {
     },
     'view.error.message': {
         LANGUAGE_ZH_CN: '请确认托盘进程仍在运行，然后点击“刷新电量”重试。',
-        LANGUAGE_EN_US: 'Please make sure the tray process is still running, then click “Refresh Battery” to try again.',
+        LANGUAGE_EN_US: 'Please ensure the background service is running, then click “Refresh Battery”.',
     },
     'view.not_synced.title': {
         LANGUAGE_ZH_CN: '尚未同步到设备状态',
@@ -324,7 +324,7 @@ _TRANSLATIONS = {
     },
     'status.invalid_frame_keep_last': {
         LANGUAGE_ZH_CN: '检测到异常帧，沿用上次有效电量',
-        LANGUAGE_EN_US: 'Abnormal frame detected, keeping the last valid battery value',
+        LANGUAGE_EN_US: 'Signal interrupted; showing last known level',
     },
     'status.charging': {
         LANGUAGE_ZH_CN: '充电中',
@@ -424,7 +424,7 @@ _TRANSLATIONS = {
     },
     'keyboard.dialog.helper': {
         LANGUAGE_ZH_CN: '当前列表已经按规则自动去重，并且只保留了这把键盘最可信的控制接口。 如果只看到 1 个选项，直接连接即可。',
-        LANGUAGE_EN_US: 'This list is already deduplicated automatically and keeps only the most reliable control interface for this keyboard. If you only see one option, you can connect it directly.',
+        LANGUAGE_EN_US: 'Recommended devices only. If only one option appears, connect directly.',
     },
     'keyboard.dialog.current_bound_option': {
         LANGUAGE_ZH_CN: '{name}（当前已绑定）',
@@ -472,7 +472,7 @@ _TRANSLATIONS = {
     },
     'bluetooth.dialog.helper': {
         LANGUAGE_ZH_CN: '列表包含当前未连接或休眠的设备。仅支持公开标准 BLE Battery Service（0x180F）的设备。',
-        LANGUAGE_EN_US: 'The list includes disconnected or sleeping devices. Only the standard BLE Battery Service (0x180F) is supported.',
+        LANGUAGE_EN_US: 'Includes inactive devices. Supports standard Bluetooth battery reporting.',
     },
     'bluetooth.dialog.option': {
         LANGUAGE_ZH_CN: '{name} · {status}',
@@ -500,11 +500,11 @@ _TRANSLATIONS = {
     },
     'bluetooth.state.no_service': {
         LANGUAGE_ZH_CN: '设备未公开标准 BLE Battery Service（0x180F）。',
-        LANGUAGE_EN_US: 'The device does not expose the standard BLE Battery Service (0x180F).',
+        LANGUAGE_EN_US: 'Battery service not supported by this device.',
     },
     'bluetooth.state.no_level': {
         LANGUAGE_ZH_CN: '设备未公开可读的 Battery Level（0x2A19）。',
-        LANGUAGE_EN_US: 'The device does not expose a readable Battery Level (0x2A19).',
+        LANGUAGE_EN_US: 'Battery level reading not supported.',
     },
     'bluetooth.select.title': {
         LANGUAGE_ZH_CN: '添加蓝牙设备',
@@ -640,7 +640,7 @@ _TRANSLATIONS = {
     },
     'tray.no_device_or_sleep': {
         LANGUAGE_ZH_CN: '未发现设备或已休眠',
-        LANGUAGE_EN_US: 'No device found or devices are sleeping',
+        LANGUAGE_EN_US: 'No active devices detected',
     },
     'tray.notification.low_battery_title': {
         LANGUAGE_ZH_CN: '设备电量告警',
@@ -648,7 +648,7 @@ _TRANSLATIONS = {
     },
     'tray.notification.low_battery_message': {
         LANGUAGE_ZH_CN: '{name} 当前电量只有 {percent}%，请及时充电！',
-        LANGUAGE_EN_US: '{name} is at only {percent}% battery. Please recharge it soon!',
+        LANGUAGE_EN_US: '{name} battery is low ({percent}%). Please recharge soon!',
     },
     'tray.menu.no_device': {
         LANGUAGE_ZH_CN: '未发现设备',

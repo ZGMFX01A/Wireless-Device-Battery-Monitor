@@ -1008,6 +1008,14 @@ class MouseBatteryApp:
         self._view_message = ''
         # 用渲染签名避免每次收到回调都重建整组卡片，减少 Flet 控件树抖动。
         self._last_render_signature = None
+        # 设置卡片折叠/展开状态管理：
+        # - _settings_expanded: None 表示尚未根据设备状态完成初始化；True 为展开，False 为折叠
+        # - _user_toggled_settings: 用户是否手动点击过展开/折叠（若已手动操作过，定时刷新不强行覆盖用户意图）
+        self._settings_expanded: Optional[bool] = None
+        self._user_toggled_settings: bool = False
+        self.settings_card: Optional[ft.Container] = None
+        self.settings_content_box: Optional[ft.Container] = None
+        self.settings_expand_icon: Optional[ft.Container] = None
 
     def _effective_language(self) -> str:
         """返回当前 GUI 应使用的实际语言。"""
@@ -1066,6 +1074,9 @@ class MouseBatteryApp:
         self._bluetooth_dialog_loading = False
         self._bluetooth_pending_request_id = 0
         self._last_render_signature = None
+        self.settings_card = None
+        self.settings_content_box = None
+        self.settings_expand_icon = None
         self.build(self.page, initial_scan=False, auto_refresh_enabled=auto_refresh_enabled)
 
     def _on_autoupdate_toggle(self, e):
@@ -1089,6 +1100,23 @@ class MouseBatteryApp:
         logger.info(f'界面语言切换为: {next_language}')
         self._request_tray_refresh()
         self._rebuild_page()
+
+    def _on_settings_expand_click(self, e=None):
+        """用户手动点击折叠/展开设置卡片。"""
+        self._user_toggled_settings = True
+        self._set_settings_expanded(not bool(self._settings_expanded))
+
+    def _set_settings_expanded(self, expanded: bool):
+        """更新设置卡片折叠/展开状态，并触发平滑复合过渡动画。"""
+        if self._settings_expanded == expanded:
+            return
+        self._settings_expanded = expanded
+        if self.settings_content_box:
+            self.settings_content_box.height = None if expanded else 0
+            self.settings_content_box.opacity = 1.0 if expanded else 0.0
+        if self.settings_expand_icon:
+            self.settings_expand_icon.rotate = 0.0 if expanded else -1.570796
+        self._safe_update()
 
     def _show_dialog(self, title: str, message: str, actions: list = None):
         """统一的对话框构建与弹出，减少重复代码。返回对话框对象供外部控制。"""
@@ -1483,11 +1511,19 @@ class MouseBatteryApp:
         self._bluetooth_pending_request_id = 0
         self._safe_update()
 
+    @staticmethod
+    def _bluetooth_candidate_is_bound(candidate: BluetoothCandidate, bound_ids: set[str]) -> bool:
+        """用候选包含的全部 Windows endpoint 识别已绑定的物理设备。"""
+        return bool(bound_ids.intersection(candidate.endpoint_device_ids))
+
     def _build_bluetooth_dialog_content(self):
         scan_state, scan_message = self._bluetooth_scan_state()
         candidates = self._bluetooth_candidates_snapshot()
         bound_ids = {item.device_id for item in self._bluetooth_devices_snapshot()}
-        available = [item for item in candidates if item.device_id not in bound_ids]
+        available = [
+            item for item in candidates
+            if not self._bluetooth_candidate_is_bound(item, bound_ids)
+        ]
         if not self._bluetooth_selected_device_id and available:
             self._bluetooth_selected_device_id = available[0].device_id
 
@@ -1523,13 +1559,24 @@ class MouseBatteryApp:
                 controls=[
                     ft.Radio(
                         value=item.device_id,
-                        disabled=item.device_id in bound_ids,
+                        disabled=self._bluetooth_candidate_is_bound(item, bound_ids),
                         label=self._t(
                             'bluetooth.dialog.option',
                             name=item.name,
                             status=self._t(
-                                'bluetooth.status.connected' if item.connected else 'bluetooth.status.sleeping'
-                            ) + (self._t('bluetooth.status.added') if item.device_id in bound_ids else ''),
+                                (
+                                    'bluetooth.status.classic_connected'
+                                    if item.transport == 'classic' and item.connected
+                                    else 'bluetooth.status.dual_connected'
+                                    if item.transport == 'dual' and item.connected
+                                    else 'bluetooth.status.connected'
+                                    if item.connected
+                                    else 'bluetooth.status.sleeping'
+                                )
+                            ) + (
+                                self._t('bluetooth.status.added')
+                                if self._bluetooth_candidate_is_bound(item, bound_ids) else ''
+                            ),
                         ),
                     )
                     for item in candidates
@@ -1562,10 +1609,11 @@ class MouseBatteryApp:
             self._bluetooth_pending_request_id = 0
         self._bluetooth_dialog.content = self._build_bluetooth_dialog_content()
         if self._bluetooth_bind_action:
+            candidates = self._bluetooth_candidates_snapshot()
+            bound_ids = {item.device_id for item in self._bluetooth_devices_snapshot()}
             available_ids = {
-                item.device_id for item in self._bluetooth_candidates_snapshot()
-            } - {
-                item.device_id for item in self._bluetooth_devices_snapshot()
+                item.device_id for item in candidates
+                if not self._bluetooth_candidate_is_bound(item, bound_ids)
             }
             self._bluetooth_bind_action.disabled = (
                 self._bluetooth_dialog_loading
@@ -2040,14 +2088,55 @@ class MouseBatteryApp:
         )
 
         # ========= 设置面板 =========
+        # 初次构建时根据是否已发现设备确定默认折叠状态：
+        # - 若无设备：默认展开(True)，方便用户查看和配置
+        # - 若有设备：默认折叠(False)，聚焦展示主设备电量卡片
+        if self._settings_expanded is None:
+            has_initial_devices = bool(
+                self.device_manager.mice
+                or self._keyboard_snapshot()
+                or self._bluetooth_devices_snapshot()
+            )
+            self._settings_expanded = not has_initial_devices
+
+        self.settings_expand_icon = ft.Container(
+            content=ft.Icon(ft.Icons.KEYBOARD_ARROW_DOWN, color=COLORS['text_secondary'], size=20),
+            animate_rotation=ft.Animation(260, ft.AnimationCurve.EASE_OUT_CUBIC),
+            rotate=0.0 if self._settings_expanded else -1.570796,
+            alignment=ft.Alignment.CENTER,
+        )
+
+        expand_toggle = ft.Container(
+            content=self.settings_expand_icon,
+            width=36,
+            height=36,
+            border_radius=10,
+            bgcolor=COLORS['bg_card_soft'],
+            border=ft.Border.all(1, COLORS['bg_line']),
+            alignment=ft.Alignment.CENTER,
+            on_click=self._on_settings_expand_click,
+        )
+
+        settings_title_left = ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.SETTINGS_OUTLINED, color=COLORS['text_secondary'], size=22),
+                    ft.Text(self._t('settings.title'), size=18, weight=ft.FontWeight.W_600, color=COLORS['text_primary']),
+                ],
+                spacing=12,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            on_click=self._on_settings_expand_click,
+        )
+
         settings_title = ft.Row(
             controls=[
-                ft.Icon(ft.Icons.SETTINGS_OUTLINED, color=COLORS['text_secondary'], size=22),
-                ft.Text(self._t('settings.title'), size=18, weight=ft.FontWeight.W_600, color=COLORS['text_primary']),
+                settings_title_left,
                 ft.Container(expand=True),
                 language_toggle,
+                expand_toggle,
             ],
-            spacing=12,
+            spacing=8,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
@@ -2091,10 +2180,9 @@ class MouseBatteryApp:
             on_change=self._on_theme_mode_change,
         )
 
-        settings_card = build_card(
+        self.settings_content_box = ft.Container(
             content=ft.Column(
                 controls=[
-                    settings_title,
                     ft.Container(height=1, bgcolor=COLORS['bg_line'], margin=ft.Margin.only(top=6, bottom=4)),
                     build_setting_row(
                         ft.Icons.PALETTE_OUTLINED,
@@ -2129,9 +2217,25 @@ class MouseBatteryApp:
                 ],
                 spacing=6,
             ),
+            animate_size=ft.Animation(280, ft.AnimationCurve.EASE_OUT_CUBIC),
+            animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_OUT_CUBIC),
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            height=None if self._settings_expanded else 0,
+            opacity=1.0 if self._settings_expanded else 0.0,
+        )
+
+        self.settings_card = build_card(
+            content=ft.Column(
+                controls=[
+                    settings_title,
+                    self.settings_content_box,
+                ],
+                spacing=0,
+            ),
             padding=ft.Padding.symmetric(horizontal=24, vertical=16),
             margin=ft.Margin.only(bottom=10),
         )
+        self.settings_card.animate_size = ft.Animation(280, ft.AnimationCurve.EASE_OUT_CUBIC)
 
         # 明确拆成两行；Flet 0.85 Windows 客户端会把 Row(wrap=True)
         # 的换行区域错误渲染成整块灰色占位。
@@ -2200,7 +2304,7 @@ class MouseBatteryApp:
             content=ft.Column(
                 controls=[
                     self.card_list,
-                    settings_card,
+                    self.settings_card,
                     action_row,
                 ],
                 spacing=10,
@@ -2322,6 +2426,14 @@ class MouseBatteryApp:
             self._set_view_state('empty', read_message)
         elif self._view_state not in ('loading', 'error'):
             self._set_view_state('empty')
+
+        # 若用户尚未手动干预展开状态，则自动跟随设备状态联动折叠/展开：
+        # 有设备时默认折叠(False)，无设备时默认展开(True)。
+        if not self._user_toggled_settings:
+            has_devices = bool(mice or keyboard or bluetooth_devices)
+            target_expanded = not has_devices
+            if self._settings_expanded != target_expanded:
+                self._set_settings_expanded(target_expanded)
 
         render_signature = (
             self._view_state,

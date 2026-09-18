@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -44,6 +45,28 @@ logger = logging.getLogger(__name__)
 MAX_NON_CHARGING_BATTERY_DELTA = 40
 MAX_ROG_NON_CHARGING_BATTERY_DELTA = 50
 MAX_CHARGING_BATTERY_DELTA = 60
+
+
+def _bluetooth_address_value(value: object) -> int:
+    """把 Windows 蓝牙地址统一为整数，兼容旧配置中的冒号字符串。"""
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value or '').replace(':', '').replace('-', ''), 16)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bluetooth_binding_matches_candidate(binding: dict, candidate: BluetoothCandidate) -> bool:
+    """按 endpoint、ContainerId 或地址识别同一物理蓝牙设备。"""
+    saved_id = str(binding.get('device_id', '') or '').strip()
+    if saved_id and saved_id in candidate.endpoint_device_ids:
+        return True
+    saved_container = str(binding.get('container_id', '') or '').strip().casefold()
+    if saved_container and saved_container == candidate.container_id.casefold():
+        return True
+    saved_address = _bluetooth_address_value(binding.get('bluetooth_address', 0))
+    return bool(saved_address and saved_address == candidate.bluetooth_address)
 
 
 # GUI -> tray 的轻量命令动作：请求枚举键盘候选接口。
@@ -85,11 +108,12 @@ class MouseInfo:
 
 
 def get_device_command_path() -> str:
-    """获取 GUI/托盘之间使用的轻量命令文件路径。"""
-    if getattr(sys, 'frozen', False):
-        base = os.path.dirname(sys.executable)
-    else:
-        base = os.path.dirname(os.path.abspath(__file__))
+    """获取 GUI/托盘之间使用的轻量命令文件路径。
+
+    通信文件统一收拢到当前用户的系统临时目录（%TEMP%），
+    彻底杜绝在 exe 运行目录或项目工作区生成 .device_command.json.queue 等临时文件/目录。
+    """
+    base = os.path.join(tempfile.gettempdir(), 'WirelessDeviceBatteryMonitor')
     return os.path.join(base, '.device_command.json')
 
 
@@ -387,21 +411,35 @@ class DeviceManager:
         self._notify_update()
 
     def _bind_bluetooth(self, device_id: str, request_id: int = 0):
-        with self._io_lock:
-            candidates = self.bluetooth_candidates or enumerate_bluetooth_candidates()
-            target = next((item for item in candidates if item.device_id == device_id), None)
-            if target is None:
-                raise ValueError('未找到对应的 Windows 已配对蓝牙设备。')
-            if any(item['device_id'] == device_id for item in self.config_manager.bluetooth_bindings):
-                raise ValueError('该蓝牙设备已经添加。')
+        try:
+            with self._io_lock:
+                candidates = self.bluetooth_candidates or enumerate_bluetooth_candidates()
+                target = next((item for item in candidates if item.device_id == device_id), None)
+                if target is None:
+                    raise ValueError('未找到对应的 Windows 已配对蓝牙设备。')
+                if any(
+                        _bluetooth_binding_matches_candidate(item, target)
+                        for item in self.config_manager.bluetooth_bindings
+                ):
+                    raise ValueError('该蓝牙设备已经添加。')
 
+                with self._lock:
+                    self._bluetooth_scan_state = 'binding'
+                    self._bluetooth_scan_message = f'正在读取蓝牙设备电量：{target.name}'
+                    self._bluetooth_request_id = request_id
+                self._notify_update()
+                snapshot = probe_bluetooth_candidate(target)
+                if not self.config_manager.add_bluetooth_binding(
+                        bluetooth_binding_from_candidate(target)):
+                    raise ValueError('该蓝牙设备已经添加。')
+        except Exception as exc:
+            logger.error('绑定蓝牙设备失败: %s', exc)
             with self._lock:
-                self._bluetooth_scan_state = 'binding'
-                self._bluetooth_scan_message = f'正在读取蓝牙设备电量：{target.name}'
+                self._bluetooth_scan_state = 'error'
+                self._bluetooth_scan_message = f'绑定失败：{exc}'
                 self._bluetooth_request_id = request_id
             self._notify_update()
-            snapshot = probe_bluetooth_candidate(target)
-            self.config_manager.add_bluetooth_binding(bluetooth_binding_from_candidate(target))
+            return
         with self._lock:
             self._bluetooth_devices.append(snapshot)
             self._bluetooth_scan_state = 'bound'
@@ -474,7 +512,7 @@ class DeviceManager:
         self._notify_update()
 
     def _consume_device_command(self):
-        """按请求顺序消费 GUI 命令；兼容旧版的单文件命令。"""
+        """按请求顺序消费 GUI 命令；兼容旧版的单文件命令及清理旧残留。"""
         command_files: list[str] = []
         legacy_file = get_device_command_path()
         if os.path.exists(legacy_file):
@@ -492,8 +530,38 @@ class DeviceManager:
         except OSError as exc:
             logger.error('读取设备命令队列失败: %s', exc)
 
+        # 兼容并自动清理历史版本遗留在程序当前目录下的旧残留
+        try:
+            if getattr(sys, 'frozen', False):
+                old_base = os.path.dirname(sys.executable)
+            else:
+                old_base = os.path.dirname(os.path.abspath(__file__))
+            old_queue = os.path.join(old_base, '.device_command.json.queue')
+            if os.path.isdir(old_queue):
+                remaining = os.listdir(old_queue)
+                if remaining:
+                    command_files.extend(
+                        os.path.join(old_queue, name)
+                        for name in sorted(remaining)
+                        if name.endswith('.json')
+                    )
+                else:
+                    os.rmdir(old_queue)
+            old_file = os.path.join(old_base, '.device_command.json')
+            if os.path.isfile(old_file) and old_file not in command_files:
+                command_files.append(old_file)
+        except Exception:
+            pass
+
         for command_file in command_files:
             self._consume_device_command_file(command_file)
+
+        # 队列消费完毕后，若目录为空则即时移除，避免留下空目录
+        try:
+            if os.path.exists(queue_dir) and not os.listdir(queue_dir):
+                os.rmdir(queue_dir)
+        except OSError:
+            pass
 
     def _consume_device_command_file(self, command_file: str):
         """读取并执行单个已经原子落盘的命令。"""
@@ -928,11 +996,26 @@ class DeviceManager:
 
 
 def get_shared_state_path() -> str:
-    """获取共享状态文件路径"""
-    if getattr(sys, 'frozen', False):
-        base = os.path.dirname(sys.executable)
-    else:
-        base = os.path.dirname(os.path.abspath(__file__))
+    """获取跨进程共享状态文件路径。
+
+    状态文件统一存放于系统临时目录（%TEMP%），
+    彻底避免在当前程序所在目录遗留 .device_state.json 文件。
+    """
+    base = os.path.join(tempfile.gettempdir(), 'WirelessDeviceBatteryMonitor')
+    os.makedirs(base, exist_ok=True)
+
+    # 顺带清理历史版本遗留在当前目录下的旧 .device_state.json
+    try:
+        if getattr(sys, 'frozen', False):
+            old_base = os.path.dirname(sys.executable)
+        else:
+            old_base = os.path.dirname(os.path.abspath(__file__))
+        old_state = os.path.join(old_base, '.device_state.json')
+        if os.path.isfile(old_state):
+            os.remove(old_state)
+    except Exception:
+        pass
+
     return os.path.join(base, '.device_state.json')
 
 
@@ -990,6 +1073,12 @@ def _serialize_bluetooth_candidate(candidate: BluetoothCandidate) -> dict:
         'device_id': candidate.device_id,
         'name': candidate.name,
         'connected': candidate.connected,
+        'container_id': candidate.container_id,
+        'bluetooth_address': candidate.bluetooth_address,
+        'transport': candidate.transport,
+        'alternate_device_ids': list(candidate.alternate_device_ids),
+        'ble_device_ids': list(candidate.ble_device_ids),
+        'classic_device_ids': list(candidate.classic_device_ids),
     }
 
 
@@ -1014,6 +1103,19 @@ def _coerce_shared_bool(value) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {'1', 'true', 'yes', 'on'}
     return False
+
+
+def _coerce_shared_optional_bool(value) -> bool | None:
+    """恢复允许未知的充电状态，兼容旧状态文件中的布尔值。"""
+    if value is None:
+        return None
+    return _coerce_shared_bool(value)
+
+
+def _coerce_shared_string_tuple(value) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(item).strip() for item in value if str(item).strip())
 
 
 def _coerce_shared_percentage(value) -> int:
@@ -1109,6 +1211,12 @@ def _deserialize_bluetooth_candidate(item: dict) -> Optional[BluetoothCandidate]
         device_id=device_id,
         name=str(item.get('name', '') or '未知蓝牙设备'),
         connected=_coerce_shared_bool(item.get('connected', False)),
+        container_id=str(item.get('container_id', '') or ''),
+        bluetooth_address=int(item.get('bluetooth_address', 0) or 0),
+        alternate_device_ids=_coerce_shared_string_tuple(item.get('alternate_device_ids', [])),
+        transport=str(item.get('transport', 'ble') or 'ble'),
+        ble_device_ids=_coerce_shared_string_tuple(item.get('ble_device_ids', [])),
+        classic_device_ids=_coerce_shared_string_tuple(item.get('classic_device_ids', [])),
     )
 
 
@@ -1126,7 +1234,7 @@ def _deserialize_bluetooth_state(item: dict) -> Optional[BluetoothInfo]:
         device_id=device_id,
         name=str(item.get('name', '') or '未知蓝牙设备'),
         percentage=_coerce_shared_percentage(item.get('percentage', -1)),
-        charging=_coerce_shared_bool(item.get('charging', False)),
+        charging=_coerce_shared_optional_bool(item.get('charging', False)),
         status_text=str(item.get('status_text', '') or '未连接'),
         online=_coerce_shared_bool(item.get('online', False)),
         last_update=last_update,

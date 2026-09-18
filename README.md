@@ -28,12 +28,12 @@
 - **一眼查看电量**：在托盘图标或设置窗口中查看设备名称、电量百分比、充电状态和最近更新时间。
 - **适合无线外设**：面向 Logitech、Razer、ASUS ROG 2.4G/Omni 无线鼠标和部分 HID 无线外设设计。
 - **低电量提醒**：在关闭、10%、20%、30% 四档中选择提醒阈值，减少工作或游戏中突然断电的情况。
-- **多设备管理**：可同时展示多个已识别设备，也可添加多个 Windows 已配对的标准 BLE 电量设备。
+- **多设备管理**：可同时展示多个已识别设备，也可添加多个 Windows 已配对的 BLE 或经典蓝牙电量设备。
 - **键盘扩展**：支持 ASUS ROG 无线机械键盘（直连 / Omni）以及 Weikav（华奋达）双 8K 方案机械键盘的电量读取与绑定。
 - **轻量常驻**：系统托盘运行，支持扫描设备、手动刷新、会话级自动刷新、开机自启和中英文界面。
 - **可选自动更新**：从 GitHub Releases 检查新版本并完成更新，是否启用由用户决定。
 
-这些能力也使它适合作为 Windows mouse battery monitor、wireless mouse battery checker、Logitech battery monitor、Razer battery monitor、ASUS ROG battery monitor、HID battery utility 和 Bluetooth LE battery monitor 使用。
+这些能力也使它适合作为 Windows mouse battery monitor、wireless mouse battery checker、Logitech battery monitor、Razer battery monitor、ASUS ROG battery monitor、HID battery utility 和 Bluetooth battery monitor 使用。
 
 ## 支持范围
 
@@ -93,7 +93,16 @@ Logitech 设备的电量读取可能会与 Logitech G HUB 争用 HID 接口。�
 - Battery Level：`GATT 0x2A19`
 - 可添加多个设备；设备休眠时仍会保留在候选列表中
 
-仅使用厂商私有蓝牙协议，或没有向 Windows 暴露标准电量服务的设备，不属于当前支持范围。
+### 经典蓝牙耳机
+
+对于通过 Windows 音频链路连接的传统蓝牙耳机，程序会读取 Windows 暴露在 Hands-Free（HFP）设备节点上的电量属性：
+
+- 设备需要先与 Windows 配对，并处于已连接状态
+- 电量来源是 Windows HFP 电量信息，不是通用 BLE GATT 服务
+- 充电状态通常不会由 HFP 属性提供，界面会显示电量但不猜测充电状态
+- 如果耳机或驱动没有向 Windows 暴露 HFP 电量，设备仍可能出现在列表中，但电量会显示为不可用
+
+仅使用厂商私有蓝牙协议、没有向 Windows 暴露电量，或只支持 HSP 而没有可用 HFP 电量信息的设备，不属于当前通用读取范围。
 
 ### Weikav 双 8K 机械键盘
 
@@ -103,7 +112,7 @@ Logitech 设备的电量读取可能会与 Logitech G HUB 争用 HID 接口。�
 
 1. 打开 [Releases](https://github.com/ZGMFX01A/mouse-battery/releases)，下载最新的 `WirelessDeviceBatteryMonitor-<version>.exe`。
 2. 双击运行程序，确认 Windows 系统托盘出现“无线设备电量监控”图标。
-3. 使用 2.4G 接收器连接鼠标或键盘；BLE 设备先在 Windows 中完成配对。
+3. 使用 2.4G 接收器连接鼠标或键盘；蓝牙设备先在 Windows 中完成配对。
 4. 等待首次扫描；需要时点击“刷新电量”。
 5. 将鼠标悬停在托盘图标上，或打开设置窗口查看详细状态。
 
@@ -127,12 +136,12 @@ Logitech 设备的电量读取可能会与 Logitech G HUB 争用 HID 接口。�
 
 底部“自动刷新”开关控制当前设置窗口会话的状态同步，默认开启，约每 3 秒从托盘进程读取一次共享状态；托盘硬件轮询默认每 60 秒执行一次。该开关不会写入配置，重启后恢复开启。
 
-### 添加 BLE 设备
+### 添加蓝牙设备
 
 1. 先在 Windows 蓝牙设置中完成设备配对。
 2. 打开“无线设备电量监控”设置窗口。
 3. 点击“添加蓝牙设备”，等待 Windows 已配对设备列表加载。
-4. 选择公开标准 Battery Service 的设备并保存。
+4. 选择设备并保存；BLE 设备需要公开标准 Battery Service，经典蓝牙耳机需要 Windows 提供 HFP 电量信息。
 
 已添加的蓝牙设备卡片可以单独移除，之后可从已配对设备列表重新添加。
 
@@ -157,7 +166,7 @@ Logitech 设备的电量读取可能会与 Logitech G HUB 争用 HID 接口。�
 
 请依次确认：
 
-1. Logitech、Razer、ASUS ROG 鼠标通过 2.4G / Omni 无线接收器连接；标准 BLE 设备则通过“添加蓝牙设备”流程绑定。
+1. Logitech、Razer、ASUS ROG 鼠标通过 2.4G / Omni 无线接收器连接；BLE 设备和经典蓝牙耳机通过“添加蓝牙设备”流程绑定。
 2. 设备属于支持列表或同一协议系列。
 3. Logitech 用户已经退出 G HUB。
 4. 点击“刷新电量”；若 HID 接口仍被占用，可尝试以管理员身份运行。
@@ -172,7 +181,7 @@ Logitech 设备的电量读取可能会与 Logitech G HUB 争用 HID 接口。�
 
 ### BLE 设备为什么搜不到？
 
-只有已与 Windows 配对、并公开标准 `0x180F` / `0x2A19` 电量服务的设备才会出现在“添加蓝牙设备”候选列表中。程序会合并同一物理设备的多个 Windows 端点；厂商私有协议或不公开电量的设备无法通过通用 BLE 方式读取。
+BLE 设备需要已与 Windows 配对并公开标准 `0x180F` / `0x2A19` 电量服务；经典蓝牙耳机会通过 Windows 的 Hands-Free（HFP）端点识别。程序会合并同一物理设备的多个 Windows 端点；厂商私有协议或不公开电量的设备无法通过通用路径读取。
 
 ### 设置窗口提示“读取设备状态失败”怎么办？
 

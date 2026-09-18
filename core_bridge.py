@@ -179,23 +179,26 @@ def keyboard_binding_from_info(keyboard: KeyboardInfo) -> dict:
 
 
 def enumerate_bluetooth_candidates() -> list[BluetoothCandidate]:
-    """枚举 Windows 已配对 BLE 设备，包含未连接或休眠设备。"""
+    """枚举 Windows 已配对的 BLE 与经典蓝牙设备。"""
     return _enumerate_bluetooth_candidates()
 
 
 def probe_bluetooth_candidate(candidate: BluetoothCandidate) -> BluetoothInfo:
-    """绑定前验证在线设备的标准 Battery Service。"""
+    """绑定前验证在线设备的 BLE GATT 或经典蓝牙 HFP 电量路径。"""
     return _probe_bluetooth_candidate(candidate)
 
 
 def read_bluetooth_batteries(bindings: list[dict]) -> list[BluetoothInfo]:
-    """批量刷新公开壳保存的 BLE 绑定。"""
+    """批量刷新公开壳保存的 BLE 与经典蓝牙绑定。"""
     return _read_bluetooth_batteries(bindings)
 
 
 def bluetooth_binding_from_candidate(candidate: BluetoothCandidate) -> dict:
-    """把 BLE 候选 DTO 转成公开壳可持久化的最小绑定。"""
+    """把蓝牙候选 DTO 转成可跨 Windows 端点重枚举的绑定。"""
     return {
         'device_id': candidate.device_id,
         'name': candidate.name,
+        'transport': candidate.transport,
+        'container_id': candidate.container_id,
+        'bluetooth_address': candidate.bluetooth_address,
     }

@@ -2,7 +2,7 @@
 
 [简体中文](README.md)
 
-**Wireless Device Battery Monitor** is a lightweight Windows system-tray battery monitor for Logitech, Razer, and ASUS ROG wireless mice and keyboards, mechanical keyboards, and Windows-paired Bluetooth LE devices that expose the standard Battery Service. See battery percentage, charging state, last update time, and low-battery alerts without keeping a vendor control panel open.
+**Wireless Device Battery Monitor** is a lightweight Windows system-tray battery monitor for Logitech, Razer, and ASUS ROG wireless mice and keyboards, mechanical keyboards, and Windows-paired Bluetooth devices whose battery data is exposed through BLE Battery Service or Classic Bluetooth HFP. See battery percentage, charging state, last update time, and low-battery alerts without keeping a vendor control panel open.
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
@@ -28,12 +28,12 @@ The screenshot shows multi-device battery cards, charging state, low-battery thr
 - **At-a-glance battery status**: See device name, battery percentage, charging state, and last update time from the tray or settings window.
 - **Built for wireless peripherals**: Designed for Logitech, Razer, and ASUS ROG 2.4 GHz / Omni wireless mice and compatible HID devices.
 - **Low-battery notifications**: Choose Off, 10%, 20%, or 30% and avoid unexpected power loss during work or gaming.
-- **Multiple devices**: Show several detected devices and bind multiple Windows-paired standard BLE battery devices.
+- **Multiple devices**: Show several detected devices and bind multiple Windows-paired BLE or Classic Bluetooth battery devices.
 - **Keyboard support**: Read and bind battery status for ASUS ROG wireless keyboards (direct / Omni) and Weikav (Huafenda) dual-8K mechanical keyboard solutions.
 - **Quiet background utility**: Device scanning, manual refresh, session auto-refresh, startup launch, and bilingual UI in a small tray application.
 - **Optional auto-update**: Check GitHub Releases and update the packaged app when you enable the option.
 
-The project is also useful as a Windows mouse battery monitor, wireless mouse battery checker, Logitech battery monitor, Razer battery monitor, ASUS ROG battery monitor, HID battery utility, system tray battery app, or Bluetooth LE battery monitor.
+The project is also useful as a Windows mouse battery monitor, wireless mouse battery checker, Logitech battery monitor, Razer battery monitor, ASUS ROG battery monitor, HID battery utility, system tray battery app, or Bluetooth battery monitor.
 
 ## Supported devices
 
@@ -93,7 +93,16 @@ The app supports devices that are already paired with Windows and expose the sta
 - Battery Level: `GATT 0x2A19`
 - Multiple devices can be added; sleeping devices remain in the picker
 
-Devices that use a vendor-private Bluetooth protocol or do not expose battery data to Windows are outside the current support boundary.
+### Classic Bluetooth headsets
+
+For traditional Bluetooth headsets connected through the Windows audio path, the app reads the battery value exposed on the Windows Hands-Free (HFP) device node:
+
+- The headset must be paired with Windows and connected
+- The value comes from Windows HFP battery information, not from a generic BLE GATT service
+- HFP normally does not expose charging state, so the app shows the percentage without guessing whether it is charging
+- If the headset or driver does not expose HFP battery information, it may still appear in the picker with an unavailable battery value
+
+Vendor-private protocols, devices that do not expose battery data to Windows, and HSP-only devices without usable HFP battery information remain outside the generic support boundary.
 
 ### Weikav dual-8K mechanical keyboards
 
@@ -103,7 +112,7 @@ Current support targets the Weikav (Huafenda) dual-8K receiver path over a 2.4 G
 
 1. Open [Releases](https://github.com/ZGMFX01A/mouse-battery/releases) and download the latest `WirelessDeviceBatteryMonitor-<version>.exe`.
 2. Launch the executable and confirm that the Wireless Device Battery Monitor icon appears in the Windows system tray.
-3. Connect the mouse or keyboard through its 2.4 GHz receiver; pair BLE devices in Windows first.
+3. Connect the mouse or keyboard through its 2.4 GHz receiver; pair Bluetooth devices in Windows first.
 4. Wait for the first scan, then select **Refresh battery** when needed.
 5. Hover over the tray icon or open Settings to inspect detailed status.
 
@@ -127,12 +136,12 @@ Use the minus/plus control in Settings to choose Off, 10%, 20%, or 30%. Windows 
 
 The **Auto Refresh** switch controls the current settings-window session and is enabled by default. The GUI reads shared state from the tray process about every 3 seconds, while the tray hardware poll runs every 60 seconds by default. This session switch is not persisted and returns to enabled after restart.
 
-### Add a Bluetooth LE device
+### Add a Bluetooth device
 
 1. Pair the device in Windows Bluetooth settings.
 2. Open Wireless Device Battery Monitor Settings.
 3. Select **Add Bluetooth Device** and wait for the paired-device list.
-4. Choose a device that exposes the standard Battery Service and save it.
+4. Choose a device and save it. BLE devices need the standard Battery Service; Classic Bluetooth headsets need Windows HFP battery information.
 
 Added Bluetooth cards can be removed individually and added again later from the paired-device list.
 
@@ -157,7 +166,7 @@ Click the language button in the upper-right corner of the Settings card to swit
 
 Check the following in order:
 
-1. Logitech, Razer, and ASUS ROG mice are connected through a 2.4 GHz / Omni wireless receiver; standard BLE devices are added through **Add Bluetooth Device**.
+1. Logitech, Razer, and ASUS ROG mice are connected through a 2.4 GHz / Omni wireless receiver; BLE devices and Classic Bluetooth headsets are added through **Add Bluetooth Device**.
 2. The model is listed above or belongs to a compatible protocol family.
 3. Logitech users have closed G HUB.
 4. Select **Refresh battery**; if the HID interface is still occupied, try running the app as administrator.
@@ -172,7 +181,7 @@ Small differences can result from refresh timing, device sleep state, or percent
 
 ### Why can’t I find my BLE device?
 
-Only Windows-paired devices exposing the standard `0x180F` / `0x2A19` battery service appear in the **Add Bluetooth Device** picker. Windows endpoints belonging to the same physical device are deduplicated. Vendor-private protocols and devices that do not expose battery data cannot be read through the generic BLE path.
+BLE devices need the standard `0x180F` / `0x2A19` battery service; Classic Bluetooth headsets are matched through their Windows Hands-Free (HFP) endpoint. Windows endpoints belonging to the same physical device are deduplicated. Vendor-private protocols and devices that do not expose battery data cannot be read through the generic paths.
 
 ### The settings window says “Failed to Read Device Status”
 
