@@ -144,7 +144,6 @@ def request_device_command(action: str, payload: Optional[dict] = None):
     with open(temp_file, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False)
         f.flush()
-        os.fsync(f.fileno())
     os.replace(temp_file, command_file)
     return request_id
 
@@ -177,6 +176,8 @@ class DeviceManager:
         self._mouse_to_device: list[tuple[Brand, MouseBackendHandle]] = []
         self._lock = threading.Lock()
         self._io_lock = threading.Lock()  # 串行化 scan/refresh，避免并发读写 HID
+        self._bluetooth_lock = threading.Lock()  # 串行化蓝牙绑定与电量刷新，避免并发竞态
+        self._shared_state_write_lock = threading.Lock()  # 串行化共享状态文件写入与原子替换，避免并发冲突
         self._consecutive_failures: dict[str, int] = {}
         self._reconnect_failure_threshold = 3
         self._reconnect_cooldown_sec = 30
@@ -272,28 +273,39 @@ class DeviceManager:
         保持写入原子性，避免 GUI 读到半截 JSON。
         """
         state_file = get_shared_state_path()
-        temp_file = f"{state_file}.{os.getpid()}.tmp"
+        temp_file = f"{state_file}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
         try:
-            with self._lock:
-                data = {
-                    'mice': [_serialize_mouse_state(m) for m in self._mice],
-                    'keyboard': _serialize_keyboard_state(self._keyboard),
-                    'keyboard_candidates': [_serialize_keyboard_candidate(candidate) for candidate in self._keyboard_candidates],
-                    'keyboard_scan_state': self._keyboard_scan_state,
-                    'keyboard_scan_message': self._keyboard_scan_message,
-                    'bluetooth_devices': [_serialize_bluetooth_state(item) for item in self._bluetooth_devices],
-                    'bluetooth_candidates': [_serialize_bluetooth_candidate(item) for item in self._bluetooth_candidates],
-                    'bluetooth_scan_state': self._bluetooth_scan_state,
-                    'bluetooth_scan_message': self._bluetooth_scan_message,
-                    'bluetooth_request_id': self._bluetooth_request_id,
-                }
+            with self._shared_state_write_lock:
+                # 核心：必须在获得写锁之后抓取当前最新快照，彻底杜绝“旧快照后写覆盖新快照”
+                with self._lock:
+                    data = {
+                        'mice': [_serialize_mouse_state(m) for m in self._mice],
+                        'keyboard': _serialize_keyboard_state(self._keyboard),
+                        'keyboard_candidates': [_serialize_keyboard_candidate(candidate) for candidate in self._keyboard_candidates],
+                        'keyboard_scan_state': self._keyboard_scan_state,
+                        'keyboard_scan_message': self._keyboard_scan_message,
+                        'bluetooth_devices': [_serialize_bluetooth_state(item) for item in self._bluetooth_devices],
+                        'bluetooth_candidates': [_serialize_bluetooth_candidate(item) for item in self._bluetooth_candidates],
+                        'bluetooth_scan_state': self._bluetooth_scan_state,
+                        'bluetooth_scan_message': self._bluetooth_scan_message,
+                        'bluetooth_request_id': self._bluetooth_request_id,
+                    }
 
-            # 先写临时文件再替换正式文件，避免 GUI 在读取时遇到半截 JSON。
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(temp_file, state_file)
+                # 先写独立临时文件再原子替换正式文件，避免并发截断与 GUI 读到半截 JSON
+                with open(temp_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False)
+                    f.flush()
+                    os.fsync(f.fileno())
+
+                # Windows 平台 os.replace 瞬态占用防御（带 3 次微退避重试）
+                for attempt in range(3):
+                    try:
+                        os.replace(temp_file, state_file)
+                        break
+                    except PermissionError:
+                        if attempt == 2:
+                            raise
+                        time.sleep(0.05)
         except Exception as e:
             logger.error(f"写入共享状态文件失败: {type(e).__name__}: {e}")
             try:
@@ -362,26 +374,31 @@ class DeviceManager:
             self._keyboard_scan_message = message
 
     def _refresh_bluetooth_locked(self):
-        bindings = self.config_manager.bluetooth_bindings
-        if not bindings:
+        lock = getattr(self, '_bluetooth_lock', None)
+        if lock is None:
+            lock = threading.Lock()
+            self._bluetooth_lock = lock
+        with lock:
+            bindings = self.config_manager.bluetooth_bindings
+            if not bindings:
+                with self._lock:
+                    self._bluetooth_devices = []
+                return
+            try:
+                snapshots = read_bluetooth_batteries(bindings)
+            except Exception as exc:
+                logger.error('刷新蓝牙设备失败: %s: %s', type(exc).__name__, exc)
+                snapshots = [
+                    BluetoothInfo(
+                        device_id=item['device_id'],
+                        name=item['name'],
+                        status_text=f'蓝牙刷新失败：{type(exc).__name__}',
+                        last_update=time.time(),
+                    )
+                    for item in bindings
+                ]
             with self._lock:
-                self._bluetooth_devices = []
-            return
-        try:
-            snapshots = read_bluetooth_batteries(bindings)
-        except Exception as exc:
-            logger.error('刷新蓝牙设备失败: %s: %s', type(exc).__name__, exc)
-            snapshots = [
-                BluetoothInfo(
-                    device_id=item['device_id'],
-                    name=item['name'],
-                    status_text=f'蓝牙刷新失败：{type(exc).__name__}',
-                    last_update=time.time(),
-                )
-                for item in bindings
-            ]
-        with self._lock:
-            self._bluetooth_devices = snapshots
+                self._bluetooth_devices = snapshots
 
     def _scan_bluetooth_candidates(self, request_id: int = 0):
         with self._lock:
@@ -390,8 +407,9 @@ class DeviceManager:
             self._bluetooth_request_id = request_id
         self._notify_update()
         try:
-            with self._io_lock:
-                candidates = enumerate_bluetooth_candidates()
+            # 蓝牙枚举仅调用 Windows WinRT API 查询系统配对列表，不操作任何 HID 句柄；
+            # 脱离 _io_lock，彻底避免与后台鼠标键盘电量轮询产生锁争抢与卡顿。
+            candidates = enumerate_bluetooth_candidates()
         except Exception as exc:
             logger.error('枚举蓝牙设备失败: %s', exc)
             with self._lock:
@@ -411,10 +429,22 @@ class DeviceManager:
         self._notify_update()
 
     def _bind_bluetooth(self, device_id: str, request_id: int = 0):
-        try:
-            with self._io_lock:
-                candidates = self.bluetooth_candidates or enumerate_bluetooth_candidates()
+        lock = getattr(self, '_bluetooth_lock', None)
+        if lock is None:
+            lock = threading.Lock()
+            self._bluetooth_lock = lock
+        with lock:
+            try:
+                # 优先从现有候选缓存匹配；若未命中（例如用户新配对了设备），立即实时重扫 Windows 蓝牙列表，避免缓存脱节
+                with self._lock:
+                    candidates = list(self._bluetooth_candidates)
                 target = next((item for item in candidates if item.device_id == device_id), None)
+                if target is None:
+                    candidates = enumerate_bluetooth_candidates()
+                    with self._lock:
+                        self._bluetooth_candidates = candidates
+                    target = next((item for item in candidates if item.device_id == device_id), None)
+
                 if target is None:
                     raise ValueError('未找到对应的 Windows 已配对蓝牙设备。')
                 if any(
@@ -432,26 +462,31 @@ class DeviceManager:
                 if not self.config_manager.add_bluetooth_binding(
                         bluetooth_binding_from_candidate(target)):
                     raise ValueError('该蓝牙设备已经添加。')
-        except Exception as exc:
-            logger.error('绑定蓝牙设备失败: %s', exc)
+            except Exception as exc:
+                logger.error('绑定蓝牙设备失败: %s', exc)
+                with self._lock:
+                    self._bluetooth_scan_state = 'error'
+                    self._bluetooth_scan_message = f'绑定失败：{exc}'
+                    self._bluetooth_request_id = request_id
+                self._notify_update()
+                return
             with self._lock:
-                self._bluetooth_scan_state = 'error'
-                self._bluetooth_scan_message = f'绑定失败：{exc}'
-                self._bluetooth_request_id = request_id
+                self._bluetooth_devices.append(snapshot)
+                self._bluetooth_scan_state = 'bound'
+                self._bluetooth_scan_message = f'已添加蓝牙设备：{target.name}'
             self._notify_update()
-            return
-        with self._lock:
-            self._bluetooth_devices.append(snapshot)
-            self._bluetooth_scan_state = 'bound'
-            self._bluetooth_scan_message = f'已添加蓝牙设备：{target.name}'
-        self._notify_update()
 
     def _unbind_bluetooth(self, device_id: str):
-        self.config_manager.remove_bluetooth_binding(device_id)
-        with self._lock:
-            self._bluetooth_devices = [item for item in self._bluetooth_devices if item.device_id != device_id]
-            self._bluetooth_scan_message = '已移除蓝牙设备'
-        self._notify_update()
+        lock = getattr(self, '_bluetooth_lock', None)
+        if lock is None:
+            lock = threading.Lock()
+            self._bluetooth_lock = lock
+        with lock:
+            self.config_manager.remove_bluetooth_binding(device_id)
+            with self._lock:
+                self._bluetooth_devices = [item for item in self._bluetooth_devices if item.device_id != device_id]
+                self._bluetooth_scan_message = '已移除蓝牙设备'
+            self._notify_update()
 
     def _scan_keyboard_candidates(self):
         """由 tray 进程枚举可绑定的键盘候选接口。"""
@@ -652,7 +687,7 @@ class DeviceManager:
 
     def _command_loop(self):
         """持续监听 GUI 发来的命令文件。"""
-        while not self._command_stop_event.wait(0.8):
+        while not self._command_stop_event.wait(0.15):
             try:
                 self._consume_device_command()
             except Exception as e:
@@ -1439,6 +1474,10 @@ class SharedStateDeviceManager:
                 '读取共享状态失败，当前显示上次有效结果。请稍后重试或确认托盘进程是否正常。'
             )
             logger.warning(f"读取共享状态文件失败，沿用上次有效快照: {type(e).__name__}: {e}")
+
+    def sync_shared_state_silently(self):
+        """静默从共享状态文件同步数据，不触发全应用更新回调。供后台快速轮询使用。"""
+        self._read_shared_state()
 
     def scan_and_refresh(self):
         self._read_shared_state()

@@ -30,7 +30,13 @@ from devices import (
     DEVICE_COMMAND_UNBIND_BLUETOOTH,
     DEVICE_COMMAND_REFRESH_TRAY_ICON,
 )
-from core_bridge import BluetoothCandidate, BluetoothInfo, KeyboardInfo, KeyboardCandidate
+from core_bridge import (
+    BluetoothCandidate,
+    BluetoothInfo,
+    KeyboardInfo,
+    KeyboardCandidate,
+    enumerate_bluetooth_candidates,
+)
 from config import (
     ConfigManager,
     APP_VERSION,
@@ -772,7 +778,8 @@ def build_mouse_card(mouse: MouseInfo, app_ref: "MouseBatteryApp" = None) -> ft.
 
 def build_keyboard_card(keyboard: KeyboardInfo, on_remove=None, app_ref: "MouseBatteryApp" = None) -> ft.Container:
     """构建键盘设备信息卡片，沿用统一 Apple 玻璃拟态版式。"""
-    is_offline = (not keyboard.online) or (keyboard.percentage < 0)
+    has_percentage = keyboard.percentage is not None and keyboard.percentage >= 0
+    is_offline = (not keyboard.online) or not has_percentage
 
     if is_offline:
         dot_color = COLORS['offline']
@@ -996,6 +1003,19 @@ class MouseBatteryApp:
         self._bluetooth_selected_device_id = ''
         self._bluetooth_dialog_loading = False
         self._bluetooth_pending_request_id = 0
+        self._last_bluetooth_dialog_signature = None
+        self._bluetooth_is_binding = False
+        self._bluetooth_binding_name = ''
+        self._local_bluetooth_candidates: Optional[list[BluetoothCandidate]] = None
+        self._local_bluetooth_scan_busy: bool = False
+        self._local_bluetooth_scan_error: str = ''
+        self._local_bluetooth_scan_callbacks: list = []
+        self._local_scan_callbacks_lock = threading.Lock()
+        self._optimistic_bluetooth_devices: dict[str, BluetoothInfo] = {}
+        self._optimistic_removed_bluetooth_ids: set[str] = set()
+        self._optimistic_removed_keyboard: bool = False
+        # 使用 RLock（可重入互斥锁）避免 GUI 复杂回调/刷新与快照读取之间的同线程自死锁
+        self._optimistic_lock = threading.RLock()
         # 动作按钮忙碌标记：Container.disabled 在 Flet 中无法拦截 on_click，
         # 这里用显式锁替代，避免扫描/刷新/检查更新在执行中被重复点击触发并发。
         self._scan_busy = False
@@ -1019,7 +1039,9 @@ class MouseBatteryApp:
 
     def _effective_language(self) -> str:
         """返回当前 GUI 应使用的实际语言。"""
-        return self.config_manager.effective_ui_language
+        if hasattr(self, 'config_manager') and self.config_manager:
+            return self.config_manager.effective_ui_language
+        return 'zh_CN'
 
     def _t(self, key: str, **kwargs) -> str:
         """按当前语言获取 GUI 静态文案。"""
@@ -1073,6 +1095,9 @@ class MouseBatteryApp:
         self._bluetooth_selected_device_id = ''
         self._bluetooth_dialog_loading = False
         self._bluetooth_pending_request_id = 0
+        self._last_bluetooth_dialog_signature = None
+        self._bluetooth_is_binding = False
+        self._bluetooth_binding_name = ''
         self._last_render_signature = None
         self.settings_card = None
         self.settings_content_box = None
@@ -1137,6 +1162,41 @@ class MouseBatteryApp:
         self.page.show_dialog(dlg)
         return dlg
 
+    def _show_toast(self, message: str, icon=None, is_error: bool = False, duration: int = 2200):
+        """统一弹出全局轻量浮动提示 (Toast)，提供即时操作反馈。"""
+        if not getattr(self, 'page', None):
+            return
+
+        icon_name = icon or (ft.Icons.ERROR_OUTLINE if is_error else ft.Icons.CHECK_CIRCLE_OUTLINE)
+        icon_color = COLORS['destructive'] if is_error else COLORS['accent_green']
+        bg_color = COLORS['bg_card']
+        text_color = COLORS['text_primary']
+
+        snack = ft.SnackBar(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(icon_name, size=18, color=icon_color),
+                    ft.Text(message, size=13, weight=ft.FontWeight.W_500, color=text_color),
+                ],
+                spacing=10,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=bg_color,
+            duration=duration,
+            behavior=ft.SnackBarBehavior.FLOATING,
+            shape=ft.RoundedRectangleBorder(radius=12),
+            open=True,
+        )
+
+        try:
+            if not getattr(self.page, 'overlay', None):
+                self.page.overlay = []
+            self.page.overlay.append(snack)
+            self._safe_update()
+        except Exception as ex:
+            logger.debug(f'显示 Toast 失败: {ex}')
+
     def _set_btn_disabled_visual(self, btn_row: Optional[ft.Row], disabled: bool, icon_default, label_default: str):
         """统一处理按钮视觉禁用状态。
 
@@ -1179,8 +1239,23 @@ class MouseBatteryApp:
         return state, self._translate_runtime_text(message)
 
     def _keyboard_snapshot(self) -> Optional[KeyboardInfo]:
-        """弱依赖读取当前共享状态里的键盘快照。"""
-        return getattr(self.device_manager, 'keyboard', None)
+        """弱依赖读取当前共享状态里的键盘快照，支持乐观移除。"""
+        current = getattr(self.device_manager, 'keyboard', None)
+        lock = getattr(self, '_optimistic_lock', None)
+        if lock:
+            with lock:
+                if getattr(self, '_optimistic_removed_keyboard', False):
+                    if not current:
+                        self._optimistic_removed_keyboard = False
+                    else:
+                        return None
+        else:
+            if getattr(self, '_optimistic_removed_keyboard', False):
+                if not current:
+                    self._optimistic_removed_keyboard = False
+                else:
+                    return None
+        return current
 
     def _keyboard_candidates_snapshot(self) -> list[KeyboardCandidate]:
         """弱依赖读取共享状态里的键盘候选列表。"""
@@ -1194,10 +1269,94 @@ class MouseBatteryApp:
         )
 
     def _bluetooth_devices_snapshot(self) -> list[BluetoothInfo]:
-        return list(getattr(self.device_manager, 'bluetooth_devices', []) or [])
+        devices = list(getattr(self.device_manager, 'bluetooth_devices', []) or [])
+        underlying_ids = {d.device_id for d in devices}
+        optimistic_items: list[BluetoothInfo] = []
+        lock = getattr(self, '_optimistic_lock', None)
+        if lock:
+            with lock:
+                removed_ids = set(getattr(self, '_optimistic_removed_bluetooth_ids', set()))
+                for dev_id in list(removed_ids):
+                    if dev_id not in underlying_ids:
+                        self._optimistic_removed_bluetooth_ids.discard(dev_id)
+                        removed_ids.discard(dev_id)
+
+                devices = [d for d in devices if d.device_id not in removed_ids]
+                device_ids = {d.device_id for d in devices}
+                optimistic_dict = getattr(self, '_optimistic_bluetooth_devices', {})
+                for dev_id in list(optimistic_dict.keys()):
+                    if dev_id in device_ids or dev_id in removed_ids:
+                        optimistic_dict.pop(dev_id, None)
+                optimistic_items = [d for d in list(optimistic_dict.values()) if d.device_id not in removed_ids]
+        else:
+            removed_ids = set(getattr(self, '_optimistic_removed_bluetooth_ids', set()))
+            for dev_id in list(removed_ids):
+                if dev_id not in underlying_ids:
+                    if hasattr(self, '_optimistic_removed_bluetooth_ids'):
+                        self._optimistic_removed_bluetooth_ids.discard(dev_id)
+                    removed_ids.discard(dev_id)
+            devices = [d for d in devices if d.device_id not in removed_ids]
+            device_ids = {d.device_id for d in devices}
+            optimistic_dict = getattr(self, '_optimistic_bluetooth_devices', {})
+            for dev_id in list(optimistic_dict.keys()):
+                if dev_id in device_ids or dev_id in removed_ids:
+                    optimistic_dict.pop(dev_id, None)
+            optimistic_items = [d for d in list(optimistic_dict.values()) if d.device_id not in removed_ids]
+        return devices + optimistic_items
 
     def _bluetooth_candidates_snapshot(self) -> list[BluetoothCandidate]:
+        if getattr(self, '_local_bluetooth_scan_error', ''):
+            return []
+        if getattr(self, '_local_bluetooth_candidates', None) is not None:
+            return list(self._local_bluetooth_candidates)
         return list(getattr(self.device_manager, 'bluetooth_candidates', []) or [])
+
+    def _async_load_bluetooth_candidates(self, on_done=None):
+        """在后台线程直接调用 Windows API 枚举已配对蓝牙设备，支持 SingleFlight 回调排队合并。"""
+        if not hasattr(self, '_local_bluetooth_scan_callbacks'):
+            self._local_bluetooth_scan_callbacks = []
+        callbacks_lock = getattr(self, '_local_scan_callbacks_lock', None)
+        if callbacks_lock:
+            with callbacks_lock:
+                if on_done:
+                    self._local_bluetooth_scan_callbacks.append(on_done)
+                if getattr(self, '_local_bluetooth_scan_busy', False):
+                    return
+                self._local_bluetooth_scan_busy = True
+        else:
+            if on_done:
+                self._local_bluetooth_scan_callbacks.append(on_done)
+            if getattr(self, '_local_bluetooth_scan_busy', False):
+                return
+            self._local_bluetooth_scan_busy = True
+
+        def worker():
+            try:
+                candidates = enumerate_bluetooth_candidates()
+                self._local_bluetooth_candidates = candidates
+                self._local_bluetooth_scan_error = ''
+            except Exception as exc:
+                logger.error('本地枚举蓝牙设备失败: %s', exc)
+                self._local_bluetooth_candidates = []
+                self._local_bluetooth_scan_error = f'扫描失败：{type(exc).__name__}: {exc}'
+            finally:
+                self._local_bluetooth_scan_busy = False
+                cbs = []
+                if callbacks_lock:
+                    with callbacks_lock:
+                        cbs = list(self._local_bluetooth_scan_callbacks)
+                        self._local_bluetooth_scan_callbacks.clear()
+                else:
+                    cbs = list(self._local_bluetooth_scan_callbacks)
+                    self._local_bluetooth_scan_callbacks.clear()
+
+                for cb in cbs:
+                    try:
+                        cb()
+                    except Exception as ex:
+                        logger.error(f'蓝牙候选设备加载完成回调异常: {ex}')
+
+        threading.Thread(target=worker, daemon=True, name='local-bt-scanner').start()
 
     def _bluetooth_scan_state(self) -> tuple[str, str]:
         return (
@@ -1344,16 +1503,56 @@ class MouseBatteryApp:
             self._safe_update()
 
         def confirm_remove(evt):
+            lock = getattr(self, '_optimistic_lock', None)
+            if lock:
+                with lock:
+                    self._optimistic_removed_keyboard = True
+            else:
+                self._optimistic_removed_keyboard = True
+            close_confirm(evt)
+            self._refresh_ui(force_rebuild=True)
+            self._show_toast(self._t('toast.keyboard_removed'))
+
             try:
                 request_device_command(DEVICE_COMMAND_UNBIND_KEYBOARD)
             except Exception as ex:
                 logger.error(f'提交解除键盘绑定命令失败: {ex}')
+                if lock:
+                    with lock:
+                        self._optimistic_removed_keyboard = False
+                else:
+                    self._optimistic_removed_keyboard = False
                 self._show_dialog(
                     self._t('keyboard.remove.failed.title'),
                     self._t('keyboard.remove.failed.message', error=ex),
                 )
+                self._refresh_ui(force_rebuild=True)
                 return
-            close_confirm(evt)
+
+            def poll_worker():
+                deadline = time.time() + 6.0
+                while time.time() < deadline:
+                    time.sleep(0.15)
+                    if not getattr(self, 'page', None):
+                        break
+                    try:
+                        if hasattr(self.device_manager, 'sync_shared_state_silently'):
+                            self.device_manager.sync_shared_state_silently()
+                        else:
+                            self.device_manager.refresh_only()
+                    except Exception:
+                        pass
+                    if not getattr(self.device_manager, 'keyboard', None):
+                        if lock:
+                            with lock:
+                                self._optimistic_removed_keyboard = False
+                        else:
+                            self._optimistic_removed_keyboard = False
+                        if getattr(self, 'page', None):
+                            self._refresh_ui(force_rebuild=True)
+                        break
+
+            threading.Thread(target=poll_worker, daemon=True, name='kb-unbind-poll').start()
 
         dialog_holder['dialog'] = self._show_dialog(
             self._t('keyboard.remove.title'),
@@ -1509,6 +1708,9 @@ class MouseBatteryApp:
         self._bluetooth_bind_action = None
         self._bluetooth_dialog_loading = False
         self._bluetooth_pending_request_id = 0
+        self._last_bluetooth_dialog_signature = None
+        self._bluetooth_is_binding = False
+        self._bluetooth_binding_name = ''
         self._safe_update()
 
     @staticmethod
@@ -1527,66 +1729,189 @@ class MouseBatteryApp:
         if not self._bluetooth_selected_device_id and available:
             self._bluetooth_selected_device_id = available[0].device_id
 
-        if self._bluetooth_dialog_loading or scan_state in ('loading', 'binding'):
+        is_scanning = self._bluetooth_dialog_loading or getattr(self, '_local_bluetooth_scan_busy', False)
+        is_binding = getattr(self, '_bluetooth_is_binding', False) or scan_state == 'binding'
+        binding_name = getattr(self, '_bluetooth_binding_name', '')
+        if is_binding:
+            binding_label = binding_name or scan_message or self._t('bluetooth.dialog.binding')
+            loading_msg = f"{self._t('bluetooth.dialog.binding')} ({binding_label})" if binding_name else (scan_message or self._t('bluetooth.dialog.binding'))
             return ft.Column(
                 controls=[
                     ft.ProgressRing(width=26, height=26, color=COLORS['accent_green']),
-                    ft.Text(scan_message or self._t('bluetooth.dialog.loading'), size=13, color=COLORS['text_secondary']),
+                    ft.Text(loading_msg, size=13, color=COLORS['text_secondary']),
                 ],
                 tight=True,
                 spacing=14,
+                width=420,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+
+        if is_scanning and not candidates:
+            return ft.Column(
+                controls=[
+                    ft.ProgressRing(width=26, height=26, color=COLORS['accent_green']),
+                    ft.Text(self._t('bluetooth.dialog.loading'), size=13, color=COLORS['text_secondary']),
+                ],
+                tight=True,
+                spacing=14,
+                width=420,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             )
 
         if not candidates:
+            empty_msg = getattr(self, '_local_bluetooth_scan_error', '') or scan_message or self._t('bluetooth.dialog.empty_message')
             return ft.Column(
                 controls=[
                     ft.Text(self._t('bluetooth.dialog.empty_title'), size=15, weight=ft.FontWeight.W_600),
-                    ft.Text(scan_message or self._t('bluetooth.dialog.empty_message'), size=13, color=COLORS['text_secondary']),
+                    ft.Text(empty_msg, size=13, color=COLORS['destructive'] if getattr(self, '_local_bluetooth_scan_error', '') else COLORS['text_secondary']),
                 ],
                 tight=True,
                 spacing=10,
+                width=420,
             )
 
         controls = []
-        if scan_state == 'error':
+        if getattr(self, '_local_bluetooth_scan_error', ''):
+            controls.append(ft.Text(self._local_bluetooth_scan_error, size=13, color=COLORS['destructive']))
+        elif scan_state == 'error':
             controls.append(ft.Text(scan_message, size=13, color=COLORS['destructive']))
         controls.append(ft.Text(self._t('bluetooth.dialog.helper'), size=13, color=COLORS['text_secondary']))
+
+        radio_controls = []
+        for item in candidates:
+            display_name = item.name if len(item.name) <= 24 else f'{item.name[:22]}…'
+            status_key = (
+                'bluetooth.status.classic_connected'
+                if item.transport == 'classic' and item.connected
+                else 'bluetooth.status.dual_connected'
+                if item.transport == 'dual' and item.connected
+                else 'bluetooth.status.connected'
+                if item.connected
+                else 'bluetooth.status.sleeping'
+            )
+            status_text = self._t(status_key) + (
+                self._t('bluetooth.status.added')
+                if self._bluetooth_candidate_is_bound(item, bound_ids) else ''
+            )
+            radio_controls.append(
+                ft.Radio(
+                    value=item.device_id,
+                    disabled=self._bluetooth_candidate_is_bound(item, bound_ids),
+                    tooltip=item.name if len(item.name) > 24 else None,
+                    label=self._t(
+                        'bluetooth.dialog.option',
+                        name=display_name,
+                        status=status_text,
+                    ),
+                )
+            )
+
         controls.append(ft.RadioGroup(
             value=self._bluetooth_selected_device_id,
             on_change=self._on_bluetooth_candidate_change,
             content=ft.Column(
-                controls=[
-                    ft.Radio(
-                        value=item.device_id,
-                        disabled=self._bluetooth_candidate_is_bound(item, bound_ids),
-                        label=self._t(
-                            'bluetooth.dialog.option',
-                            name=item.name,
-                            status=self._t(
-                                (
-                                    'bluetooth.status.classic_connected'
-                                    if item.transport == 'classic' and item.connected
-                                    else 'bluetooth.status.dual_connected'
-                                    if item.transport == 'dual' and item.connected
-                                    else 'bluetooth.status.connected'
-                                    if item.connected
-                                    else 'bluetooth.status.sleeping'
-                                )
-                            ) + (
-                                self._t('bluetooth.status.added')
-                                if self._bluetooth_candidate_is_bound(item, bound_ids) else ''
-                            ),
-                        ),
-                    )
-                    for item in candidates
-                ],
+                controls=radio_controls,
                 tight=True,
                 spacing=8,
                 scroll=ft.ScrollMode.AUTO,
             ),
         ))
-        return ft.Column(controls=controls, tight=True, spacing=12, height=320)
+        return ft.Column(controls=controls, tight=True, spacing=12, width=420, height=320)
+
+    def _start_bluetooth_request_poll(self, request_id: int, target_device_id: str = ''):
+        """启动后台短周期轮询，快速检测蓝牙命令执行结果，避免被动等待 3 秒大周期。"""
+        if not request_id:
+            return
+
+        def poll_worker():
+            # 延长至 30 秒，充分覆盖底层 BLE 探测最长 24 秒超时与网络余量
+            deadline = time.time() + 30.0
+            completed = False
+            while time.time() < deadline:
+                time.sleep(0.1)
+                if not getattr(self, 'page', None):
+                    break
+                try:
+                    # 使用静默同步，避免轮询期间高频触发 GUI 全量重绘和控件树频繁销毁重建
+                    if hasattr(self.device_manager, 'sync_shared_state_silently'):
+                        self.device_manager.sync_shared_state_silently()
+                    else:
+                        self.device_manager.refresh_only()
+                except Exception as ex:
+                    logger.debug(f'快速轮询共享状态失败: {ex}')
+                current_req = int(getattr(self.device_manager, 'bluetooth_request_id', 0) or 0)
+                scan_state, scan_message = self._bluetooth_scan_state()
+                # 只有当请求 ID 匹配，且托盘进程已经脱离中间过渡态（loading/binding）时，才算真正完成
+                if current_req == request_id and scan_state not in ('loading', 'binding'):
+                    completed = True
+                    self._bluetooth_pending_request_id = 0
+                    lock = getattr(self, '_optimistic_lock', None)
+                    if lock:
+                        with lock:
+                            if target_device_id and hasattr(self, '_optimistic_bluetooth_devices'):
+                                self._optimistic_bluetooth_devices.pop(target_device_id, None)
+                            elif hasattr(self, '_optimistic_bluetooth_devices'):
+                                self._optimistic_bluetooth_devices.clear()
+                    elif hasattr(self, '_optimistic_bluetooth_devices'):
+                        if target_device_id:
+                            self._optimistic_bluetooth_devices.pop(target_device_id, None)
+                        else:
+                            self._optimistic_bluetooth_devices.clear()
+
+                    if scan_state == 'error':
+                        if getattr(self, 'page', None):
+                            self._show_dialog(self._t('bluetooth.bind.failed.title'), scan_message)
+                    else:
+                        self._show_toast(self._t('toast.bluetooth_ready'), icon=ft.Icons.CHECK_CIRCLE_OUTLINE)
+                    if getattr(self, 'page', None):
+                        self._refresh_ui(force_rebuild=True)
+                    break
+
+            if not completed:
+                # 超时前最后兜底检测一次是否已在底层设备列表中或已 bound
+                try:
+                    if hasattr(self.device_manager, 'sync_shared_state_silently'):
+                        self.device_manager.sync_shared_state_silently()
+                except Exception:
+                    pass
+                current_req = int(getattr(self.device_manager, 'bluetooth_request_id', 0) or 0)
+                scan_state, scan_message = self._bluetooth_scan_state()
+                bound_ids = {d.device_id for d in getattr(self.device_manager, 'bluetooth_devices', []) or []}
+                if (current_req == request_id and scan_state == 'bound') or (target_device_id and target_device_id in bound_ids):
+                    completed = True
+                    self._bluetooth_pending_request_id = 0
+                    lock = getattr(self, '_optimistic_lock', None)
+                    if lock:
+                        with lock:
+                            if target_device_id and hasattr(self, '_optimistic_bluetooth_devices'):
+                                self._optimistic_bluetooth_devices.pop(target_device_id, None)
+                    elif hasattr(self, '_optimistic_bluetooth_devices'):
+                        self._optimistic_bluetooth_devices.pop(target_device_id, None)
+                    self._show_toast(self._t('toast.bluetooth_ready'), icon=ft.Icons.CHECK_CIRCLE_OUTLINE)
+                    if getattr(self, 'page', None):
+                        self._refresh_ui(force_rebuild=True)
+                else:
+                    self._bluetooth_pending_request_id = 0
+                    lock = getattr(self, '_optimistic_lock', None)
+                    if lock:
+                        with lock:
+                            if target_device_id and hasattr(self, '_optimistic_bluetooth_devices'):
+                                self._optimistic_bluetooth_devices.pop(target_device_id, None)
+                            elif hasattr(self, '_optimistic_bluetooth_devices'):
+                                self._optimistic_bluetooth_devices.clear()
+                    elif hasattr(self, '_optimistic_bluetooth_devices'):
+                        if target_device_id:
+                            self._optimistic_bluetooth_devices.pop(target_device_id, None)
+                        else:
+                            self._optimistic_bluetooth_devices.clear()
+                    if getattr(self, 'page', None):
+                        self._show_dialog(
+                            self._t('bluetooth.bind.failed.title'),
+                            '蓝牙设备绑定超时，请确认设备已开机并处于可连接状态后重试。',
+                        )
+                        self._refresh_ui(force_rebuild=True)
+
+        threading.Thread(target=poll_worker, daemon=True, name=f'bt-poll-{request_id}').start()
 
     def _refresh_bluetooth_dialog(self):
         if not self._bluetooth_dialog or not self._bluetooth_dialog.open:
@@ -1597,7 +1922,8 @@ class MouseBatteryApp:
             self._bluetooth_pending_request_id > 0
             and response_request_id == self._bluetooth_pending_request_id
         )
-        if scan_state == 'bound' and (response_matches or not self._bluetooth_pending_request_id):
+        # 仅当显式等待该绑定请求响应且匹配成功时才允许自动关窗，杜绝历史 bound 状态导致弹窗被秒关
+        if response_matches and scan_state == 'bound':
             self._close_bluetooth_dialog()
             return
         if self._bluetooth_pending_request_id and not response_matches:
@@ -1607,41 +1933,96 @@ class MouseBatteryApp:
         else:
             self._bluetooth_dialog_loading = False
             self._bluetooth_pending_request_id = 0
-        self._bluetooth_dialog.content = self._build_bluetooth_dialog_content()
+            self._bluetooth_is_binding = False
+            self._bluetooth_binding_name = ''
+
+        candidates = self._bluetooth_candidates_snapshot()
+        bound_ids = {item.device_id for item in self._bluetooth_devices_snapshot()}
+
+        # 脏检查：对比签名，仅在候选列表或状态发生实质变化时才重建控件，避免破坏用户点击
+        current_signature = (
+            scan_state,
+            self._bluetooth_dialog_loading,
+            getattr(self, '_bluetooth_is_binding', False),
+            getattr(self, '_local_bluetooth_scan_error', ''),
+            tuple(
+                (item.device_id, item.name, item.connected, item.transport, self._bluetooth_candidate_is_bound(item, bound_ids))
+                for item in candidates
+            ),
+            self._effective_language() if hasattr(self, '_effective_language') else 'zh_CN',
+        )
+        if current_signature != getattr(self, '_last_bluetooth_dialog_signature', None):
+            self._last_bluetooth_dialog_signature = current_signature
+            self._bluetooth_dialog.content = self._build_bluetooth_dialog_content()
+
         if self._bluetooth_bind_action:
-            candidates = self._bluetooth_candidates_snapshot()
-            bound_ids = {item.device_id for item in self._bluetooth_devices_snapshot()}
             available_ids = {
                 item.device_id for item in candidates
                 if not self._bluetooth_candidate_is_bound(item, bound_ids)
             }
-            self._bluetooth_bind_action.disabled = (
+            new_disabled = (
                 self._bluetooth_dialog_loading
+                or getattr(self, '_bluetooth_is_binding', False)
                 or scan_state in ('loading', 'binding')
                 or self._bluetooth_selected_device_id not in available_ids
             )
+            if self._bluetooth_bind_action.disabled != new_disabled:
+                self._bluetooth_bind_action.disabled = new_disabled
+                if getattr(self, 'page', None):
+                    self._bluetooth_bind_action.update()
 
     def _on_bind_bluetooth_click(self, e):
         device_id = self._bluetooth_selected_device_id.strip()
         if not device_id:
             self._show_dialog(self._t('bluetooth.select_required.title'), self._t('bluetooth.select_required.message'))
             return
+        candidates = self._bluetooth_candidates_snapshot()
+        selected_candidate = next((c for c in candidates if c.device_id == device_id), None)
+        if selected_candidate:
+            info = BluetoothInfo(
+                device_id=device_id,
+                name=selected_candidate.name,
+                percentage=None,
+                status_text=self._t('status.syncing'),
+                online=True,
+                last_update=time.time(),
+            )
+            lock = getattr(self, '_optimistic_lock', None)
+            if lock:
+                with lock:
+                    if not hasattr(self, '_optimistic_bluetooth_devices'):
+                        self._optimistic_bluetooth_devices = {}
+                    self._optimistic_bluetooth_devices[device_id] = info
+            else:
+                if not hasattr(self, '_optimistic_bluetooth_devices'):
+                    self._optimistic_bluetooth_devices = {}
+                self._optimistic_bluetooth_devices[device_id] = info
+        # 立即关闭弹窗，0 延迟返回主界面
+        self._close_bluetooth_dialog()
+        # 立即强制重绘主界面卡片列表，让用户瞬间看到新添加的设备卡片
+        self._refresh_ui(force_rebuild=True)
+        # 立即给出即时反馈 Toast
+        self._show_toast(self._t('toast.bluetooth_adding'), icon=ft.Icons.SYNC)
         try:
             self._bluetooth_pending_request_id = request_device_command(
                 DEVICE_COMMAND_BIND_BLUETOOTH, {'device_id': device_id},
             )
         except Exception as exc:
+            lock = getattr(self, '_optimistic_lock', None)
+            if lock:
+                with lock:
+                    if getattr(self, '_optimistic_bluetooth_devices', None):
+                        self._optimistic_bluetooth_devices.pop(device_id, None)
+            elif getattr(self, '_optimistic_bluetooth_devices', None):
+                self._optimistic_bluetooth_devices.pop(device_id, None)
             logger.error('提交蓝牙绑定命令失败: %s', exc)
             self._show_dialog(self._t('bluetooth.bind.failed.title'), self._t('bluetooth.bind.failed.message', error=exc))
+            self._refresh_ui(force_rebuild=True)
             return
-        self._bluetooth_dialog_loading = True
-        if self._bluetooth_dialog:
-            self._bluetooth_dialog.content = self._build_bluetooth_dialog_content()
-        if self._bluetooth_bind_action:
-            self._bluetooth_bind_action.disabled = True
-        self._safe_update()
+        self._start_bluetooth_request_poll(self._bluetooth_pending_request_id, target_device_id=device_id)
 
     def _open_bluetooth_picker_dialog(self):
+        self._last_bluetooth_dialog_signature = None
         self._bluetooth_bind_action = ft.TextButton(self._t('dialog.add'), on_click=self._on_bind_bluetooth_click)
         self._bluetooth_dialog = ft.AlertDialog(
             title=ft.Text(self._t('bluetooth.select.title'), color=COLORS['text_primary']),
@@ -1656,28 +2037,112 @@ class MouseBatteryApp:
         self.page.show_dialog(self._bluetooth_dialog)
 
     def _on_add_bluetooth_click(self, e):
-        self._bluetooth_dialog_loading = True
+        self._bluetooth_pending_request_id = 0
         self._bluetooth_selected_device_id = ''
-        try:
-            self._bluetooth_pending_request_id = request_device_command(
-                DEVICE_COMMAND_SCAN_BLUETOOTH_CANDIDATES,
-            )
-        except Exception as exc:
+        candidates = self._bluetooth_candidates_snapshot()
+
+        def on_candidates_loaded():
+            if self._bluetooth_dialog and self._bluetooth_dialog.open:
+                self._bluetooth_dialog_loading = False
+                self._refresh_bluetooth_dialog()
+                if getattr(self, 'page', None):
+                    self._safe_update()
+
+        if not candidates:
+            # 首次冷启动若尚未加载完成，显示加载态并在后台直接异步读取（耗时仅约 35ms）
+            self._bluetooth_dialog_loading = True
+            self._open_bluetooth_picker_dialog()
+            self._async_load_bluetooth_candidates(on_done=on_candidates_loaded)
+        else:
+            # 已有候选设备，0 秒瞬间直出弹窗，并在后台异步静默刷新一次
             self._bluetooth_dialog_loading = False
-            logger.error('提交蓝牙扫描命令失败: %s', exc)
-            self._show_dialog(self._t('bluetooth.add.failed.title'), self._t('bluetooth.add.failed.message', error=exc))
-            return
-        self._open_bluetooth_picker_dialog()
+            self._open_bluetooth_picker_dialog()
+            self._async_load_bluetooth_candidates(on_done=on_candidates_loaded)
+
+    def _start_unbind_poll(self, device_id: str):
+        """后台短周期快速轮询，确保托盘处理完解绑命令并更新状态文件。"""
+        def poll_worker():
+            deadline = time.time() + 6.0
+            unbind_succeeded = False
+            while time.time() < deadline:
+                time.sleep(0.15)
+                if not getattr(self, 'page', None):
+                    break
+                try:
+                    if hasattr(self.device_manager, 'sync_shared_state_silently'):
+                        self.device_manager.sync_shared_state_silently()
+                    else:
+                        self.device_manager.refresh_only()
+                except Exception as ex:
+                    logger.debug(f'快速轮询解绑状态异常: {ex}')
+
+                underlying_ids = {d.device_id for d in getattr(self.device_manager, 'bluetooth_devices', []) or []}
+                if device_id not in underlying_ids:
+                    unbind_succeeded = True
+                    lock = getattr(self, '_optimistic_lock', None)
+                    if lock:
+                        with lock:
+                            if hasattr(self, '_optimistic_removed_bluetooth_ids'):
+                                self._optimistic_removed_bluetooth_ids.discard(device_id)
+                    elif hasattr(self, '_optimistic_removed_bluetooth_ids'):
+                        self._optimistic_removed_bluetooth_ids.discard(device_id)
+                    if getattr(self, 'page', None):
+                        self._refresh_ui(force_rebuild=True)
+                    break
+            else:
+                # 6 秒超时托盘仍未移除设备：执行确定性回滚，恢复卡片并提示用户
+                if not unbind_succeeded:
+                    lock = getattr(self, '_optimistic_lock', None)
+                    if lock:
+                        with lock:
+                            if hasattr(self, '_optimistic_removed_bluetooth_ids'):
+                                self._optimistic_removed_bluetooth_ids.discard(device_id)
+                    elif hasattr(self, '_optimistic_removed_bluetooth_ids'):
+                        self._optimistic_removed_bluetooth_ids.discard(device_id)
+                    if getattr(self, 'page', None):
+                        self._refresh_ui(force_rebuild=True)
+                        self._show_dialog(
+                            self._t('bluetooth.remove.failed.title'),
+                            '移除蓝牙设备超时，后台托盘未响应，请检查托盘服务后重试。',
+                        )
+
+        threading.Thread(target=poll_worker, daemon=True, name=f'bt-unbind-poll-{device_id[:8]}').start()
 
     def _on_remove_bluetooth_click(self, device_id: str):
         def confirm_remove(e):
+            lock = getattr(self, '_optimistic_lock', None)
+            if lock:
+                with lock:
+                    if not hasattr(self, '_optimistic_removed_bluetooth_ids'):
+                        self._optimistic_removed_bluetooth_ids = set()
+                    self._optimistic_removed_bluetooth_ids.add(device_id)
+                    if getattr(self, '_optimistic_bluetooth_devices', None):
+                        self._optimistic_bluetooth_devices.pop(device_id, None)
+            else:
+                if not hasattr(self, '_optimistic_removed_bluetooth_ids'):
+                    self._optimistic_removed_bluetooth_ids = set()
+                self._optimistic_removed_bluetooth_ids.add(device_id)
+                if getattr(self, '_optimistic_bluetooth_devices', None):
+                    self._optimistic_bluetooth_devices.pop(device_id, None)
+
+            dialog.open = False
+            self._refresh_ui(force_rebuild=True)
+            self._show_toast(self._t('toast.bluetooth_removed'))
+
             try:
                 request_device_command(DEVICE_COMMAND_UNBIND_BLUETOOTH, {'device_id': device_id})
             except Exception as exc:
                 logger.error('提交移除蓝牙设备命令失败: %s', exc)
+                if lock:
+                    with lock:
+                        self._optimistic_removed_bluetooth_ids.discard(device_id)
+                else:
+                    self._optimistic_removed_bluetooth_ids.discard(device_id)
                 self._show_dialog(self._t('bluetooth.remove.failed.title'), self._t('bluetooth.remove.failed.message', error=exc))
-            dialog.open = False
-            self._safe_update()
+                self._refresh_ui(force_rebuild=True)
+                return
+
+            self._start_unbind_poll(device_id)
 
         def cancel(e):
             dialog.open = False
@@ -2358,6 +2823,9 @@ class MouseBatteryApp:
         else:
             self._refresh_ui(force_rebuild=True)
 
+        # 后台异步静默预加载已配对蓝牙候选设备，实现打开添加弹窗时 0 秒瞬间直出
+        self._async_load_bluetooth_candidates()
+
     def _update_btn_content(self, btn_row: ft.Row, icon_name, label: str):
         """更新按钮内容。"""
         if btn_row and len(btn_row.controls) >= 2:
@@ -2476,10 +2944,12 @@ class MouseBatteryApp:
         if not self.device_manager.mice:
             self._set_view_state('loading', self._t('status.syncing'))
         self._refresh_ui(force_rebuild=not self.device_manager.mice)
+        self._show_toast(self._t('toast.refreshing'), icon=ft.Icons.SYNC)
 
         def worker():
             try:
                 self.device_manager.refresh_only()
+                self._show_toast(self._t('toast.refresh_complete'), icon=ft.Icons.CHECK_CIRCLE_OUTLINE)
             except Exception as ex:
                 logger.error(f'刷新电量异常: {ex}')
                 # 没有现成设备快照时，错误态要在主体区域可见；

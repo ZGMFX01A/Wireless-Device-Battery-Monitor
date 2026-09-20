@@ -462,6 +462,10 @@ _TRANSLATIONS = {
         LANGUAGE_ZH_CN: '正在读取 Windows 已配对蓝牙设备...',
         LANGUAGE_EN_US: 'Reading paired Bluetooth devices from Windows...',
     },
+    'bluetooth.dialog.binding': {
+        LANGUAGE_ZH_CN: '正在绑定蓝牙设备...',
+        LANGUAGE_EN_US: 'Binding Bluetooth device...',
+    },
     'bluetooth.dialog.empty_title': {
         LANGUAGE_ZH_CN: '未发现已配对蓝牙设备',
         LANGUAGE_EN_US: 'No Paired Bluetooth Devices',
@@ -471,8 +475,8 @@ _TRANSLATIONS = {
         LANGUAGE_EN_US: 'Pair the device in Windows Settings first, then try again.',
     },
     'bluetooth.dialog.helper': {
-        LANGUAGE_ZH_CN: '列表包含当前未连接或休眠的设备。仅支持公开标准 BLE Battery Service（0x180F）的设备。',
-        LANGUAGE_EN_US: 'Includes inactive devices. Supports standard Bluetooth battery reporting.',
+        LANGUAGE_ZH_CN: '列表包含当前未连接或休眠的设备。支持公开标准 BLE 电量服务（0x180F）及经典蓝牙耳机（HFP）。',
+        LANGUAGE_EN_US: 'Includes offline/sleeping devices. Supports standard BLE Battery Service (0x180F) and Classic Bluetooth headsets (HFP).',
     },
     'bluetooth.dialog.option': {
         LANGUAGE_ZH_CN: '{name} · {status}',
@@ -481,6 +485,14 @@ _TRANSLATIONS = {
     'bluetooth.status.connected': {
         LANGUAGE_ZH_CN: '当前已连接',
         LANGUAGE_EN_US: 'Connected',
+    },
+    'bluetooth.status.classic_connected': {
+        LANGUAGE_ZH_CN: '经典蓝牙已连接',
+        LANGUAGE_EN_US: 'Classic Connected',
+    },
+    'bluetooth.status.dual_connected': {
+        LANGUAGE_ZH_CN: '双模已连接',
+        LANGUAGE_EN_US: 'Dual-mode Connected',
     },
     'bluetooth.status.sleeping': {
         LANGUAGE_ZH_CN: '未连接 / 可能休眠',
@@ -669,6 +681,30 @@ _TRANSLATIONS = {
     'tray.menu.charging_suffix': {
         LANGUAGE_ZH_CN: ' ⚡充电中',
         LANGUAGE_EN_US: ' ⚡Charging',
+    },
+    'toast.bluetooth_removed': {
+        LANGUAGE_ZH_CN: '已移除蓝牙设备',
+        LANGUAGE_EN_US: 'Bluetooth device removed',
+    },
+    'toast.keyboard_removed': {
+        LANGUAGE_ZH_CN: '已解除键盘绑定',
+        LANGUAGE_EN_US: 'Keyboard binding removed',
+    },
+    'toast.bluetooth_adding': {
+        LANGUAGE_ZH_CN: '已添加设备，正在同步电量...',
+        LANGUAGE_EN_US: 'Device added, syncing battery...',
+    },
+    'toast.bluetooth_ready': {
+        LANGUAGE_ZH_CN: '蓝牙设备已就绪',
+        LANGUAGE_EN_US: 'Bluetooth device is ready',
+    },
+    'toast.refreshing': {
+        LANGUAGE_ZH_CN: '正在刷新设备电量...',
+        LANGUAGE_EN_US: 'Refreshing battery status...',
+    },
+    'toast.refresh_complete': {
+        LANGUAGE_ZH_CN: '设备电量已刷新',
+        LANGUAGE_EN_US: 'Battery status refreshed',
     },
 }
 
