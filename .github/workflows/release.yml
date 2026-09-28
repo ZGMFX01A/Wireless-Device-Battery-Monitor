@@ -23,6 +23,11 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -97,6 +102,11 @@ jobs:
           pip install -r .private-requirements.txt
           pip install pyinstaller
 
+      - name: Install Velopack CLI
+        run: |
+          dotnet tool install --global vpk --version 1.2.158
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Run public shell and private core tests
         run: |
           $env:PYTHONDONTWRITEBYTECODE = "1"
@@ -118,50 +128,61 @@ jobs:
 
       - name: Smoke test frozen executable
         run: |
-          & "./dist/WirelessDeviceBatteryMonitor.exe" --smoke-test
+          & "./dist/WirelessDeviceBatteryMonitor/WirelessDeviceBatteryMonitor.exe" --smoke-test
 
-      - name: Rename executable
-        id: rename
+      - name: Package with Velopack
+        id: package
         run: |
-          # 提取版本号，如果不是 tag 触发，则使用 default
-          if ("${{ github.ref_type }}" -eq "tag") {
-            $VERSION = "${{ github.ref_name }}"
-          } else {
-            $VERSION = "latest"
+          $versionTag = (Get-Content VERSION -Raw).Trim()
+          $version = $versionTag -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+([-.].*)?$') {
+            throw "Invalid package version in VERSION: $versionTag"
           }
-          $NEW_NAME = "WirelessDeviceBatteryMonitor-$VERSION.exe"
-          Rename-Item -Path "dist/WirelessDeviceBatteryMonitor.exe" -NewName $NEW_NAME
-          echo "EXE_NAME=$NEW_NAME" >> $env:GITHUB_OUTPUT
-          echo "VERSION=$VERSION" >> $env:GITHUB_OUTPUT
+          $notesPath = Join-Path "docs/releases" "$versionTag.md"
+          if (-not (Test-Path -LiteralPath $notesPath -PathType Leaf)) {
+            throw "Missing release notes file: $notesPath"
+          }
 
-      - name: Prepare release notes body
-        id: release_notes
+          $packArgs = @(
+            '--yes', 'pack',
+            '--outputDir', 'releases',
+            '--channel', 'win',
+            '--packId', 'MouseBattery',
+            '--packVersion', $version,
+            '--packDir', 'dist/WirelessDeviceBatteryMonitor',
+            '--packTitle', '无线设备电量监控',
+            '--releaseNotes', $notesPath,
+            '--icon', 'app.ico',
+            '--mainExe', 'WirelessDeviceBatteryMonitor.exe'
+          )
+          & vpk @packArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "Velopack packaging failed with exit code $LASTEXITCODE"
+          }
+          "PACKAGE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Upload Velopack release to GitHub
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          $version = "${{ steps.rename.outputs.VERSION }}"
-          $candidatePath = Join-Path "docs/releases" "$version.md"
-
-          if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
-            echo "BODY_PATH=$candidatePath" >> $env:GITHUB_OUTPUT
-            exit 0
+          $uploadArgs = @(
+            '--yes', 'upload', 'github',
+            '--outputDir', 'releases',
+            '--channel', 'win',
+            '--repoUrl', 'https://github.com/ZGMFX01A/mouse-battery',
+            '--token', $env:GITHUB_TOKEN,
+            '--publish', 'true',
+            '--tag', '${{ github.ref_name }}',
+            '--releaseName', 'Release ${{ github.ref_name }}'
+          )
+          & vpk @uploadArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "Velopack GitHub upload failed with exit code $LASTEXITCODE"
           }
-
-          throw "Missing release notes file: $candidatePath. Add it before pushing the release tag."
-
-      - name: Release to GitHub
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') # 只有 tag 触发才创建 release
-        with:
-          name: Release ${{ steps.rename.outputs.VERSION }}
-          prerelease: false
-          body_path: ${{ steps.release_notes.outputs.BODY_PATH }}
-          generate_release_notes: false
-          files: dist/${{ steps.rename.outputs.EXE_NAME }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Artifact (可供手动下载)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.rename.outputs.EXE_NAME }}
-          path: dist/${{ steps.rename.outputs.EXE_NAME }}
+          name: MouseBattery-${{ env.PACKAGE_VERSION }}
+          path: releases/*

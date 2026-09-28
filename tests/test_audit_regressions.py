@@ -14,11 +14,8 @@ class ConfigPersistenceTests(unittest.TestCase):
         self.config_path = os.path.join(self.temp_dir.name, 'config.json')
         self.path_patch = mock.patch.object(config, 'CONFIG_FILE', self.config_path)
         self.path_patch.start()
-        self.cleanup_patch = mock.patch.object(config.updater, 'clean_old_version')
-        self.cleanup_patch.start()
 
     def tearDown(self):
-        self.cleanup_patch.stop()
         self.path_patch.stop()
         self.temp_dir.cleanup()
 

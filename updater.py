@@ -1,600 +1,258 @@
-"""
-Github Release 自动更新模块
+"""基于 Velopack 的 Windows 自动更新适配层。
 
-通过拉取最新 Release，检查标签版本并提供下载热替换的方法。
+Velopack 负责更新包来源、校验、断点临时文件、安装目录替换与重启。
+本模块只保留应用侧的版本结果、进度回调以及托盘/GUI 进程协调。
 """
+
+from __future__ import annotations
+
+import logging
 import os
 import re
 import sys
-import json
-import hashlib
-import base64
-import logging
-import socket
-import subprocess
-import tempfile
 import threading
-import time
-import urllib.request
-import urllib.error
-from urllib.error import URLError, HTTPError
-from urllib.parse import unquote, urlparse
-from typing import Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
+
+from velopack import App, GithubSource, UpdateManager, UpdateOptions
+from update_ipc import (
+    acknowledge_shutdown,
+    consume_shutdown_request,
+    request_process_shutdown,
+    wait_for_shutdown_ack,
+)
+from i18n import LANGUAGE_EN_US, LANGUAGE_ZH_CN
 
 logger = logging.getLogger(__name__)
 
-REPO_OWNER = "ZGMFX01A"
-REPO_NAME = "mouse-battery"
-API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
-SHUTDOWN_REQUEST_PREFIX = "mouse_battery_shutdown"
-DOWNLOAD_MIRROR_PREFIX = "https://ghfast.top/"
-MIN_VALID_EXE_BYTES = 1024 * 1024
+REPO_URL = "https://github.com/ZGMFX01A/mouse-battery"
+MAXIMUM_DELTAS_BEFORE_FALLBACK = 10
+_RELEASE_LANGUAGE_MARKER = re.compile(
+    r"<!--\s*lang:(?P<language>zh|en)\s*-->\s*",
+    re.IGNORECASE,
+)
+_RELEASE_ANY_LANGUAGE_MARKER = re.compile(r"<!--\s*lang:[^>]+-->\s*", re.IGNORECASE)
+_RELEASE_SECTION_SEPARATOR = re.compile(r"\r?\n[ \t]*---[ \t]*(?:\r?\n)?$")
+_RELEASE_LANGUAGE_CODES = {
+    LANGUAGE_ZH_CN.lower(): "zh",
+    LANGUAGE_EN_US.lower(): "en",
+}
 
-# --- IPv4 优先解析 ---------------------------------------------------------
-# Windows 上 urllib 没有浏览器的 Happy Eyeballs：若系统拿到 IPv6 地址但路由
-# 不通，socket 会先在 IPv6 上耗尽整个连接超时才回退 IPv4，表现为"浏览器
-# 下载几秒、程序里几分钟没反应"。这里把 getaddrinfo 结果按 IPv4 优先排序，
-# 只在本模块的网络调用期间生效（加锁串行，避免污染其他线程的并发解析）。
-_ipv4_lock = threading.Lock()
-_orig_getaddrinfo = socket.getaddrinfo
-
-
-def _ipv4_first_getaddrinfo(*args, **kwargs):
-    results = _orig_getaddrinfo(*args, **kwargs)
-    return sorted(results, key=lambda ai: 0 if ai[0] == socket.AF_INET else 1)
+StatusCallback = Callable[[str, str], None]
+ProgressCallback = Callable[[int], None]
+_check_lock = threading.Lock()
 
 
-def _urlopen(url: str, timeout: float, retries: int = 1, on_retry=None):
-    """带 IPv4 优先与一次重试的 urlopen。"""
-    req = urllib.request.Request(url, headers={'User-Agent': 'MouseBattery-Updater'})
-    last_err: Exception = RuntimeError("unreachable")
-    for attempt in range(retries + 1):
-        try:
-            with _ipv4_lock:
-                socket.getaddrinfo = _ipv4_first_getaddrinfo
-                try:
-                    return urllib.request.urlopen(req, timeout=timeout)
-                finally:
-                    socket.getaddrinfo = _orig_getaddrinfo
-        except Exception as e:
-            last_err = e
-            if attempt < retries:
-                logger.warning(f"请求失败将重试({attempt + 1}/{retries}): {url}, err={e}")
-                if on_retry:
-                    on_retry(attempt + 1, retries, e)
-                time.sleep(1)
-    raise last_err
+@dataclass(frozen=True)
+class UpdateCandidate:
+    """保存一次检查得到的更新及其对应的管理器。"""
+
+    manager: Any
+    update_info: Any
+    version: str
+    release_notes: str
 
 
-def parse_version(version_str: str) -> tuple:
-    """提取版本号数字。
+@dataclass(frozen=True)
+class UpdateCheckResult:
+    """向托盘和 GUI 暴露稳定的更新检查结果。"""
 
-    用正则截取开头的 X.Y.Z，兼容 v1.3.0 / 1.3.0 以及带后缀描述的
-    tag（如 "v2.0.1-修复xxx"），解析失败返回 (0, 0, 0)。
-    """
-    m = re.match(r'v?(\d+)\.(\d+)\.(\d+)', (version_str or "").strip().lower())
-    if not m:
-        return (0, 0, 0)
-    return tuple(int(p) for p in m.groups())
-
-
-def _normalize_version_text(version_str: str) -> str:
-    """统一版本文本格式（去除前缀 v/V、空白）。"""
-    return version_str.lower().strip().lstrip('v')
+    has_update: bool
+    latest_version: str = ""
+    release_notes: str = ""
+    candidate: Optional[UpdateCandidate] = None
+    error: str = ""
 
 
-def _pick_release_asset(assets: list, latest_version: str) -> dict:
-    """
-    从 release assets 中挑选最匹配当前 tag 的 exe。
-
-    规则：
-    1) 仅考虑 .exe
-    2) 优先文件名包含最新版本号（如 1.5.5）
-    3) 再按 updated_at 降序兜底
-    """
-    exe_assets = [a for a in assets if a.get('name', '').lower().endswith('.exe')]
-    if not exe_assets:
-        return {}
-
-    ver = _normalize_version_text(latest_version)
-    matched = [a for a in exe_assets if ver and ver in a.get('name', '').lower()]
-    candidates = matched if matched else exe_assets
-
-    candidates.sort(key=lambda a: a.get('updated_at', ''), reverse=True)
-    return candidates[0] if candidates else {}
+def initialize_velopack() -> None:
+    """执行 Velopack 启动钩子；入口进程必须且只能调用一次。"""
+    App().set_auto_apply_on_startup(False).run()
 
 
-def check_for_update(current_version: str) -> tuple[bool, str, str, str, int, str]:
-    """
-    检查更新
-    返回 (是否有更新, 最新版号, 下载链接, 更新日志, 文件大小, SHA-256)
-    """
+def _create_update_manager() -> Any:
+    """创建使用 GitHub Releases 的更新管理器。"""
+    source = GithubSource(REPO_URL, None, False)
+    options = UpdateOptions(False, MAXIMUM_DELTAS_BEFORE_FALLBACK)
+    return UpdateManager(source, options)
+
+
+def _format_error(error: Exception) -> str:
+    """保留异常类型和原始信息，便于区分未安装、校验和网络故障。"""
+    return f"{type(error).__name__}: {error}"
+
+
+def _release_language_code(language: str) -> str:
+    """把界面语言转换为 Release 正文使用的语言标记。"""
+    normalized = str(language or "").strip().replace("_", "-").lower()
+    code = _RELEASE_LANGUAGE_CODES.get(normalized)
+    if code is None:
+        raise ValueError(f"不支持的更新说明语言: {language!r}")
+    return code
+
+
+def _select_release_notes(notes: str, language: str) -> str:
+    """按语言标记提取单一 Release 分段，禁止跨语言混显。"""
+    raw_notes = str(notes or "").strip()
+    markers = list(_RELEASE_LANGUAGE_MARKER.finditer(raw_notes))
+    if not markers:
+        if _RELEASE_ANY_LANGUAGE_MARKER.search(raw_notes):
+            raise ValueError("更新日志包含不支持的语言标记")
+        return raw_notes
+
+    requested_code = _release_language_code(language)
+    for index, marker in enumerate(markers):
+        if marker.group("language").lower() != requested_code:
+            continue
+        end = markers[index + 1].start() if index + 1 < len(markers) else len(raw_notes)
+        section = raw_notes[marker.end():end].rstrip()
+        section = _RELEASE_SECTION_SEPARATOR.sub("", section).strip()
+        if not section:
+            raise ValueError(f"更新日志的 {requested_code} 分段为空")
+        return section
+
+    raise ValueError(f"更新日志缺少 {requested_code} 分段")
+
+
+def _get_release_notes(update_info: Any, language: str = LANGUAGE_ZH_CN) -> str:
+    """读取 Velopack 包内 Markdown，并只保留当前界面的语言分段。"""
+    asset = getattr(update_info, "TargetFullRelease", None)
+    notes = getattr(asset, "NotesMarkdown", "") or getattr(asset, "NotesHtml", "")
+    selected = _select_release_notes(notes, language)
+    return selected or "（此次发布未提供更新日志说明）"
+
+
+def check_for_update(current_version: str, language: str = LANGUAGE_ZH_CN) -> UpdateCheckResult:
+    """检查 GitHub Releases，并返回当前语言的更新说明与下载对象。"""
+    if not _check_lock.acquire(blocking=False):
+        return UpdateCheckResult(
+            False,
+            latest_version=current_version,
+            error="已有更新检查正在进行，请等待当前检查结束",
+        )
     try:
-        with _urlopen(API_URL, timeout=8, retries=1) as response:
-            data = json.loads(response.read().decode('utf-8'))
+        manager = _create_update_manager()
+        update_info = manager.check_for_updates()
+        if update_info is None:
+            return UpdateCheckResult(False, latest_version=current_version)
 
-            latest_version = data.get('tag_name', '')
-            body = data.get('body', '')
-            if not body:
-                body = "（此次发布未提供更新日志说明）"
+        asset = getattr(update_info, "TargetFullRelease", None)
+        latest_version = str(getattr(asset, "Version", "")).strip()
+        if not latest_version:
+            raise RuntimeError("更新源未返回目标版本号")
 
-            assets = data.get('assets', [])
-
-            selected = _pick_release_asset(assets, latest_version)
-            download_url = selected.get('browser_download_url', '')
-            selected_name = selected.get('name', '')
-            asset_size = int(selected.get('size', 0) or 0)
-            asset_digest = str(selected.get('digest', '') or '')
-
-            if not download_url:
-                logger.error("Release 中未发现 .exe 产物")
-                return False, current_version, "", "", 0, ""
-
-            logger.info(
-                f"更新检查命中资源: tag={latest_version}, asset={selected_name or '<unknown>'}"
-            )
-
-            current_tup = parse_version(current_version)
-            latest_tup = parse_version(latest_version)
-
-            if latest_tup > current_tup:
-                return True, latest_version, download_url, body, asset_size, asset_digest
-
-            return False, latest_version, "", "", 0, ""
-
-    except Exception as e:
-        logger.error(f"检查更新失败: {e}")
-        return False, "", "", str(e), 0, ""
+        candidate = UpdateCandidate(
+            manager=manager,
+            update_info=update_info,
+            version=latest_version,
+            release_notes=_get_release_notes(update_info, language),
+        )
+        logger.info("发现 Velopack 更新: current=%s, latest=%s", current_version, latest_version)
+        return UpdateCheckResult(
+            True,
+            latest_version=latest_version,
+            release_notes=candidate.release_notes,
+            candidate=candidate,
+        )
+    except Exception as error:
+        message = _format_error(error)
+        logger.error("检查更新失败: %s", message)
+        return UpdateCheckResult(False, latest_version=current_version, error=message)
+    finally:
+        _check_lock.release()
 
 
-def _normalize_sha256(digest: str) -> str:
-    """从 GitHub asset digest 中提取可用于强校验的 SHA-256。"""
-    match = re.fullmatch(r'sha256:([0-9a-fA-F]{64})', (digest or '').strip())
-    return match.group(1).lower() if match else ''
-
-
-def _notify_status(on_status, stage: str, detail: str = '') -> None:
-    if not on_status:
+def _notify_status(callback: Optional[StatusCallback], stage: str, detail: str = "") -> None:
+    """把更新阶段传给 UI；UI 回调异常必须留下日志。"""
+    if callback is None:
         return
     try:
-        on_status(stage, detail)
-    except Exception as e:
-        logger.warning(f"更新状态回调失败: stage={stage}, err={e}")
+        callback(stage, detail)
+    except Exception as error:
+        logger.warning("更新状态回调失败: stage=%s, error=%s", stage, error)
 
 
-def _download_to_path(url: str, target_path: str, on_progress=None,
-                      expected_size: int = 0, retries: int = 0,
-                      on_retry=None) -> tuple[int, str]:
-    """下载单个来源并返回实际字节数与 SHA-256。"""
-    for attempt in range(retries + 1):
-        try:
-            with _urlopen(url, timeout=20, retries=0) as response:
-                content_len = response.info().get('Content-Length', '0').strip()
-                response_size = int(content_len) if content_len.isdigit() else 0
-                total_size = expected_size if expected_size > 0 else response_size
-                downloaded = 0
-                hasher = hashlib.sha256()
-                read_chunk = getattr(response, 'read1', response.read)
-
-                with open(target_path, 'wb') as f:
-                    while True:
-                        chunk = read_chunk(1024 * 256)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        hasher.update(chunk)
-                        downloaded += len(chunk)
-                        if expected_size > 0 and downloaded > expected_size:
-                            raise RuntimeError(
-                                f"下载字节数超过预期: expected={expected_size}, actual={downloaded}"
-                            )
-                        if on_progress:
-                            pct = int(downloaded / total_size * 100) if total_size > 0 else -1
-                            on_progress(min(pct, 100), downloaded, total_size)
-                        # 某些下载代理传完 Content-Length 后不及时关闭响应；继续等 EOF
-                        # 会让已完整的下载长期停在 99%。达到可信大小即可进入哈希校验。
-                        if expected_size > 0 and downloaded == expected_size:
-                            break
-
-            return downloaded, hasher.hexdigest()
-        except Exception as e:
-            if attempt >= retries:
-                raise
-            if on_retry:
-                on_retry(attempt + 1, retries, e)
-            time.sleep(1)
-
-    raise RuntimeError("更新下载重试耗尽")
+def _notify_progress(callback: Optional[ProgressCallback], percent: int) -> None:
+    """转发 Velopack 的百分比进度。"""
+    if callback is None:
+        return
+    callback(max(0, min(int(percent), 100)))
 
 
-def _validate_download(target_path: str, downloaded: int, actual_sha256: str,
-                       expected_size: int, expected_sha256: str) -> int:
-    """校验单个下载来源；只有通过校验才算该来源成功。"""
-    if downloaded <= 0:
-        raise RuntimeError("下载到的更新文件为空")
-    if downloaded < MIN_VALID_EXE_BYTES:
-        raise RuntimeError(f"下载到的更新文件过小 ({downloaded} 字节)，疑似截断下载")
-
-    actual_size = os.path.getsize(target_path)
-    if actual_size != downloaded:
-        raise RuntimeError(
-            f"已下载文件大小不一致: expected={downloaded}, actual={actual_size}"
-        )
-    if expected_size > 0 and actual_size != expected_size:
-        raise RuntimeError(
-            f"更新文件大小校验失败: expected={expected_size}, actual={actual_size}"
-        )
-    if actual_sha256 != expected_sha256:
-        raise RuntimeError(
-            f"更新文件 SHA-256 校验失败: expected={expected_sha256}, actual={actual_sha256}"
-        )
-    return actual_size
-
-
-def _safe_remove(path: str) -> None:
-    """安全删除文件，并把清理失败写入日志，避免更新残留被静默吞掉。"""
-    if path and os.path.exists(path):
-        try:
-            os.remove(path)
-        except Exception as e:
-            logger.warning(f"删除临时文件失败: {path}, err={e}")
-
-
-def _get_shutdown_request_path(target_pid: int) -> str:
-    """返回目标进程的热更新退出请求文件路径。"""
-    return os.path.join(tempfile.gettempdir(), f"{SHUTDOWN_REQUEST_PREFIX}_{target_pid}.json")
-
-
-def request_process_shutdown(target_pid: int, reason: str = "update",
-                             skip_gui_pid: Optional[int] = None) -> bool:
-    """写入热更新退出请求，让目标进程先做优雅收尾再退出。"""
-    if not isinstance(target_pid, int) or target_pid <= 0:
-        logger.error(f"写入退出请求失败，目标 PID 非法: {target_pid!r}")
-        return False
-
-    request_path = _get_shutdown_request_path(target_pid)
-    temp_path = request_path + ".tmp"
-    payload = {
-        "reason": reason,
-        "target_pid": target_pid,
-        "requester_pid": os.getpid(),
-        "requested_at": time.time(),
-    }
-    if isinstance(skip_gui_pid, int) and skip_gui_pid > 0:
-        # GUI 触发热更新时，需要让主进程退出收尾时跳过当前 GUI 子进程，
-        # 否则下载线程会在替换前被主进程的 atexit 清理误杀。
-        payload["skip_gui_pid"] = skip_gui_pid
-
-    try:
-        with open(temp_path, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, ensure_ascii=False)
-        os.replace(temp_path, request_path)
-        logger.info(
-            f"已写入退出请求: target_pid={target_pid}, requester_pid={payload['requester_pid']}, "
-            f"skip_gui_pid={payload.get('skip_gui_pid')}"
-        )
-        return True
-    except Exception as e:
-        logger.error(f"写入退出请求失败: {e}")
-        _safe_remove(temp_path)
-        return False
-
-
-def consume_shutdown_request(current_pid: int) -> Optional[dict]:
-    """读取并消费当前进程的热更新退出请求。"""
-    if not isinstance(current_pid, int) or current_pid <= 0:
-        logger.warning(f"读取退出请求时收到非法 PID: {current_pid!r}")
-        return None
-
-    request_path = _get_shutdown_request_path(current_pid)
-    if not os.path.exists(request_path):
-        return None
-
-    try:
-        with open(request_path, 'r', encoding='utf-8') as f:
-            payload = json.load(f)
-    except Exception as e:
-        logger.error(f"读取退出请求失败: path={request_path}, err={e}")
-        _safe_remove(request_path)
-        return None
-
-    try:
-        os.remove(request_path)
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        logger.warning(f"删除已消费的退出请求失败: path={request_path}, err={e}")
-
-    if not isinstance(payload, dict):
-        logger.error(f"退出请求格式非法，已忽略: {payload!r}")
-        return None
-
-    return payload
-
-
-def _build_swap_script_lines(exe_path: str, target_exe_path: str, old_exe_path: str,
-                             new_exe_path: str, swap_script_path: str,
-                             target_pid: int,
-                             expected_size: int) -> list[str]:
-    """构造外部替换脚本。
-
-    先等待目标进程自行退出；若超时仍未退出，再回退到强制结束。
-    这样可以优先走 [`start_update_shutdown_watchdog()`](main.py:93) 的优雅收尾，
-    同时保留最终兜底能力，避免更新永久卡死。
-
-    expected_size 用于在替换前校验新 exe 字节数，拦截截断下载导致
-    PyInstaller onefile 解压后找不到 python312.dll 的情况。
-    """
-    target_conflict_check = (
-        [f'if exist "{target_exe_path}" goto abort']
-        if os.path.normcase(os.path.abspath(target_exe_path))
-        != os.path.normcase(os.path.abspath(exe_path))
-        else []
-    )
-    return [
-        "@echo off",
-        "setlocal enabledelayedexpansion",
-        "set WAIT_RETRY=0",
-        ":wait_exit",
-        "if %WAIT_RETRY% GEQ 15 goto force_kill",
-        f'tasklist /FI "PID eq {target_pid}" 2>nul | find /I "{target_pid}" >nul',
-        "if errorlevel 1 goto swap",
-        "set /a WAIT_RETRY=%WAIT_RETRY%+1",
-        "ping 127.0.0.1 -n 2 >nul",
-        "goto wait_exit",
-        ":force_kill",
-        "set KILL_RETRY=0",
-        ":kill_retry",
-        "if %KILL_RETRY% GEQ 20 goto abort",
-        f'taskkill /F /T /PID {target_pid} >nul 2>nul',
-        f'tasklist /FI "PID eq {target_pid}" 2>nul | find /I "{target_pid}" >nul',
-        "if errorlevel 1 goto swap",
-        "set /a KILL_RETRY=%KILL_RETRY%+1",
-        "ping 127.0.0.1 -n 2 >nul",
-        "goto kill_retry",
-        ":swap",
-        # 替换前先校验新 exe 大小是否与下载字节数一致。
-        # PyInstaller onefile 被"截断下载"后，bootloader 解压会找不到
-        # python312.dll（内嵌资源不全），报 MEIxxxxx\python312.dll 找不到。
-        # 这里通过字节数门槛拦截不完整产物，不达标的直接回滚保留旧 exe。
-        f'if not exist "{new_exe_path}" goto verify_fail',
-        # 用 for 取文件字节数；脚本文件里 %%~zI 是双百分号转义，运行时即 %~zI。
-        # 取到后用 !NEW_SIZE!（延迟展开）读取，因为 NEW_SIZE 在同一批处理段内
-        # 刚刚被 set，用 %NEW_SIZE% 普通展开会拿到旧值导致校验失效。
-        f'for %%I in ("{new_exe_path}") do set NEW_SIZE=%%~zI',
-        f'if not defined NEW_SIZE goto verify_fail',
-        f'if !NEW_SIZE! NEQ {expected_size} goto verify_fail',
-        *target_conflict_check,
-        f'if exist "{old_exe_path}" del /f /q "{old_exe_path}" >nul 2>nul',
-        f'if exist "{old_exe_path}" goto abort',
-        f'if not exist "{exe_path}" goto abort',
-        f'move /y "{exe_path}" "{old_exe_path}" >nul 2>nul',
-        "if errorlevel 1 goto rollback",
-        f'if not exist "{old_exe_path}" goto rollback',
-        "set SWAP_RETRY=0",
-        ":install_retry",
-        "if %SWAP_RETRY% GEQ 20 goto rollback",
-        f'move /y "{new_exe_path}" "{target_exe_path}" >nul 2>nul',
-        "if errorlevel 1 goto install_wait",
-        f'if exist "{new_exe_path}" goto install_wait',
-        f'if not exist "{target_exe_path}" goto install_wait',
-        "goto run",
-        ":install_wait",
-        "set /a SWAP_RETRY=%SWAP_RETRY%+1",
-        "ping 127.0.0.1 -n 2 >nul",
-        "goto install_retry",
-        ":run",
-        # 新 exe 不能继承旧 onefile 进程的 _MEI 运行环境，否则它会继续占用
-        # 即将清理的临时目录，导致 PyInstaller 弹出清理失败警告。
-        "set PYINSTALLER_RESET_ENVIRONMENT=1",
-        f'start "" "{target_exe_path}"',
-        f'del /f /q "{swap_script_path}" >nul 2>nul',
-        "exit /b 0",
-        # 校验失败：不替换，清掉坏文件并退出，保留旧 exe 可继续运行。
-        ":verify_fail",
-        "goto abort",
-        ":abort",
-        f'del /f /q "{new_exe_path}" >nul 2>nul',
-        "set PYINSTALLER_RESET_ENVIRONMENT=1",
-        f'if exist "{exe_path}" start "" "{exe_path}"',
-        f'del /f /q "{swap_script_path}" >nul 2>nul',
-        "exit /b 2",
-        ":rollback",
-        f'if exist "{target_exe_path}" del /f /q "{target_exe_path}" >nul 2>nul',
-        f'if exist "{old_exe_path}" move /y "{old_exe_path}" "{exe_path}" >nul 2>nul',
-        f'del /f /q "{new_exe_path}" >nul 2>nul',
-        "set PYINSTALLER_RESET_ENVIRONMENT=1",
-        f'if exist "{exe_path}" start "" "{exe_path}"',
-        f'del /f /q "{swap_script_path}" >nul 2>nul',
-        "exit /b 1",
-    ]
-
-
-def _powershell_literal(value: str) -> str:
-    """以 PowerShell 单引号字面量安全嵌入本地路径。"""
-    return "'" + value.replace("'", "''") + "'"
-
-
-def _build_swap_powershell_script(exe_path: str, target_exe_path: str, old_exe_path: str,
-                                  new_exe_path: str, target_pid: int,
-                                  expected_size: int) -> str:
-    """构造 Unicode 安全的进程外更新脚本。"""
-    return "\n".join([
-        "$ErrorActionPreference = 'Stop'",
-        f"$exePath = {_powershell_literal(exe_path)}",
-        f"$targetPath = {_powershell_literal(target_exe_path)}",
-        f"$oldPath = {_powershell_literal(old_exe_path)}",
-        f"$newPath = {_powershell_literal(new_exe_path)}",
-        f"$targetPid = {target_pid}",
-        f"$expectedSize = {expected_size}",
-        "for ($i = 0; $i -lt 15 -and (Get-Process -Id $targetPid -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Seconds 1 }",
-        "$process = Get-Process -Id $targetPid -ErrorAction SilentlyContinue",
-        "if ($process) { Stop-Process -Id $targetPid -Force -ErrorAction Stop; $process.WaitForExit() }",
-        "if (-not (Test-Path -LiteralPath $newPath)) { throw '更新文件不存在。' }",
-        "if ((Get-Item -LiteralPath $newPath).Length -ne $expectedSize) { throw '更新文件大小校验失败。' }",
-        "if (($targetPath -ne $exePath) -and (Test-Path -LiteralPath $targetPath)) { throw '目标版本文件已存在。' }",
-        "if (Test-Path -LiteralPath $oldPath) { Remove-Item -LiteralPath $oldPath -Force }",
-        "Move-Item -LiteralPath $exePath -Destination $oldPath -Force",
-        "try {",
-        "  for ($i = 0; $i -lt 20; $i++) {",
-        "    try { Move-Item -LiteralPath $newPath -Destination $targetPath -Force; break }",
-        "    catch { if ($i -eq 19) { throw }; Start-Sleep -Seconds 1 }",
-        "  }",
-        "  if (-not (Test-Path -LiteralPath $targetPath)) { throw '更新文件替换失败。' }",
-        "  $env:PYINSTALLER_RESET_ENVIRONMENT = '1'",
-        "  Start-Process -FilePath $targetPath",
-        "} catch {",
-        "  if (Test-Path -LiteralPath $targetPath) { Remove-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue }",
-        "  if (Test-Path -LiteralPath $oldPath) { Move-Item -LiteralPath $oldPath -Destination $exePath -Force }",
-        "  $env:PYINSTALLER_RESET_ENVIRONMENT = '1'",
-        "  if (Test-Path -LiteralPath $exePath) { Start-Process -FilePath $exePath }",
-        "  throw",
-        "}",
-    ])
-
-
-def _encode_powershell_command(script: str) -> str:
-    """PowerShell -EncodedCommand 规定脚本文本必须为 UTF-16LE Base64。"""
-    return base64.b64encode(script.encode('utf-16le')).decode('ascii')
-
-
-def download_and_install(download_url: str, on_progress=None, host_pid: Optional[int] = None,
-                         expected_size: int = 0, expected_digest: str = '', on_status=None):
-    """
-    下载并准备替换当前文件。然后自动重启应用程序。
-    如果当前是脚本运行，则直接中断（不覆盖脚本本身）。
-    """
-    # 如果没被 PyInstaller 打包过，则不执行覆盖重启操作
-    if not getattr(sys, 'frozen', False):
-        logger.info("当前处于代码调试模式，跳过覆盖更新。如果打包，会自动替换文件。")
-        _notify_status(on_status, 'error', 'debug_mode')
-        return False
-
-    current_pid = os.getpid()
-    exe_path = sys.executable
-    asset_name = unquote(urlparse(download_url).path.rsplit('/', 1)[-1])
-    reserved_name = asset_name.split('.', 1)[0].upper()
-    reserved_names = {'CON', 'PRN', 'AUX', 'NUL', *(f'COM{i}' for i in range(1, 10)), *(f'LPT{i}' for i in range(1, 10))}
-    if (
-        not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.exe', asset_name, re.IGNORECASE)
-        or reserved_name in reserved_names
+def _request_shutdown_and_confirm(target_pid: int, skip_gui_pid: Optional[int] = None) -> None:
+    """发出退出请求并等待主进程确认，避免 UI 把写文件误判为安装成功。"""
+    requester_pid = os.getpid()
+    if not request_process_shutdown(
+        target_pid=target_pid,
+        reason="update",
+        skip_gui_pid=skip_gui_pid,
     ):
-        logger.error(f"应用更新失败: Release 资源文件名非法: {asset_name!r}")
-        _notify_status(on_status, 'error', 'invalid_asset_name')
-        return False
-    target_exe_path = os.path.join(os.path.dirname(exe_path), asset_name)
-    if (
-        os.path.normcase(os.path.abspath(target_exe_path))
-        != os.path.normcase(os.path.abspath(exe_path))
-        and os.path.exists(target_exe_path)
-    ):
-        logger.error(f"应用更新失败: 目标版本文件已存在: {target_exe_path}")
-        _notify_status(on_status, 'error', 'target_exists')
-        return False
-    old_exe_path = target_exe_path + ".old"
-    new_exe_path = target_exe_path + ".new"
-    # 优先由外部传入宿主主进程 PID（GUI 热更新场景），否则用自身 PID
-    target_pid = host_pid if isinstance(host_pid, int) and host_pid > 0 else current_pid
-    skip_gui_pid = os.getppid() if target_pid != current_pid else None
+        raise RuntimeError(f"无法通知更新宿主进程退出: pid={target_pid}")
+    ack = wait_for_shutdown_ack(requester_pid, target_pid)
+    if ack is None:
+        raise TimeoutError(f"等待更新宿主进程确认超时: pid={target_pid}")
+    if ack.get("status") != "accepted":
+        raise RuntimeError(f"更新宿主进程拒绝退出: {ack.get('detail') or ack}")
+
+
+def _apply_pending_update(manager: Any) -> None:
+    """在拥有托盘主进程的进程内应用已下载包并重启主入口。"""
+    pending_update = manager.get_update_pending_restart()
+    if pending_update is None:
+        raise RuntimeError("Velopack 未找到已下载的待应用更新包")
+    manager.apply_updates_and_restart_with_args(pending_update, [])
+
+
+def _request_host_shutdown(host_pid: int) -> None:
+    """让 GUI 下载完成后通知托盘主进程接管应用替换。"""
+    if not isinstance(host_pid, int) or host_pid <= 0 or host_pid == os.getpid():
+        raise ValueError(f"GUI 更新宿主 PID 非法: {host_pid!r}")
+    _request_shutdown_and_confirm(host_pid, skip_gui_pid=os.getpid())
+
+
+def _report_update_error(error: Exception, callback: Optional[StatusCallback]) -> bool:
+    """统一记录安装失败并通知界面。"""
+    message = _format_error(error)
+    logger.error("应用更新失败: %s", message)
+    _notify_status(callback, "error", message)
+    return False
+
+
+def download_and_install(
+    candidate: Optional[UpdateCandidate],
+    *,
+    on_progress: Optional[ProgressCallback] = None,
+    host_pid: Optional[int] = None,
+    on_status: Optional[StatusCallback] = None,
+) -> bool:
+    """下载并应用更新；GUI 进程只下载，托盘主进程负责最终替换和重启。"""
+    if not isinstance(candidate, UpdateCandidate):
+        return _report_update_error(ValueError("更新候选为空或类型无效"), on_status)
+    if not getattr(sys, "frozen", False):
+        return _report_update_error(
+            RuntimeError("源码模式不支持安装更新，请使用 Velopack Setup.exe 或 Portable 包运行"),
+            on_status,
+        )
 
     try:
-        # 1. 官方直链优先；只有 GitHub 提供了 SHA-256 时才允许经第三方镜像下载。
-        expected_sha256 = _normalize_sha256(expected_digest)
-        if not expected_sha256:
-            raise RuntimeError("Release 未提供有效的 SHA-256，已拒绝自动更新")
-        sources = [('official', download_url)]
-        if download_url.startswith('https://github.com/'):
-            sources.append(('mirror', DOWNLOAD_MIRROR_PREFIX + download_url))
-
-        downloaded = 0
-        actual_size = 0
-        actual_sha256 = ''
-        last_download_error: Optional[Exception] = None
-        for index, (source_name, source_url) in enumerate(sources):
-            _safe_remove(new_exe_path)
-            _notify_status(on_status, 'connecting', source_name)
-
-            def on_retry(attempt, retries, error):
-                _notify_status(on_status, 'retrying', f'{source_name}:{attempt}/{retries}:{error}')
-
-            try:
-                downloaded, actual_sha256 = _download_to_path(
-                    source_url,
-                    new_exe_path,
-                    on_progress=on_progress,
-                    expected_size=expected_size,
-                    retries=1 if source_name == 'mirror' else 0,
-                    on_retry=on_retry,
-                )
-                _notify_status(on_status, 'verifying')
-                actual_size = _validate_download(
-                    new_exe_path,
-                    downloaded,
-                    actual_sha256,
-                    expected_size,
-                    expected_sha256,
-                )
-                last_download_error = None
-                break
-            except Exception as e:
-                last_download_error = e
-                logger.warning(f"更新下载来源失败: source={source_name}, err={type(e).__name__}: {e}")
-                if index + 1 < len(sources):
-                    _notify_status(on_status, 'fallback', str(e))
-
-        if last_download_error is not None:
-            raise last_download_error
-
-        logger.info(
-            f"新版本下载并校验完成: {new_exe_path}, size={actual_size} bytes, "
-            f"sha256={actual_sha256}"
+        _notify_status(on_status, "downloading")
+        candidate.manager.download_updates(
+            candidate.update_info,
+            lambda percent: _notify_progress(on_progress, percent),
         )
+        _notify_status(on_status, "verifying")
+        if host_pid is None:
+            _request_shutdown_and_confirm(os.getpid())
+            _notify_status(on_status, "applying")
+            return True
 
-        # 2. 通过 PowerShell 的 UTF-16LE EncodedCommand 在进程外完成替换。
-        #    不落盘 .cmd，避免 cmd.exe 对 UTF-8 / 中文路径的错误解码。
-        script = _build_swap_powershell_script(
-            exe_path=exe_path,
-            target_exe_path=target_exe_path,
-            old_exe_path=old_exe_path,
-            new_exe_path=new_exe_path,
-            target_pid=target_pid,
-            expected_size=actual_size,
-        )
-
-        subprocess.Popen(
-            ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-             '-EncodedCommand', _encode_powershell_command(script)],
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-        )
-
-        shutdown_requested = request_process_shutdown(
-            target_pid=target_pid,
-            reason="update",
-            skip_gui_pid=skip_gui_pid,
-        )
-        if shutdown_requested:
-            logger.info(
-                f"已通知目标进程退出，等待外部脚本执行替换: "
-                f"target_pid={target_pid}, current_pid={current_pid}"
-            )
-        else:
-            logger.warning("退出请求写入失败，将依赖外部脚本超时后强制结束目标进程")
-
+        _request_host_shutdown(host_pid)
+        _notify_status(on_status, "applying")
         return True
+    except Exception as error:
+        return _report_update_error(error, on_status)
 
-    except Exception as e:
-        logger.error(f"应用更新失败: {type(e).__name__}: {e}")
-        _notify_status(on_status, 'error', str(e))
-        _safe_remove(new_exe_path)
-        return False
 
-def clean_old_version():
-    """程序启动时清理上次更新留下的旧版本。"""
-    if getattr(sys, 'frozen', False):
-        stale_path = sys.executable + '.old'
-        if os.path.exists(stale_path):
-            try:
-                os.remove(stale_path)
-                logger.info(f"发现并清理更新遗留文件: {stale_path}")
-            except Exception as e:
-                logger.error(f"清理更新遗留文件失败: path={stale_path}, err={e}")
+def apply_pending_update() -> None:
+    """由托盘主进程在优雅退出后应用 GUI 已下载的更新。"""
+    manager = _create_update_manager()
+    _apply_pending_update(manager)

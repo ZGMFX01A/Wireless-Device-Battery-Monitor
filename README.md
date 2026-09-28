@@ -15,7 +15,7 @@
 - [下载最新 Windows 版本（GitHub Releases）](https://github.com/ZGMFX01A/mouse-battery/releases)
 - [查看所有版本与更新说明](https://github.com/ZGMFX01A/mouse-battery/releases)
 
-下载 `WirelessDeviceBatteryMonitor-<version>.exe` 后直接运行，无需安装器。程序启动后会驻留在 Windows 系统托盘。
+下载并运行 `MouseBattery-<version>-Setup.exe` 安装；也可以使用同版本 Portable 包。安装后的程序会驻留在 Windows 系统托盘，Velopack 自动更新需要从 Setup 或 Portable 包启动。
 
 ## 产品截图
 
@@ -110,8 +110,8 @@ Logitech 设备的电量读取可能会与 Logitech G HUB 争用 HID 接口。�
 
 ## 快速开始
 
-1. 打开 [Releases](https://github.com/ZGMFX01A/mouse-battery/releases)，下载最新的 `WirelessDeviceBatteryMonitor-<version>.exe`。
-2. 双击运行程序，确认 Windows 系统托盘出现“无线设备电量监控”图标。
+1. 打开 [Releases](https://github.com/ZGMFX01A/mouse-battery/releases)，下载最新的 `MouseBattery-<version>-Setup.exe`。
+2. 安装并启动程序，确认 Windows 系统托盘出现“无线设备电量监控”图标。
 3. 使用 2.4G 接收器连接鼠标或键盘；蓝牙设备先在 Windows 中完成配对。
 4. 等待首次扫描；需要时点击“刷新电量”。
 5. 将鼠标悬停在托盘图标上，或打开设置窗口查看详细状态。
@@ -154,7 +154,7 @@ Logitech 设备的电量读取可能会与 Logitech G HUB 争用 HID 接口。�
 
 ### 开机自启与自动更新
 
-两项功能都可以在设置窗口单独开关。开机自启使用当前用户的 Windows 启动项；自动更新只在用户开启后检查 GitHub Releases。
+两项功能都可以在设置窗口单独开关。开机自启使用当前用户的 Windows 启动项；自动更新只在用户开启后检查 GitHub Releases，并由 Velopack 完成更新包校验、安装和重启。旧版单文件 EXE 需要先运行一次新版 Setup 或 Portable 包，才能使用新的自动更新链路。
 
 ### 切换界面语言
 
@@ -189,7 +189,7 @@ BLE 设备需要已与 Windows 配对并公开标准 `0x180F` / `0x2A19` 电量�
 
 ### 自动更新访问哪些网络？
 
-开启自动更新后，程序会访问本项目的 GitHub Releases 检查版本并下载更新。GitHub 直链不可用时，更新模块可能使用备用下载源；应用不会要求账号，也不会上传鼠标、键盘或电量数据。
+开启自动更新后，程序会通过 Velopack 的 GitHub Releases 更新源检查版本并下载带校验信息的更新包；安装和重启由 Velopack 处理。应用不会要求账号，也不会上传鼠标、键盘或电量数据。
 
 ## 搜索关键词
 

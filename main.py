@@ -24,6 +24,7 @@ ERROR_ALREADY_EXISTS = 183
 _instance_mutex_handle = None
 _shutdown_for_update = False
 _shutdown_skip_gui_pid = None
+_shutdown_request = None
 
 
 def acquire_single_instance(lock_name: str) -> bool:
@@ -123,10 +124,10 @@ _settings_processes = []
 
 
 def start_update_shutdown_watchdog(current_pid: int):
-    """监听热更新退出请求，尽量优雅关闭主进程。"""
+    """监听 Velopack 更新请求，先让托盘主进程优雅停止设备访问。"""
 
     def worker():
-        global _shutdown_for_update, _shutdown_skip_gui_pid
+        global _shutdown_for_update, _shutdown_skip_gui_pid, _shutdown_request
         while True:
             try:
                 request = updater.consume_shutdown_request(current_pid)
@@ -136,11 +137,14 @@ def start_update_shutdown_watchdog(current_pid: int):
                 continue
             if request:
                 _shutdown_for_update = request.get('reason') == 'update'
+                _shutdown_request = request
                 skip_gui_pid = request.get('skip_gui_pid')
                 _shutdown_skip_gui_pid = skip_gui_pid if isinstance(skip_gui_pid, int) and skip_gui_pid > 0 else None
                 logging.getLogger(__name__).info(
-                    f"收到热更新退出请求，准备优雅关闭主进程: skip_gui_pid={_shutdown_skip_gui_pid}"
+                    f"收到更新退出请求，准备优雅关闭主进程: skip_gui_pid={_shutdown_skip_gui_pid}"
                 )
+                if not updater.acknowledge_shutdown(request, 'accepted'):
+                    logging.getLogger(__name__).error("更新退出请求确认写入失败")
                 _thread.interrupt_main()
                 return
             time.sleep(0.5)
@@ -160,15 +164,9 @@ def open_settings_window():
         return
 
     try:
-        # 当打包成 exe 后，sys.executable 会变成当前的 exe 路径
-        # 因此通过传入 --gui 参数，再次启动本程序，但进入 GUI 逻辑
+        # 通过传入 --gui 参数启动独立设置进程，Velopack 更新时仍由托盘主进程负责重启。
         env = os.environ.copy()
         env['MOUSE_BATTERY_HOST_PID'] = str(os.getpid())
-        # PyInstaller 6.9+ onefile：用同 exe 拉起子进程时默认复用父进程 _MEI 目录。
-        # 设置窗口是独立实例且可能长于托盘生命周期之外的交互，必须重置环境，
-        # 否则子进程会 Failed to import encodings module。
-        if getattr(sys, 'frozen', False):
-            env['PYINSTALLER_RESET_ENVIRONMENT'] = '1'
         p = subprocess.Popen(
             [sys.executable, '--gui'],
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
@@ -181,21 +179,21 @@ def open_settings_window():
 
 @atexit.register
 def cleanup_settings_windows():
-    """退出主程序时，确保拉起的独立 GUI 进程被关闭"""
+    """退出主程序时，确保拉起的独立 GUI 进程被关闭。"""
     global _settings_processes
     for p in _settings_processes:
         if p.poll() is None:
             try:
                 if _shutdown_for_update and _shutdown_skip_gui_pid == p.pid:
                     logging.getLogger(__name__).info(
-                        f"热更新退出时等待 GUI 正常释放运行时: pid={p.pid}"
+                        f"更新退出时等待 GUI 正常释放运行时: pid={p.pid}"
                     )
                     try:
                         p.wait(timeout=15)
                         continue
                     except subprocess.TimeoutExpired:
                         logging.getLogger(__name__).warning(
-                            f"GUI 热更新收尾超时，将强制关闭: pid={p.pid}"
+                            f"GUI 更新收尾超时，将强制关闭: pid={p.pid}"
                         )
                 if os.name == 'nt':
                     subprocess.call(['taskkill', '/F', '/T', '/PID', str(p.pid)],
@@ -267,6 +265,8 @@ def launch_gui_mode():
 
 
 if __name__ == '__main__':
+    # Velopack 的启动钩子必须在正常业务逻辑之前执行，且每个进程只执行一次。
+    updater.initialize_velopack()
     setup_logging()
     logger = logging.getLogger(__name__)
 
@@ -311,3 +311,12 @@ if __name__ == '__main__':
     )
     start_update_shutdown_watchdog(os.getpid())
     tray.start()
+
+    if _shutdown_for_update:
+        cleanup_settings_windows()
+        try:
+            updater.apply_pending_update()
+        except Exception as error:
+            updater.acknowledge_shutdown(_shutdown_request, 'failed', str(error))
+            logger.exception(f"更新包应用失败，主进程未能完成重启: {error}")
+            raise

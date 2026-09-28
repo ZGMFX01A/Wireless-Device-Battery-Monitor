@@ -15,7 +15,7 @@
 - [Download the latest Windows build from GitHub Releases](https://github.com/ZGMFX01A/mouse-battery/releases)
 - [Browse all releases and release notes](https://github.com/ZGMFX01A/mouse-battery/releases)
 
-Download `WirelessDeviceBatteryMonitor-<version>.exe` and run it directly. No installer is required; the app stays in the Windows system tray.
+Download and run `MouseBattery-<version>-Setup.exe`, or use the matching Portable bundle. The installed app stays in the Windows system tray; Velopack auto-updates require launching the app from a Setup or Portable package.
 
 ## Product screenshot
 
@@ -110,8 +110,8 @@ Current support targets the Weikav (Huafenda) dual-8K receiver path over a 2.4 G
 
 ## Quick start
 
-1. Open [Releases](https://github.com/ZGMFX01A/mouse-battery/releases) and download the latest `WirelessDeviceBatteryMonitor-<version>.exe`.
-2. Launch the executable and confirm that the Wireless Device Battery Monitor icon appears in the Windows system tray.
+1. Open [Releases](https://github.com/ZGMFX01A/mouse-battery/releases) and download the latest `MouseBattery-<version>-Setup.exe`.
+2. Install and launch the app, then confirm that the Wireless Device Battery Monitor icon appears in the Windows system tray.
 3. Connect the mouse or keyboard through its 2.4 GHz receiver; pair Bluetooth devices in Windows first.
 4. Wait for the first scan, then select **Refresh battery** when needed.
 5. Hover over the tray icon or open Settings to inspect detailed status.
@@ -154,7 +154,7 @@ Added Bluetooth cards can be removed individually and added again later from the
 
 ### Enable startup launch or auto-update
 
-Both options can be enabled independently in Settings. Startup launch uses the current user's Windows startup entry. Auto-update checks GitHub Releases only after you enable it.
+Both options can be enabled independently in Settings. Startup launch uses the current user's Windows startup entry. Auto-update checks GitHub Releases only after you enable it, while Velopack validates, installs, and restarts the update package. A legacy single-file EXE must be replaced once with the new Setup or Portable package before auto-update can be used.
 
 ### Switch the interface language
 
@@ -189,7 +189,7 @@ The settings window reads shared state written by the tray process and does not 
 
 ### What network does auto-update use?
 
-When enabled, the updater requests release metadata from this project's GitHub Releases and downloads updates. If the GitHub direct link is unavailable, the updater may use a backup download source. The app does not require an account or upload mouse, keyboard, or battery data.
+When enabled, the updater uses Velopack's GitHub Releases source to check versions and download checksummed update packages. Velopack handles installation and restart. The app does not require an account or upload mouse, keyboard, or battery data.
 
 ## Search keywords
 

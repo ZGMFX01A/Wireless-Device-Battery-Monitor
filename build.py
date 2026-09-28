@@ -9,13 +9,8 @@ import subprocess
 import re
 import sys
 import os
-import urllib.request
 import json
 import importlib
-
-REPO_OWNER = "ZGMFX01A"
-REPO_NAME = "mouse-battery"
-LATEST_RELEASE_API = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
 
 # 私有核心依赖的发行名：
 # - 用于错误提示里告诉维护者缺少哪个 pip 包
@@ -118,51 +113,13 @@ def _read_local_version(version_file: str) -> str:
         # utf-8-sig：CI 里 PowerShell Out-File 写入的 VERSION 带 BOM，
         # 必须吞掉，否则 ﻿ 混进版本号导致解析和 cp1252 打印双双出错。
         with open(version_file, 'r', encoding='utf-8-sig') as f:
-            return f.read().strip()
-    except Exception:
-        return "v0.0.0"
+            version = f.read().strip()
+    except OSError as exc:
+        raise RuntimeError(f"无法读取版本文件: {version_file}") from exc
 
-
-def _fetch_latest_github_version(timeout: int = 5) -> str:
-    """获取 GitHub 最新 release tag，失败返回空字符串。"""
-    try:
-        req = urllib.request.Request(
-            LATEST_RELEASE_API,
-            headers={'User-Agent': 'MouseBattery-Build'}
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-            tag = data.get('tag_name', '').strip()
-            return tag
-    except Exception:
-        return ""
-
-
-def sync_version_file() -> str:
-    """
-    本地打包前自动同步 VERSION：
-    - 若 GitHub 最新 release tag 更高，则自动写入 VERSION
-    - 若网络不可用或无更新，保持本地 VERSION 不变
-    返回最终使用的版本号
-    """
-    base_dir = os.path.dirname(__file__) or '.'
-    version_file = os.path.join(base_dir, 'VERSION')
-
-    local_version = _read_local_version(version_file)
-    remote_version = _fetch_latest_github_version()
-
-    if remote_version and _parse_version(remote_version) > _parse_version(local_version):
-        with open(version_file, 'w', encoding='utf-8') as f:
-            f.write(remote_version)
-        print(f"[VERSION] Synced VERSION from {local_version} -> {remote_version}")
-        return remote_version
-
-    if remote_version:
-        print(f"[VERSION] Keep local VERSION: {local_version} (latest release: {remote_version})")
-    else:
-        print(f"[VERSION] Keep local VERSION: {local_version} (GitHub unavailable)")
-
-    return local_version
+    if _parse_version(version) == (0, 0, 0):
+        raise RuntimeError(f"版本文件内容不是有效的 X.Y.Z 版本号: {version!r}")
+    return version
 
 
 def ensure_private_core_available():
@@ -192,7 +149,7 @@ def extend_pyinstaller_for_private_core(cmd: list[str], private_core_module, ref
 
     私有核心后续可能演进出子模块动态导入或额外 helper 模块；
     这里先通过 hidden-import + collect-submodules 双保险，避免出现
-    “环境里能 import，但 onefile 产物缺模块”的经典问题。
+    “环境里能 import，但冻结产物缺模块”的经典问题。
     """
     if not private_core_module:
         return
@@ -223,9 +180,10 @@ def extend_pyinstaller_for_private_core(cmd: list[str], private_core_module, ref
     ])
 
 def build():
-    """使用 PyInstaller 打包为单文件 exe"""
+    """使用 PyInstaller 生成供 Velopack 打包的 onedir 目录。"""
 
-    final_version = sync_version_file()
+    base_dir = os.path.dirname(__file__) or '.'
+    final_version = _read_local_version(os.path.join(base_dir, 'VERSION'))
     print(f"[VERSION] Build version: {final_version}")
     private_core_reference = load_private_core_reference()
 
@@ -252,11 +210,10 @@ def build():
 
     cmd = [
         sys.executable, '-m', 'PyInstaller',
-        '--onefile',
+        '--onedir',
         '--noconsole',
         '--name', 'WirelessDeviceBatteryMonitor',
-        # --clean：打包前清理 PyInstaller 缓存，避免旧构建残留混入新 exe，
-        # 否则旧缓存可能导致 onefile 解压后模块不全（python312.dll 加载失败的诱因之一）。
+        # --clean：打包前清理 PyInstaller 缓存，避免旧构建残留混入新目录。
         '--clean',
         # --noconfirm：无交互环境下直接覆盖 dist，避免打包脚本卡在交互提示。
         '--noconfirm',
@@ -300,7 +257,7 @@ def build():
     cmd.extend([
         # asyncio 在 Windows 上的 IOCP 事件循环依赖 _overlapped C 扩展，
         # flet 导入 asyncio.windows_events 时需要；PyInstaller 静态分析
-        # 偶尔漏收，onefile 运行时会报 "No module named '_overlapped'"。
+        # 偶尔漏收，冻结产物运行时会报 "No module named '_overlapped'"。
         '--hidden-import', '_overlapped',
         '--hidden-import', 'asyncio.windows_events',
         '--hidden-import', 'asyncio.windows_utils',
@@ -310,11 +267,11 @@ def build():
         '--hidden-import', 'flet',
         '--hidden-import', 'gui',
         # flet 0.80+ 内部使用动态导入加载多个子模块，PyInstaller 静态分析
-        # 容易漏掉，导致 onefile 运行时缺模块；这里强制收集全 flet 子模块，
-        # 保证 _MEIPASS 解压后入口能完整加载依赖，避免 python312.dll 之后
-        # 又出现 flet.core 之类 ModuleNotFoundError。
+        # 容易漏掉，导致冻结产物运行时缺模块；这里强制收集全 flet 子模块，
+        # 保证内部运行目录入口能完整加载依赖，避免导入阶段缺模块。
         '--collect-submodules', 'flet',
         '--collect-submodules', 'flet_desktop',
+        '--collect-all', 'velopack',
         '--hidden-import', 'updater',
         'main.py',
     ])
@@ -329,7 +286,7 @@ def build():
     print(f"Run: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=os.path.dirname(__file__) or '.')
     if result.returncode == 0:
-        print("\n[SUCCESS] Build complete! Output: dist/WirelessDeviceBatteryMonitor.exe")
+        print("\n[SUCCESS] Build complete! Output: dist/WirelessDeviceBatteryMonitor/")
     else:
         print(f"\n[ERROR] Build failed, return code: {result.returncode}")
     return result.returncode

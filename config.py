@@ -16,7 +16,6 @@ import ctypes
 from contextlib import contextmanager
 import winreg
 
-import updater
 from i18n import (
     LANGUAGE_AUTO,
     SUPPORTED_UI_LANGUAGE_VALUES,
@@ -202,9 +201,6 @@ class ConfigManager:
     """管理应用的用户配置和自启状态"""
 
     def __init__(self):
-        # 启动时先清理上次热更新可能遗留的旧版执行文件被占用导致的残留
-        updater.clean_old_version()
-
         self.config = self._default_config()
         self.load()
         self._refresh_autostart_path_if_needed()
