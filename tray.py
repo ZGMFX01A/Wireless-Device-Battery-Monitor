@@ -387,7 +387,7 @@ class TrayApp:
 
     def _on_refresh(self, icon, item):
         threading.Thread(
-            target=self.device_manager.scan_and_refresh, daemon=True
+            target=self.device_manager.manual_refresh, daemon=True
         ).start()
 
     def _on_open_settings_click(self, icon, item):

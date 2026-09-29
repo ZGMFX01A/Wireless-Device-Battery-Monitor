@@ -78,8 +78,25 @@ DEVICE_COMMAND_UNBIND_KEYBOARD = 'unbind_keyboard'
 DEVICE_COMMAND_SCAN_BLUETOOTH_CANDIDATES = 'scan_bluetooth_candidates'
 DEVICE_COMMAND_BIND_BLUETOOTH = 'bind_bluetooth'
 DEVICE_COMMAND_UNBIND_BLUETOOTH = 'unbind_bluetooth'
+# GUI -> tray 的轻量命令动作：强制刷新当前已连接设备的电量。
+DEVICE_COMMAND_REFRESH_BATTERY = 'refresh_battery'
 # GUI -> tray 的轻量命令动作：立即按最新配置重算托盘图标。
 DEVICE_COMMAND_REFRESH_TRAY_ICON = 'refresh_tray_icon'
+
+
+class BatteryRefreshMode(Enum):
+    """区分启动、自动与用户手动刷新，避免不同入口复用错误的校验策略。"""
+
+    STARTUP = 'startup'
+    AUTO = 'auto'
+    MANUAL = 'manual'
+
+
+# 电量刷新请求状态会写入共享状态，供 GUI 判断托盘是否已经完成硬件读取。
+BATTERY_REFRESH_STATE_IDLE = 'idle'
+BATTERY_REFRESH_STATE_RUNNING = 'running'
+BATTERY_REFRESH_STATE_COMPLETED = 'completed'
+BATTERY_REFRESH_STATE_ERROR = 'error'
 
 
 class Brand(Enum):
@@ -171,6 +188,9 @@ class DeviceManager:
         self._bluetooth_scan_state = 'idle'
         self._bluetooth_scan_message = ''
         self._bluetooth_request_id = 0
+        self._battery_refresh_request_id = 0
+        self._battery_refresh_state = BATTERY_REFRESH_STATE_IDLE
+        self._battery_refresh_message = ''
         # _mice[i] 对应的桥接后端句柄：
         # 刷新时通过遍历该映射读电，避免 idx 错位
         self._mouse_to_device: list[tuple[Brand, MouseBackendHandle]] = []
@@ -237,6 +257,21 @@ class DeviceManager:
         with self._lock:
             return self._bluetooth_scan_message
 
+    @property
+    def battery_refresh_request_id(self) -> int:
+        with self._lock:
+            return self._battery_refresh_request_id
+
+    @property
+    def battery_refresh_state(self) -> str:
+        with self._lock:
+            return self._battery_refresh_state
+
+    @property
+    def battery_refresh_message(self) -> str:
+        with self._lock:
+            return self._battery_refresh_message
+
     def set_on_update(self, callback: Callable):
         """设置数据更新回调（向后兼容，添加到回调列表）"""
         if callback not in self._on_update_callbacks:
@@ -289,6 +324,9 @@ class DeviceManager:
                         'bluetooth_scan_state': self._bluetooth_scan_state,
                         'bluetooth_scan_message': self._bluetooth_scan_message,
                         'bluetooth_request_id': self._bluetooth_request_id,
+                        'battery_refresh_request_id': self._battery_refresh_request_id,
+                        'battery_refresh_state': self._battery_refresh_state,
+                        'battery_refresh_message': self._battery_refresh_message,
                     }
 
                 # 先写独立临时文件再原子替换正式文件，避免并发截断与 GUI 读到半截 JSON
@@ -315,35 +353,62 @@ class DeviceManager:
                 logger.debug(f"清理共享状态临时文件失败: {cleanup_error}")
 
     def scan_and_refresh(self):
-        """扫描设备并刷新电池状态"""
+        """启动阶段扫描设备，并接受每台设备首次返回的有效电量。"""
         with self._io_lock:
             self._close_all()
             self._scan_devices()
-            self._refresh_battery()
+            self._refresh_battery(BatteryRefreshMode.STARTUP)
             self._refresh_keyboard_locked()
             self._refresh_bluetooth_locked()
         self._notify_update()
 
     def refresh_only(self):
-        """仅刷新已连接设备的电池状态"""
+        """执行后台自动刷新，继续过滤历史电量的异常跳变。"""
         with self._io_lock:
-            self._refresh_battery()
+            self._refresh_battery(BatteryRefreshMode.AUTO)
             self._refresh_keyboard_locked()
             self._refresh_bluetooth_locked()
 
-            # 唤醒后若连续失败且当前无任何有效电量，则触发一次自动重连/重扫
+            # 唤醒后若每台已发现设备都连续失败，则触发一次自动重连/重扫。
             if self._should_reconnect_after_refresh():
                 logger.warning("检测到连续读取失败，触发自动重连恢复流程")
                 self._recover_connections_locked()
 
         self._notify_update()
 
+    def manual_refresh(self, request_id: int = 0):
+        """强制刷新当前已连接设备，跳过历史电量跳变过滤但保留协议有效性校验。"""
+        refresh_request_id = request_id or time.time_ns()
+        self._set_battery_refresh_state(refresh_request_id, BATTERY_REFRESH_STATE_RUNNING)
+        self._notify_update()
+        try:
+            with self._io_lock:
+                self._refresh_battery(BatteryRefreshMode.MANUAL)
+                self._refresh_keyboard_locked()
+                self._refresh_bluetooth_locked()
+            self._set_battery_refresh_state(refresh_request_id, BATTERY_REFRESH_STATE_COMPLETED)
+        except Exception as exc:
+            logger.error("手动刷新设备电量失败: %s", exc)
+            self._set_battery_refresh_state(
+                refresh_request_id,
+                BATTERY_REFRESH_STATE_ERROR,
+                f"手动刷新失败：{exc}",
+            )
+        self._notify_update()
+
+    def _set_battery_refresh_state(self, request_id: int, state: str, message: str = ''):
+        """更新手动刷新请求回执，供 GUI 与托盘进程同步执行结果。"""
+        with self._lock:
+            self._battery_refresh_request_id = request_id
+            self._battery_refresh_state = state
+            self._battery_refresh_message = message
+
     def _recover_connections_locked(self):
         """自动恢复连接（调用方需持有 _io_lock）。"""
         try:
             self._close_all()
             self._scan_devices()
-            self._refresh_battery()
+            self._refresh_battery(BatteryRefreshMode.AUTO)
             self._refresh_keyboard_locked()
             self._refresh_bluetooth_locked()
             self._last_reconnect_time = time.time()
@@ -652,6 +717,9 @@ class DeviceManager:
             if device_id:
                 self._unbind_bluetooth(device_id)
             return
+        if action == DEVICE_COMMAND_REFRESH_BATTERY:
+            self.manual_refresh(request_id)
+            return
         if action == DEVICE_COMMAND_REFRESH_TRAY_ICON:
             # 托盘图标显示逻辑属于纯配置切换，不需要重扫 HID；
             # 这里只需重新广播一次当前快照，让 tray 重新执行图标选择策略即可。
@@ -706,11 +774,7 @@ class DeviceManager:
         if not mice:
             return False
 
-        # 只要有一个设备拿到有效电量，说明链路未整体失效
-        if any(m.percentage >= 0 for m in mice):
-            return False
-
-        # 当前设备全部无有效电量，且都达到连续失败阈值，判定为需要重连
+        # 逐台判断失败次数；不能因为某台仍保留旧电量，就阻断另一台失效句柄的恢复。
         all_reached_threshold = True
         for idx, mouse in enumerate(mice):
             key = self._device_key(mouse, idx)
@@ -788,7 +852,7 @@ class DeviceManager:
         if count == 3:
             logger.warning(
                 f"{key} 连续失败达到 3 次，可能是系统睡眠唤醒后 HID 句柄失效、"
-                f"设备路径变化或端点未就绪（当前仅 refresh，不会自动重连）。"
+                f"设备路径变化或端点未就绪（后续自动刷新将尝试重连）。"
             )
 
     def _mark_success(self, key: str, pct: int, charging: bool):
@@ -800,14 +864,8 @@ class DeviceManager:
                 f"(此前连续失败 {fail_count} 次)"
             )
 
-    def _refresh_battery(self):
-        """
-        刷新所有设备的电池状态。
-
-        通过 _mouse_to_device 映射逐个读取，替代原先按 idx 顺序匹配的脆弱逻辑。
-        罗技/雷蛇的公共处理逻辑统一收口，仅在获取 BatteryInfo 实现上分叉。
-        """
-        # 在锁内复制一份映射快照，避免刷新过程中列表被其他线程修改
+    def _refresh_battery(self, mode: BatteryRefreshMode = BatteryRefreshMode.AUTO):
+        """按刷新入口读取所有鼠标，启动和手动刷新不套用历史跳变过滤。"""
         with self._lock:
             snapshot = list(zip(self._mice, self._mouse_to_device))
 
@@ -815,87 +873,115 @@ class DeviceManager:
             try:
                 with self._lock:
                     prev_online = mouse.online
-
-                # 按品牌分叉获取 BatteryInfo
-                if brand == Brand.LOGITECH:
-                    battery = self._get_logitech_battery_safe(device_obj)
-                elif brand == Brand.RAZER:
-                    battery = self._get_razer_battery_safe(device_obj)
-                else:
-                    battery = self._get_asus_battery_safe(device_obj)
-
-                # 统一处理结果更新
-                if battery:
-                    if not self._is_battery_sample_valid(mouse, battery.percentage, battery.charging):
-                        with self._lock:
-                            mouse.status_text = "检测到异常帧，沿用上次有效电量"
-                            mouse.last_update = time.time()
-                        self._mark_failure(
-                            self._device_key(mouse, idx),
-                            "异常帧被过滤",
-                            f"pid=0x{mouse.product_id:04X} path={self._safe_path_text(device_obj.path)}"
-                        )
-                        continue
-
-                    if battery.percentage < 0:
-                        # 只有明确的负值才视为无效样本；合法的 0% 需要保留给 UI/托盘展示，
-                        # 否则会把真实低电量误判成断连并丢失告警语义。
-                        with self._lock:
-                            mouse.percentage = -1
-                            mouse.charging = False
-                            mouse.status_text = "休眠或连接中断"
-                            mouse.online = False
-                            mouse.last_update = time.time()
-                        self._mark_failure(
-                            self._device_key(mouse, idx),
-                            "返回电量<=0",
-                            f"pid=0x{mouse.product_id:04X} path={self._safe_path_text(device_obj.path)}"
-                        )
-                    else:
-                        with self._lock:
-                            mouse.percentage = battery.percentage
-                            mouse.charging = battery.charging
-                            mouse.status_text = battery.status_text
-                            mouse.online = True
-                            mouse.last_update = time.time()
-                        self._mark_success(self._device_key(mouse, idx), battery.percentage, battery.charging)
-                        if not prev_online:
-                            logger.info(
-                                f"设备状态恢复在线: {self._device_key(mouse, idx)}, "
-                                f"pid=0x{mouse.product_id:04X}"
-                            )
-                else:
-                    # 老协议保留最后一次有效电量；ROG 没有有效响应时必须明确标记离线。
-                    with self._lock:
-                        if brand == Brand.LOGITECH:
-                            mouse.status_text = "休眠中"
-                        elif brand == Brand.ROG:
-                            # ROG 查询响应本身是下挂设备在线证据；Omni 接收器在线但设备休眠时，
-                            # 必须清空在线状态，不能沿用上一轮在线快照。
-                            mouse.percentage = -1
-                            mouse.charging = False
-                            mouse.online = False
-                            mouse.status_text = "未连接或处于休眠状态"
-                        else:
-                            mouse.status_text = "读取超时，沿用上次有效电量"
-                        mouse.last_update = time.time()
-                    self._mark_failure(
-                        self._device_key(mouse, idx),
-                        "电量读取返回空",
-                        f"pid=0x{mouse.product_id:04X} path={self._safe_path_text(device_obj.path)}"
-                    )
-            except Exception as e:
-                logger.error(f"刷新{brand.value}设备电池失败: {e}")
-                with self._lock:
-                    mouse.percentage = -1
-                    mouse.status_text = "读取错误"
-                    mouse.online = False
-                    mouse.last_update = time.time()
-                self._mark_failure(
-                    self._device_key(mouse, idx),
-                    "抛出异常",
-                    f"pid=0x{mouse.product_id:04X} path={self._safe_path_text(device_obj.path)} err={type(e).__name__}: {e}"
+                battery = self._read_battery_by_brand(brand, device_obj)
+                if battery is None:
+                    self._handle_missing_battery(mouse, brand, idx=idx, device_obj=device_obj)
+                    continue
+                if battery.percentage < 0:
+                    self._handle_negative_battery(mouse, idx=idx, device_obj=device_obj)
+                    continue
+                if not self._is_battery_sample_valid(
+                    mouse, battery.percentage, battery.charging, mode=mode
+                ):
+                    self._handle_invalid_battery_sample(mouse, idx=idx, device_obj=device_obj)
+                    continue
+                self._apply_valid_battery(
+                    mouse,
+                    battery,
+                    idx=idx,
+                    device_obj=device_obj,
+                    prev_online=prev_online,
                 )
+            except Exception as exc:
+                self._handle_battery_exception(
+                    mouse,
+                    brand,
+                    exc,
+                    idx=idx,
+                    device_obj=device_obj,
+                )
+
+    def _read_battery_by_brand(self, brand: Brand, device_obj: MouseBackendHandle):
+        """按品牌选择桥接层读取器，协议校验仍由 Core 适配器负责。"""
+        if brand == Brand.LOGITECH:
+            return self._get_logitech_battery_safe(device_obj)
+        if brand == Brand.RAZER:
+            return self._get_razer_battery_safe(device_obj)
+        return self._get_asus_battery_safe(device_obj)
+
+    def _handle_negative_battery(self, mouse: MouseInfo, *, idx: int, device_obj: MouseBackendHandle):
+        """处理明确的负电量结果；0% 是合法电量，不能归入断连。"""
+        with self._lock:
+            mouse.percentage = -1
+            mouse.charging = False
+            mouse.status_text = "休眠或连接中断"
+            mouse.online = False
+        self._mark_failure(
+            self._device_key(mouse, idx),
+            "返回电量<0",
+            f"pid=0x{mouse.product_id:04X} path={self._safe_path_text(device_obj.path)}",
+        )
+
+    def _handle_invalid_battery_sample(self, mouse: MouseInfo, *, idx: int,
+                                       device_obj: MouseBackendHandle):
+        """记录自动刷新中的异常跳变，同时保留上一笔有效电量及时间戳。"""
+        with self._lock:
+            mouse.status_text = "检测到异常帧，沿用上次有效电量"
+        self._mark_failure(
+            self._device_key(mouse, idx),
+            "异常帧被过滤",
+            f"pid=0x{mouse.product_id:04X} path={self._safe_path_text(device_obj.path)}",
+        )
+
+    def _apply_valid_battery(self, mouse: MouseInfo, battery, *, idx: int,
+                             device_obj: MouseBackendHandle, prev_online: bool):
+        """写入有效电量，并在设备从离线恢复时记录诊断日志。"""
+        with self._lock:
+            mouse.percentage = battery.percentage
+            mouse.charging = battery.charging
+            mouse.status_text = battery.status_text
+            mouse.online = True
+            mouse.last_update = time.time()
+        device_key = self._device_key(mouse, idx)
+        self._mark_success(device_key, battery.percentage, battery.charging)
+        if not prev_online:
+            logger.info(
+                f"设备状态恢复在线: {device_key}, pid=0x{mouse.product_id:04X}"
+            )
+
+    def _handle_missing_battery(self, mouse: MouseInfo, brand: Brand, *, idx: int,
+                                device_obj: MouseBackendHandle):
+        """处理超时或无响应；不刷新 last_update，避免把旧电量伪装成新数据。"""
+        with self._lock:
+            if brand == Brand.LOGITECH:
+                mouse.status_text = "休眠中"
+            elif brand == Brand.ROG:
+                mouse.percentage = -1
+                mouse.charging = False
+                mouse.online = False
+                mouse.status_text = "未连接或处于休眠状态"
+            else:
+                mouse.status_text = "读取超时，沿用上次有效电量"
+        self._mark_failure(
+            self._device_key(mouse, idx),
+            "电量读取返回空",
+            f"pid=0x{mouse.product_id:04X} path={self._safe_path_text(device_obj.path)}",
+        )
+
+    def _handle_battery_exception(self, mouse: MouseInfo, brand: Brand, exc: Exception,
+                                  *, idx: int, device_obj: MouseBackendHandle):
+        """记录协议/句柄异常并标记离线，保留原始异常信息便于定位根因。"""
+        logger.error(f"刷新{brand.value}设备电池失败: {exc}")
+        with self._lock:
+            mouse.percentage = -1
+            mouse.status_text = "读取错误"
+            mouse.online = False
+        self._mark_failure(
+            self._device_key(mouse, idx),
+            "抛出异常",
+            f"pid=0x{mouse.product_id:04X} path={self._safe_path_text(device_obj.path)} "
+            f"err={type(exc).__name__}: {exc}",
+        )
 
     @staticmethod
     def _get_logitech_battery_safe(receiver: MouseBackendHandle) -> Optional[BatteryInfo]:
@@ -916,13 +1002,14 @@ class DeviceManager:
         return battery if isinstance(battery, AsusBatteryInfo) else None
 
     @staticmethod
-    def _is_battery_sample_valid(mouse: MouseInfo, percentage: int, charging: bool) -> bool:
-        """校验电量样本合法性，过滤明显异常跳变。"""
+    def _is_battery_sample_valid(mouse: MouseInfo, percentage: int, charging: bool,
+                                 *, mode: BatteryRefreshMode) -> bool:
+        """校验范围；仅自动刷新过滤历史电量的明显异常跳变。"""
         if percentage < 0 or percentage > 100:
             return False
 
-        # 没有历史值时，只做范围检查
-        if mouse.percentage < 0:
+        # 启动和手动刷新要以设备当前读数为准，不能被旧快照或充电前电量拦截。
+        if mode != BatteryRefreshMode.AUTO or mouse.percentage < 0:
             return True
 
         delta = abs(percentage - mouse.percentage)
@@ -1291,6 +1378,9 @@ class SharedStateDeviceManager:
         self._bluetooth_scan_state = 'idle'
         self._bluetooth_scan_message = ''
         self._bluetooth_request_id = 0
+        self._battery_refresh_request_id = 0
+        self._battery_refresh_state = BATTERY_REFRESH_STATE_IDLE
+        self._battery_refresh_message = ''
         self._lock = threading.Lock()
         self._on_update_callbacks: list[Callable] = []
         self._auto_refresh_running = False
@@ -1351,6 +1441,21 @@ class SharedStateDeviceManager:
     def bluetooth_request_id(self) -> int:
         with self._lock:
             return self._bluetooth_request_id
+
+    @property
+    def battery_refresh_request_id(self) -> int:
+        with self._lock:
+            return self._battery_refresh_request_id
+
+    @property
+    def battery_refresh_state(self) -> str:
+        with self._lock:
+            return self._battery_refresh_state
+
+    @property
+    def battery_refresh_message(self) -> str:
+        with self._lock:
+            return self._battery_refresh_message
 
     @property
     def last_read_state(self) -> str:
@@ -1417,6 +1522,9 @@ class SharedStateDeviceManager:
             bluetooth_scan_state = 'idle'
             bluetooth_scan_message = ''
             bluetooth_request_id = 0
+            battery_refresh_request_id = 0
+            battery_refresh_state = BATTERY_REFRESH_STATE_IDLE
+            battery_refresh_message = ''
 
             # 兼容旧版共享状态：根节点为纯鼠标数组。
             if isinstance(data, list):
@@ -1447,6 +1555,12 @@ class SharedStateDeviceManager:
                 bluetooth_scan_state = str(data.get('bluetooth_scan_state', 'idle') or 'idle')
                 bluetooth_scan_message = str(data.get('bluetooth_scan_message', '') or '')
                 bluetooth_request_id = int(data.get('bluetooth_request_id', 0) or 0)
+                battery_refresh_request_id = int(data.get('battery_refresh_request_id', 0) or 0)
+                battery_refresh_state = str(
+                    data.get('battery_refresh_state', BATTERY_REFRESH_STATE_IDLE)
+                    or BATTERY_REFRESH_STATE_IDLE
+                )
+                battery_refresh_message = str(data.get('battery_refresh_message', '') or '')
             else:
                 raise ValueError(f"共享状态文件根节点类型不支持: {type(data).__name__}")
 
@@ -1466,6 +1580,9 @@ class SharedStateDeviceManager:
                 self._bluetooth_scan_state = bluetooth_scan_state
                 self._bluetooth_scan_message = bluetooth_scan_message
                 self._bluetooth_request_id = bluetooth_request_id
+                self._battery_refresh_request_id = battery_refresh_request_id
+                self._battery_refresh_state = battery_refresh_state
+                self._battery_refresh_message = battery_refresh_message
                 self._last_read_state = 'ok'
                 self._last_read_error = ''
         except Exception as e:

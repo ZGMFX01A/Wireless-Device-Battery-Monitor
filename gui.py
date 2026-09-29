@@ -28,6 +28,9 @@ from devices import (
     DEVICE_COMMAND_SCAN_BLUETOOTH_CANDIDATES,
     DEVICE_COMMAND_BIND_BLUETOOTH,
     DEVICE_COMMAND_UNBIND_BLUETOOTH,
+    DEVICE_COMMAND_REFRESH_BATTERY,
+    BATTERY_REFRESH_STATE_COMPLETED,
+    BATTERY_REFRESH_STATE_ERROR,
     DEVICE_COMMAND_REFRESH_TRAY_ICON,
 )
 from core_bridge import (
@@ -972,6 +975,9 @@ class MouseBatteryApp:
     # GUI 只读取共享状态文件，不直接访问 HID；3 秒轮询能保持状态同步及时，
     # 同时比硬件轮询轻量很多，适合作为设置窗口的默认刷新周期。
     _GUI_STATE_REFRESH_INTERVAL = 3
+    # 蓝牙设备单次查询可能接近半分钟，按钮等待托盘回执期间保持明确的忙碌态。
+    _MANUAL_REFRESH_TIMEOUT_SECONDS = 30
+    _MANUAL_REFRESH_POLL_INTERVAL_SECONDS = 0.15
 
     def __init__(self, device_manager: DeviceManager):
         self.device_manager = device_manager
@@ -1061,6 +1067,21 @@ class MouseBatteryApp:
             request_device_command(DEVICE_COMMAND_REFRESH_TRAY_ICON)
         except Exception as ex:
             logger.error(f'提交托盘刷新命令失败: {ex}')
+
+    def _wait_for_manual_refresh(self, request_id: int):
+        """轮询托盘共享回执，确保手动刷新确实完成硬件读取后再提示成功。"""
+        deadline = time.monotonic() + self._MANUAL_REFRESH_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            self.device_manager.sync_shared_state_silently()
+            if self.device_manager.battery_refresh_request_id == request_id:
+                state = self.device_manager.battery_refresh_state
+                if state == BATTERY_REFRESH_STATE_COMPLETED:
+                    return
+                if state == BATTERY_REFRESH_STATE_ERROR:
+                    message = self.device_manager.battery_refresh_message or '托盘刷新失败'
+                    raise RuntimeError(message)
+            time.sleep(self._MANUAL_REFRESH_POLL_INTERVAL_SECONDS)
+        raise TimeoutError('等待托盘完成电量刷新超时')
 
     def _rebuild_page(self):
         """语言切换后重建页面静态结构，确保所有文案立即生效。"""
@@ -2920,8 +2941,7 @@ class MouseBatteryApp:
         """刷新当前已连接设备的电量。
 
         使用 _refresh_busy 锁防止与扫描、与自身并发。出错时也要恢复按钮，
-        因为 refresh_only 失败并不会触发 _refresh_ui（_notify_update 仍会回调，
-        但回调内若抛异常按钮就不可恢复），这里兜底处理。
+        因为硬件读取在 tray 进程执行，GUI 需要等待对应请求的明确回执。
         """
         self._spin_btn_icon(self.refresh_btn_row)
         if self._refresh_busy or self._scan_busy:
@@ -2934,7 +2954,8 @@ class MouseBatteryApp:
 
         def worker():
             try:
-                self.device_manager.refresh_only()
+                request_id = request_device_command(DEVICE_COMMAND_REFRESH_BATTERY)
+                self._wait_for_manual_refresh(request_id)
                 self._show_toast(self._t('toast.refresh_complete'), icon=ft.Icons.CHECK_CIRCLE_OUTLINE)
             except Exception as ex:
                 logger.error(f'刷新电量异常: {ex}')
