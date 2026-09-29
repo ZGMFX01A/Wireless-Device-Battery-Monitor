@@ -192,6 +192,8 @@ jobs:
               throw "Failed to create GitHub Release: $env:RELEASE_TAG"
             }
           }
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Velopack release to GitHub
         run: |
