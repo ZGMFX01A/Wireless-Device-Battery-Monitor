@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*' # 仅在推送以 v 开头的 tag 时触发 (例如 v1.0.0)
   workflow_dispatch: # 允许在网页端手动触发
+    inputs:
+      release_tag:
+        description: '要补跑或发布的正式版本 tag，例如 v2.6.2'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -16,6 +21,20 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        run: |
+          $releaseTag = "${{ inputs.release_tag }}"
+          if ([string]::IsNullOrWhiteSpace($releaseTag) -and "${{ github.ref_type }}" -eq "tag") {
+            $releaseTag = "${{ github.ref_name }}"
+          }
+
+          if ($releaseTag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Invalid release tag: $releaseTag"
+          }
+
+          "RELEASE_TAG=$releaseTag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Release tag: $releaseTag"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -115,10 +134,8 @@ jobs:
 
       - name: Inject version from tag
         run: |
-          if ("${{ github.ref_type }}" -eq "tag") {
-            # Windows PowerShell 的 -Encoding utf8 会写 BOM，改用 ascii（tag 只含 ASCII）
-            "${{ github.ref_name }}" | Out-File -FilePath VERSION -Encoding ascii -NoNewline
-          }
+          # Windows PowerShell 的 -Encoding utf8 会写 BOM，改用 ascii（tag 只含 ASCII）
+          $env:RELEASE_TAG | Out-File -FilePath VERSION -Encoding ascii -NoNewline
           Write-Host "VERSION content: $(Get-Content VERSION)"
 
       - name: Build with PyInstaller
@@ -161,25 +178,39 @@ jobs:
           }
           "PACKAGE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Upload Velopack release to GitHub
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Ensure GitHub Release
         run: |
-          $uploadArgs = @(
-            '--yes', 'upload', 'github',
-            '--outputDir', 'releases',
-            '--channel', 'win',
-            '--repoUrl', 'https://github.com/ZGMFX01A/mouse-battery',
-            '--token', $env:GITHUB_TOKEN,
-            '--publish', 'true',
-            '--tag', '${{ github.ref_name }}',
-            '--releaseName', 'Release ${{ github.ref_name }}'
-          )
-          & vpk @uploadArgs
+          gh release view "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" | Out-Null
           if ($LASTEXITCODE -ne 0) {
-            throw "Velopack GitHub upload failed with exit code $LASTEXITCODE"
+            $notesPath = Join-Path "docs/releases" "$env:RELEASE_TAG.md"
+            gh release create "$env:RELEASE_TAG" `
+              --repo "$env:GITHUB_REPOSITORY" `
+              --target "$env:GITHUB_SHA" `
+              --title "Release $env:RELEASE_TAG" `
+              --notes-file $notesPath
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to create GitHub Release: $env:RELEASE_TAG"
+            }
+          }
+
+      - name: Upload Velopack release to GitHub
+        run: |
+          $assets = @(Get-ChildItem -LiteralPath "releases" -File | Select-Object -ExpandProperty FullName)
+          if ($assets.Count -eq 0) {
+            throw "No Velopack assets found in releases/"
+          }
+
+          $uploadArgs = @(
+            'release', 'upload', $env:RELEASE_TAG,
+            '--repo', $env:GITHUB_REPOSITORY,
+            '--clobber'
+          ) + $assets
+          & gh @uploadArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub Release asset upload failed with exit code $LASTEXITCODE"
           }
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Artifact (可供手动下载)
         uses: actions/upload-artifact@v4
