@@ -134,10 +134,13 @@ jobs:
           PYTHONUTF8: "1"
 
       - name: Smoke test frozen executable
+        timeout-minutes: 2
         run: |
-          & "./dist/WirelessDeviceBatteryMonitor.exe" --smoke-test
-          if ($LASTEXITCODE -ne 0) {
-            throw "Frozen executable smoke test failed with exit code $LASTEXITCODE"
+          $smokeExecutable = (Resolve-Path "./dist/WirelessDeviceBatteryMonitor.exe").Path
+          $smokeArguments = @('--smoke-test')
+          $smokeProcess = Start-Process -FilePath $smokeExecutable -ArgumentList $smokeArguments -Wait -PassThru -WindowStyle Hidden
+          if ($smokeProcess.ExitCode -ne 0) {
+            throw "Frozen executable smoke test failed with exit code $($smokeProcess.ExitCode)"
           }
 
       - name: Prepare portable executable
