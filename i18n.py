@@ -202,6 +202,10 @@ _TRANSLATIONS = {
         LANGUAGE_ZH_CN: '取消',
         LANGUAGE_EN_US: 'Cancel',
     },
+    'dialog.close': {
+        LANGUAGE_ZH_CN: '关闭',
+        LANGUAGE_EN_US: 'Close',
+    },
     'dialog.remove': {
         LANGUAGE_ZH_CN: '移除',
         LANGUAGE_EN_US: 'Remove',
@@ -450,6 +454,18 @@ _TRANSLATIONS = {
         LANGUAGE_ZH_CN: '选择键盘设备',
         LANGUAGE_EN_US: 'Select a Keyboard Device',
     },
+    'keyboard.dialog.binding': {
+        LANGUAGE_ZH_CN: '正在连接键盘并读取电量...',
+        LANGUAGE_EN_US: 'Connecting to the keyboard and reading battery...',
+    },
+    'keyboard.dialog.binding_hint': {
+        LANGUAGE_ZH_CN: '首次读取可能需要 5–10 秒，请稍候。',
+        LANGUAGE_EN_US: 'The first reading may take 5–10 seconds. Please wait.',
+    },
+    'keyboard.dialog.binding_slow': {
+        LANGUAGE_ZH_CN: '仍在等待键盘响应，请确认接收器已连接、键盘已唤醒。可关闭此窗口，后台会继续连接。',
+        LANGUAGE_EN_US: 'Still waiting for the keyboard. Check the receiver and wake the keyboard. You may close this dialog; connecting continues in the background.',
+    },
     'keyboard.add.failed.title': {
         LANGUAGE_ZH_CN: '新增键盘失败',
         LANGUAGE_EN_US: 'Add Keyboard Failed',
@@ -594,6 +610,22 @@ _TRANSLATIONS = {
         LANGUAGE_ZH_CN: '准备升级到 {version}...',
         LANGUAGE_EN_US: 'Preparing to upgrade to {version}...',
     },
+    'update.connecting.official': {
+        LANGUAGE_ZH_CN: '正在连接 GitHub 下载源...',
+        LANGUAGE_EN_US: 'Connecting to the GitHub download source...',
+    },
+    'update.connecting.mirror': {
+        LANGUAGE_ZH_CN: '正在连接加速下载源...',
+        LANGUAGE_EN_US: 'Connecting to the accelerated download source...',
+    },
+    'update.retrying': {
+        LANGUAGE_ZH_CN: '连接失败，正在重试...',
+        LANGUAGE_EN_US: 'Connection failed. Retrying...',
+    },
+    'update.fallback': {
+        LANGUAGE_ZH_CN: 'GitHub 下载不可用，正在切换加速源...',
+        LANGUAGE_EN_US: 'GitHub download is unavailable. Switching to the accelerated source...',
+    },
     'update.downloading': {
         LANGUAGE_ZH_CN: '正在下载... {percent}%',
         LANGUAGE_EN_US: 'Downloading... {percent}%',
@@ -626,6 +658,10 @@ _TRANSLATIONS = {
         LANGUAGE_ZH_CN: '立即更新',
         LANGUAGE_EN_US: 'Install Now',
     },
+    'update.cancel': {LANGUAGE_ZH_CN: '取消下载', LANGUAGE_EN_US: 'Cancel download'},
+    'update.cancelling': {LANGUAGE_ZH_CN: '正在取消下载…', LANGUAGE_EN_US: 'Cancelling download…'},
+    'update.cancelled': {LANGUAGE_ZH_CN: '下载已取消，可以重试。', LANGUAGE_EN_US: 'Download cancelled. You can retry.'},
+    'update.recovered': {LANGUAGE_ZH_CN: '上次更新失败，已恢复旧版本：{error}', LANGUAGE_EN_US: 'The update failed; the previous version was restored: {error}'},
     'update.later': {
         LANGUAGE_ZH_CN: '稍后',
         LANGUAGE_EN_US: 'Later',

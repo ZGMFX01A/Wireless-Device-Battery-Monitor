@@ -1004,6 +1004,11 @@ class MouseBatteryApp:
         self._keyboard_bind_action: Optional[ft.TextButton] = None
         self._keyboard_selected_device_id = ''
         self._keyboard_dialog_loading = False
+        self._keyboard_pending_request_id = 0
+        self._keyboard_binding_name = ''
+        self._keyboard_binding_started = 0.0
+        self._keyboard_bind_error = ''
+        self._keyboard_cancel_action: Optional[ft.TextButton] = None
         self._bluetooth_dialog: Optional[ft.AlertDialog] = None
         self._bluetooth_bind_action: Optional[ft.TextButton] = None
         self._bluetooth_selected_device_id = ''
@@ -1586,14 +1591,31 @@ class MouseBatteryApp:
 
     def _close_keyboard_dialog(self, e=None):
         """关闭键盘选择弹窗，并清理本轮交互状态。"""
+        if self._keyboard_pending_request_id and not self._keyboard_binding_is_slow():
+            return
         if self._keyboard_dialog:
             self._keyboard_dialog.open = False
         self._keyboard_bind_action = None
         self._keyboard_dialog_loading = False
         self._safe_update()
 
+    def _keyboard_binding_is_slow(self) -> bool:
+        return bool(self._keyboard_pending_request_id and
+                    time.monotonic() - self._keyboard_binding_started >= 30)
+
     def _build_keyboard_dialog_content(self):
         """根据共享状态动态构建键盘选择弹窗内容。"""
+        if self._keyboard_pending_request_id:
+            return ft.Column(
+                controls=[
+                    ft.ProgressRing(width=26, height=26, color=COLORS['accent_green']),
+                    ft.Text(self._keyboard_binding_name, size=15, color=COLORS['text_primary']),
+                    ft.Text(self._t('keyboard.dialog.binding'), size=13, color=COLORS['text_secondary']),
+                    ft.Text(self._t('keyboard.dialog.binding_slow' if self._keyboard_binding_is_slow()
+                                    else 'keyboard.dialog.binding_hint'), size=13, color=COLORS['text_secondary']),
+                ],
+                tight=True, spacing=14, horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            )
         scan_state, scan_message = self._keyboard_scan_state()
         candidates = self._keyboard_candidates_snapshot()
         keyboard = self._keyboard_snapshot()
@@ -1651,6 +1673,8 @@ class MouseBatteryApp:
 
         return ft.Column(
             controls=[
+                ft.Text(getattr(self, '_keyboard_bind_error', ''), size=13,
+                        color=COLORS['text_secondary'], visible=bool(getattr(self, '_keyboard_bind_error', ''))),
                 ft.Text(
                     self._t('keyboard.dialog.helper'),
                     size=13,
@@ -1664,51 +1688,92 @@ class MouseBatteryApp:
 
     def _refresh_keyboard_dialog(self):
         """在共享状态变化后刷新已打开的键盘选择弹窗。"""
+        scan_state, scan_message = self._keyboard_scan_state()
+        pending = self._keyboard_pending_request_id
+        result_id, result_state, result_message = getattr(self.device_manager, 'keyboard_binding_result', (0, 'idle', ''))
+        if pending and result_id == pending:
+            if result_state == 'bound':
+                self._keyboard_pending_request_id = 0
+                self._close_keyboard_dialog()
+                return
+            if result_state == 'error':
+                self._keyboard_pending_request_id = 0
+                self._keyboard_bind_error = self._translate_runtime_text(result_message) or self._t('keyboard.bind.failed.title')
+                if not self._keyboard_dialog or not self._keyboard_dialog.open:
+                    self._show_dialog(self._t('keyboard.bind.failed.title'), self._keyboard_bind_error)
         if not self._keyboard_dialog or not self._keyboard_dialog.open:
             return
         candidates = self._keyboard_candidates_snapshot()
-        scan_state, _ = self._keyboard_scan_state()
         if scan_state != 'loading':
             self._keyboard_dialog_loading = False
         self._keyboard_dialog.content = self._build_keyboard_dialog_content()
         if self._keyboard_bind_action:
-            self._keyboard_bind_action.disabled = self._keyboard_dialog_loading or scan_state == 'loading' or not candidates
+            self._keyboard_bind_action.disabled = bool(self._keyboard_pending_request_id) or self._keyboard_dialog_loading or scan_state == 'loading' or not candidates
+        cancel = getattr(self, '_keyboard_cancel_action', None)
+        if cancel:
+            cancel.disabled = bool(self._keyboard_pending_request_id) and not self._keyboard_binding_is_slow()
+            cancel.content = self._t('dialog.close' if self._keyboard_pending_request_id else 'dialog.cancel')
 
     def _on_bind_keyboard_click(self, e):
         """提交键盘绑定请求，由 tray 进程保存配置并刷新键盘电量。"""
+        if self._keyboard_pending_request_id:
+            return
         device_id = self._keyboard_selected_device_id.strip()
         if not device_id:
             self._show_dialog(self._t('keyboard.select_required.title'), self._t('keyboard.select_required.message'))
             return
 
         try:
-            request_device_command(DEVICE_COMMAND_BIND_KEYBOARD, {'device_id': device_id})
+            request_id = request_device_command(DEVICE_COMMAND_BIND_KEYBOARD, {'device_id': device_id})
         except Exception as ex:
             logger.error(f'提交键盘绑定命令失败: {ex}')
             self._show_dialog(self._t('keyboard.bind.failed.title'), self._t('keyboard.bind.failed.message', error=ex))
             return
 
-        self._close_keyboard_dialog()
+        self._keyboard_pending_request_id = request_id
+        self._keyboard_binding_started = time.monotonic()
+        self._keyboard_binding_name = next((candidate.display_name for candidate in self._keyboard_candidates_snapshot()
+                                            if candidate.device_id == device_id), device_id)
+        self._keyboard_bind_error = ''
+        self._optimistic_removed_keyboard = False
+        self._refresh_keyboard_dialog()
+        self._safe_update()
+
+        async def wait_for_binding():
+            # 自动刷新关闭时，也只读共享状态等待本次请求完成。
+            while self._keyboard_pending_request_id == request_id and self.page:
+                await asyncio.to_thread(self.device_manager.sync_shared_state_silently)
+                self._refresh_ui()
+                await asyncio.sleep(0.3)
+
+        self.page.run_task(wait_for_binding)
 
     def _open_keyboard_picker_dialog(self):
         """打开键盘选择弹窗，并等待 tray 进程回填候选列表。"""
         self._keyboard_bind_action = ft.TextButton(self._t('dialog.connect'), on_click=self._on_bind_keyboard_click)
+        self._keyboard_cancel_action = ft.TextButton(self._t('dialog.cancel'), on_click=self._close_keyboard_dialog)
         dialog = ft.AlertDialog(
+            modal=True,
             title=ft.Text(self._t('keyboard.select.title'), color=COLORS['text_primary']),
             content=self._build_keyboard_dialog_content(),
             actions=[
                 self._keyboard_bind_action,
-                ft.TextButton(self._t('dialog.cancel'), on_click=self._close_keyboard_dialog),
+                self._keyboard_cancel_action,
             ],
             actions_alignment=ft.MainAxisAlignment.END,
             shape=ft.RoundedRectangleBorder(radius=14),
         )
         self._keyboard_dialog = dialog
-        self._refresh_keyboard_dialog()
         self.page.show_dialog(dialog)
+        self._refresh_keyboard_dialog()
+        self._safe_update()
 
     def _on_add_keyboard_click(self, e):
         """请求 tray 进程枚举键盘候选接口，并弹出选择对话框。"""
+        if self._keyboard_pending_request_id:
+            self._open_keyboard_picker_dialog()
+            return
+        self._keyboard_bind_error = ''
         self._keyboard_dialog_loading = True
         try:
             request_device_command(DEVICE_COMMAND_SCAN_KEYBOARD_CANDIDATES)
@@ -2179,85 +2244,40 @@ class MouseBatteryApp:
         )
 
     def _on_check_update_click(self, e):
-        """检查版本更新。
-
-        通过显式忙碌锁 _check_update_busy 阻止重复点击（Container.disabled 在 Flet 中
-        无法拦截 on_click），并在 watchdog 外层加 try/except，保证即便后台线程异常
-        也能恢复按钮状态，避免按钮永久卡在「检查中...」。
-        """
+        """等待有截止时间的检查实际结束，再恢复按钮。"""
         if self._check_update_busy:
             return
         self._check_update_busy = True
-
         btn = e.control
-        original_content = getattr(btn, 'content', None)
+        original_content = btn.content
+        language = self._effective_language()
         btn.content = self._make_btn_content(ft.Icons.HOURGLASS_TOP, self._t('action.check_update_loading'), color=COLORS['text_primary'])
         self._safe_update()
 
-        done_event = threading.Event()
-        result_holder = [None]
-        release_language = self._effective_language()
-
-        def check():
+        async def check():
             try:
-                # 更新说明按检查时的界面语言提取，避免中文界面混入英文 Release 内容。
-                result_holder[0] = updater.check_for_update(APP_VERSION, release_language)
-            except Exception as ex:
-                # 检查线程异常必须回传到界面，不能让按钮永久停在忙碌状态。
-                logger.error(f'check_for_update 抛出异常: {ex}')
-                result_holder[0] = updater.UpdateCheckResult(
-                    False,
-                    latest_version=APP_VERSION,
-                    error=f'{type(ex).__name__}: {ex}',
-                )
-            finally:
-                done_event.set()
-
-        def watchdog():
-            try:
-                threading.Thread(target=check, daemon=True).start()
-                finished = done_event.wait(timeout=10)
-
-                btn.content = original_content or self._make_btn_content(ft.Icons.DOWNLOAD_OUTLINED, self._t('action.check_update'), color=COLORS['text_primary'])
-                self._safe_update()
-
-                if not finished:
-                    self._safe_show_helper(lambda: self._show_dialog(
-                        self._t('update.timeout.title'), self._t('update.timeout.message')
-                    ))
-                    return
-
-                result = result_holder[0]
-                if result is None:
-                    self._safe_show_helper(lambda: self._show_dialog(
-                        self._t('update.network_error.title'), self._t('update.network_error.empty_response')
-                    ))
-                    return
-
-                if result.has_update:
-                    self._safe_show_helper(
-                        lambda: self._show_update_dialog(result)
-                    )
+                has_update, latest, url, body, size, digest = await asyncio.to_thread(updater.check_for_update, APP_VERSION, language)
+                if has_update:
+                    self._show_update_dialog(latest, url, body, size, digest)
+                elif latest:
+                    self._show_dialog(self._t('update.version_check.title'), self._t('update.latest.message', version=APP_VERSION))
                 else:
-                    if not result.error:
-                        msg = self._t('update.latest.message', version=APP_VERSION)
-                        title = self._t('update.version_check.title')
-                    else:
-                        msg = self._t('update.network_error.message', error=result.error)
-                        title = self._t('update.network_error.title')
-                    self._safe_show_helper(lambda: self._show_dialog(title, msg))
-            except Exception as ex:
-                logger.error(f'检查更新 watchdog 异常: {ex}')
-                # 兜底恢复：任何异常都要让按钮回到可点击状态
-                try:
-                    btn.content = original_content or self._make_btn_content(ft.Icons.DOWNLOAD_OUTLINED, self._t('action.check_update'), color=COLORS['text_primary'])
-                    self._safe_update()
-                except Exception:
-                    pass
+                    self._show_dialog(self._t('update.network_error.title'), self._t('update.network_error.message', error=body))
+            except Exception as error:
+                logger.exception('检查更新异常')
+                self._show_dialog(self._t('update.network_error.title'), str(error))
             finally:
                 self._check_update_busy = False
+                btn.content = original_content
+                self._safe_update()
 
-        threading.Thread(target=watchdog, daemon=True).start()
+        try:
+            self.page.run_task(check)
+        except Exception:
+            self._check_update_busy = False
+            btn.content = original_content
+            self._safe_update()
+            raise
 
     def _safe_show_helper(self, builder):
         """跨线程安全地执行 UI 构建并刷新页面。"""
@@ -2273,33 +2293,46 @@ class MouseBatteryApp:
 
         self.page.run_task(show)
 
-    def _show_update_dialog(self, result: updater.UpdateCheckResult):
-        """展示 Velopack 更新说明，并把最终应用交给托盘主进程。"""
-        version = result.latest_version
-        body = result.release_notes
+    def _show_update_dialog(self, version: str, url: str, body: str,
+                            asset_size: int, asset_digest: str):
         pb = ft.ProgressBar(width=400, color=COLORS['accent_green'], bgcolor=COLORS['bg_line'], value=0)
         status_txt = ft.Text(self._t('update.prepare', version=version), color=COLORS['text_secondary'], size=12)
 
+        cancel = threading.Event()
+        active = [False]
+        applying = threading.Event()
+
         def do_update(e):
+            if active[0]:
+                return
+            active[0] = True
+            cancel.clear()
+            applying.clear()
             dialog.actions[0].disabled = True
-            dialog.actions[1].disabled = True
+            dialog.actions[1].disabled = False
+            dialog.actions[1].content = self._t('update.cancel')
             pb.value = None
-            status_txt.value = self._t('update.downloading_unknown')
+            status_txt.value = self._t('update.connecting.official')
             self._safe_update()
 
             state_lock = threading.Lock()
-            state = {'revision': 0, 'stage': 'downloading', 'detail': '', 'progress': None}
+            state = {'revision': 0, 'stage': 'connecting', 'detail': 'official', 'progress': None}
+            source_started = [time.monotonic()]
 
-            def progress(pct):
-                """接收 Velopack 百分比进度，更新下载进度条。"""
+            def progress(pct, dl, total):
+                elapsed = max(time.monotonic() - source_started[0], 0.001)
                 with state_lock:
                     state.update(
                         revision=state['revision'] + 1,
                         stage='downloading',
-                        progress=pct,
+                        progress=(pct, dl, total, dl / elapsed),
                     )
 
             def update_status(stage, detail=''):
+                if stage == 'applying':
+                    applying.set()
+                if stage in ('connecting', 'retrying'):
+                    source_started[0] = time.monotonic()
                 with state_lock:
                     state.update(
                         revision=state['revision'] + 1,
@@ -2318,16 +2351,37 @@ class MouseBatteryApp:
                 stage = snapshot['stage']
                 detail = snapshot['detail']
 
-                if stage == 'downloading' and snapshot['progress'] is not None:
-                    pct = snapshot['progress']
-                    pb.value = min(pct / 100.0, 1.0)
-                    status_txt.value = self._t('update.downloading', percent=pct)
+                if stage == 'downloading' and snapshot['progress']:
+                    pct, dl, total, speed = snapshot['progress']
+                    dl_mb = dl / (1024 * 1024)
+                    speed_mb = speed / (1024 * 1024)
+                    if total > 0 and pct >= 0:
+                        pb.value = min(pct / 100.0, 1.0)
+                        size_text = f"{dl_mb:.1f}/{total / (1024 * 1024):.1f} MB"
+                        status_txt.value = f"{self._t('update.downloading', percent=pct)}  {size_text} · {speed_mb:.2f} MB/s"
+                    else:
+                        pb.value = None
+                        status_txt.value = f"{self._t('update.downloading_unknown')}  {dl_mb:.1f} MB · {speed_mb:.2f} MB/s"
+                elif stage == 'connecting':
+                    pb.value = None
+                    key = 'update.connecting.mirror' if detail == 'mirror' else 'update.connecting.official'
+                    status_txt.value = self._t(key)
+                elif stage == 'retrying':
+                    pb.value = None
+                    status_txt.value = self._t('update.retrying')
+                elif stage == 'fallback':
+                    pb.value = None
+                    status_txt.value = self._t('update.fallback')
                 elif stage == 'verifying':
                     pb.value = None
                     status_txt.value = self._t('update.verifying')
                 elif stage == 'applying':
                     pb.value = None
+                    dialog.actions[1].disabled = True
                     status_txt.value = self._t('update.applying')
+                elif stage == 'cancelled':
+                    pb.value = 0
+                    status_txt.value = self._t('update.cancelled')
                 elif stage == 'error':
                     pb.value = 0
                     status_txt.value = self._t('update.failed', error=detail)
@@ -2335,7 +2389,7 @@ class MouseBatteryApp:
                 if not self.page:
                     return
                 try:
-                    self.page.update(pb, status_txt)
+                    self.page.update(pb, status_txt, dialog.actions[1])
                     last_rendered[0] = snapshot['revision']
                 except Exception as ex:
                     logger.warning(f'更新进度界面刷新失败，将继续重试: {ex}')
@@ -2348,10 +2402,14 @@ class MouseBatteryApp:
 
                 download_task = asyncio.create_task(asyncio.to_thread(
                     updater.download_and_install,
-                    result.candidate,
-                    on_progress=progress,
-                    host_pid=host_pid,
-                    on_status=update_status,
+                    url,
+                    progress,
+                    host_pid,
+                    asset_size,
+                    asset_digest,
+                    update_status,
+                    target_version=version,
+                    cancel_event=cancel,
                 ))
                 while not download_task.done():
                     render_state()
@@ -2367,7 +2425,10 @@ class MouseBatteryApp:
                     render_state()
                     success = False
                 finally:
+                    active[0] = False
                     if not success:
+                        dialog.actions[0].disabled = False
+                        dialog.actions[1].content = self._t('update.later')
                         dialog.actions[1].disabled = False
                         self._safe_update()
                 if success:
@@ -2378,10 +2439,18 @@ class MouseBatteryApp:
             self.page.run_task(worker)
 
         def close_dialog(e):
+            if active[0]:
+                if not applying.is_set():
+                    cancel.set()
+                    status_txt.value = self._t('update.cancelling')
+                    dialog.actions[1].disabled = True
+                    self._safe_update()
+                return
             dialog.open = False
             self._safe_update()
 
         dialog = ft.AlertDialog(
+            modal=True,
             title=ft.Text(self._t('update.new_version.title', version=version), color=COLORS['text_primary']),
             content=ft.Column([
                 ft.Text(self._t('update.release_notes'), size=13, color=COLORS['text_primary']),

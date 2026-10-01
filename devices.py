@@ -183,6 +183,9 @@ class DeviceManager:
         self._keyboard_candidates: list[KeyboardCandidate] = []
         self._keyboard_scan_state = 'idle'
         self._keyboard_scan_message = ''
+        self._keyboard_request_id = 0
+        self._keyboard_bind_state = 'idle'
+        self._keyboard_bind_message = ''
         self._bluetooth_devices: list[BluetoothInfo] = []
         self._bluetooth_candidates: list[BluetoothCandidate] = []
         self._bluetooth_scan_state = 'idle'
@@ -236,6 +239,17 @@ class DeviceManager:
     def keyboard_scan_message(self) -> str:
         with self._lock:
             return self._keyboard_scan_message
+
+    @property
+    def keyboard_request_id(self) -> int:
+        with self._lock:
+            return self._keyboard_request_id
+
+    @property
+    def keyboard_binding_result(self) -> tuple[int, str, str]:
+        """原子读取绑定回执；扫描和移除设备不会覆盖该回执。"""
+        with self._lock:
+            return self._keyboard_request_id, self._keyboard_bind_state, self._keyboard_bind_message
 
     @property
     def bluetooth_devices(self) -> list[BluetoothInfo]:
@@ -319,6 +333,9 @@ class DeviceManager:
                         'keyboard_candidates': [_serialize_keyboard_candidate(candidate) for candidate in self._keyboard_candidates],
                         'keyboard_scan_state': self._keyboard_scan_state,
                         'keyboard_scan_message': self._keyboard_scan_message,
+                        'keyboard_request_id': self._keyboard_request_id,
+                        'keyboard_bind_state': self._keyboard_bind_state,
+                        'keyboard_bind_message': self._keyboard_bind_message,
                         'bluetooth_devices': [_serialize_bluetooth_state(item) for item in self._bluetooth_devices],
                         'bluetooth_candidates': [_serialize_bluetooth_candidate(item) for item in self._bluetooth_candidates],
                         'bluetooth_scan_state': self._bluetooth_scan_state,
@@ -581,25 +598,37 @@ class DeviceManager:
                 self._keyboard_scan_message = '未发现可绑定的键盘候选设备'
         self._notify_update()
 
-    def _bind_keyboard(self, device_id: str):
+    def _bind_keyboard(self, device_id: str, request_id: int = 0):
         """保存指定键盘绑定，并立即刷新一份电量快照。"""
-        with self._io_lock:
-            candidates = self.keyboard_candidates or enumerate_keyboard_candidates()
-            target = next((candidate for candidate in candidates if candidate.device_id == device_id), None)
-            if target is None:
-                logger.warning('未找到待绑定的键盘候选: %s', device_id)
-                with self._lock:
-                    self._keyboard_scan_state = 'error'
-                    self._keyboard_scan_message = '绑定失败：未找到对应的键盘设备'
-                self._notify_update()
-                return
-
-            self.config_manager.keyboard_binding = keyboard_binding_from_candidate(target)
-            self._refresh_keyboard_locked()
-
         with self._lock:
-            self._keyboard_scan_state = 'ready'
-            self._keyboard_scan_message = f'已绑定键盘：{target.product_name}'
+            self._keyboard_request_id = request_id
+            self._keyboard_bind_state = 'binding'
+            self._keyboard_bind_message = ''
+            self._keyboard_scan_state = 'binding'
+            self._keyboard_scan_message = ''
+        # 在等待硬件锁和私有协议读取之前发布中间态。
+        self._notify_update()
+        try:
+            with self._io_lock:
+                candidates = self.keyboard_candidates or enumerate_keyboard_candidates()
+                target = next((candidate for candidate in candidates if candidate.device_id == device_id), None)
+                if target is None:
+                    raise ValueError('未找到对应的键盘设备')
+
+                self.config_manager.keyboard_binding = keyboard_binding_from_candidate(target)
+                self._refresh_keyboard_locked()
+            with self._lock:
+                self._keyboard_scan_state = 'bound'
+                self._keyboard_scan_message = f'已绑定键盘：{target.product_name}'
+                self._keyboard_bind_state = 'bound'
+                self._keyboard_bind_message = self._keyboard_scan_message
+        except Exception as exc:
+            logger.exception('绑定键盘失败: %s', device_id)
+            with self._lock:
+                self._keyboard_scan_state = 'error'
+                self._keyboard_scan_message = f'绑定失败：{exc}'
+                self._keyboard_bind_state = 'error'
+                self._keyboard_bind_message = self._keyboard_scan_message
         self._notify_update()
 
     def _unbind_keyboard(self):
@@ -691,7 +720,7 @@ class DeviceManager:
         if action == DEVICE_COMMAND_BIND_KEYBOARD:
             device_id = str(payload.get('device_id', '') or '').strip()
             if device_id:
-                self._bind_keyboard(device_id)
+                self._bind_keyboard(device_id, request_id)
             return
         if action == DEVICE_COMMAND_UNBIND_KEYBOARD:
             self._unbind_keyboard()
@@ -1373,6 +1402,9 @@ class SharedStateDeviceManager:
         self._mice: list[MouseInfo] = []
         self._keyboard: Optional[KeyboardInfo] = None
         self._keyboard_candidates: list[KeyboardCandidate] = []
+        self._keyboard_request_id = 0
+        self._keyboard_bind_state = 'idle'
+        self._keyboard_bind_message = ''
         self._bluetooth_devices: list[BluetoothInfo] = []
         self._bluetooth_candidates: list[BluetoothCandidate] = []
         self._bluetooth_scan_state = 'idle'
@@ -1441,6 +1473,16 @@ class SharedStateDeviceManager:
     def bluetooth_request_id(self) -> int:
         with self._lock:
             return self._bluetooth_request_id
+
+    @property
+    def keyboard_request_id(self) -> int:
+        with self._lock:
+            return self._keyboard_request_id
+
+    @property
+    def keyboard_binding_result(self) -> tuple[int, str, str]:
+        with self._lock:
+            return self._keyboard_request_id, self._keyboard_bind_state, self._keyboard_bind_message
 
     @property
     def battery_refresh_request_id(self) -> int:
@@ -1522,6 +1564,9 @@ class SharedStateDeviceManager:
             bluetooth_scan_state = 'idle'
             bluetooth_scan_message = ''
             bluetooth_request_id = 0
+            keyboard_request_id = 0
+            keyboard_bind_state = 'idle'
+            keyboard_bind_message = ''
             battery_refresh_request_id = 0
             battery_refresh_state = BATTERY_REFRESH_STATE_IDLE
             battery_refresh_message = ''
@@ -1540,6 +1585,9 @@ class SharedStateDeviceManager:
                 ]
                 keyboard_scan_state = str(data.get('keyboard_scan_state', 'idle') or 'idle')
                 keyboard_scan_message = str(data.get('keyboard_scan_message', '') or '')
+                keyboard_request_id = int(data.get('keyboard_request_id', 0) or 0)
+                keyboard_bind_state = str(data.get('keyboard_bind_state', 'idle') or 'idle')
+                keyboard_bind_message = str(data.get('keyboard_bind_message', '') or '')
                 bluetooth_devices = [
                     device for device in (
                         _deserialize_bluetooth_state(item) for item in data.get('bluetooth_devices', [])
@@ -1575,6 +1623,9 @@ class SharedStateDeviceManager:
                 self._keyboard_candidates = keyboard_candidates
                 self._keyboard_scan_state = keyboard_scan_state
                 self._keyboard_scan_message = keyboard_scan_message
+                self._keyboard_request_id = keyboard_request_id
+                self._keyboard_bind_state = keyboard_bind_state
+                self._keyboard_bind_message = keyboard_bind_message
                 self._bluetooth_devices = bluetooth_devices
                 self._bluetooth_candidates = bluetooth_candidates
                 self._bluetooth_scan_state = bluetooth_scan_state

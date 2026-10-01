@@ -14,6 +14,7 @@ import threading
 import logging
 import time
 import math
+import sys
 from typing import Optional, Callable
 
 from PIL import Image, ImageDraw, ImageFont
@@ -194,34 +195,68 @@ class TrayApp:
             menu=self._build_menu(),
         )
 
+        boot_ready = threading.Event()
+
         def boot():
             time.sleep(0.5)
             self.device_manager.start_command_listener()
             self.device_manager.scan_and_refresh()
             self.device_manager.start_auto_refresh(60)
+            boot_ready.set()
 
             # 后台静默检查更新
             if self.config_manager.auto_update:
                 def auto_check():
                     time.sleep(10) # 延迟10秒执行，避免抢占启动阶段资源
-                    result = updater.check_for_update(APP_VERSION)
-                    if result.has_update:
-                        logger.info("系统后台发现新版本，开始静默下载升级...")
-                        updater.download_and_install(result.candidate)
-                    elif result.error:
-                        logger.error("后台检查更新失败: %s", result.error)
+                    self._auto_update_once()
                 threading.Thread(target=auto_check, daemon=True).start()
         threading.Thread(target=boot, daemon=True).start()
 
         logger.info("托盘图标已启动")
         try:
-            self._tray.run()
+            def ready(icon):
+                icon.visible = True
+                while self._running and not boot_ready.wait(0.1):
+                    pass
+                if not self._running:
+                    return
+                try:
+                    updater.confirm_update_startup(APP_VERSION)
+                except Exception:
+                    logger.exception('更新启动确认失败')
+                    self.request_exit()
+                    return
+                try:
+                    result = updater.read_update_result(sys.executable)
+                    if result.get('status') == 'failed':
+                        logger.error('上次更新失败: %s', result.get('detail'))
+                        icon.notify(self._t('update.recovered', error=result.get('detail', '')), self._t('tray.app_name'))
+                except Exception:
+                    logger.exception('显示更新失败提示时出错')
+            self._tray.run(setup=ready)
         except KeyboardInterrupt:
             pass
         except Exception as e:
             logger.error(f"托盘运行异常: {e}")
         finally:
             self.stop()
+
+    def _auto_update_once(self):
+        has_update, version, url, _, size, digest = updater.check_for_update(APP_VERSION, self._effective_language())
+        if not has_update:
+            return
+        result = updater.read_update_result(sys.executable)
+        if result.get('status') == 'failed' and result.get('version') == version.lower().removeprefix('v'):
+            logger.warning('此版本上次安装失败，暂停自动重试；可从设置中手动重试: %s', version)
+            return
+        logger.info('系统后台发现新版本，开始静默下载升级...')
+        updater.download_and_install(url, expected_size=size, expected_digest=digest, target_version=version)
+
+    def request_exit(self):
+        """唤醒 Windows 托盘消息循环，让主线程完成设备收尾。"""
+        self._running = False
+        if self._tray:
+            self._tray.stop()
 
     def stop(self):
         if self._stopping:

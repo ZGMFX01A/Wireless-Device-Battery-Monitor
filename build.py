@@ -180,7 +180,7 @@ def extend_pyinstaller_for_private_core(cmd: list[str], private_core_module, ref
     ])
 
 def build():
-    """使用 PyInstaller 生成供 Velopack 打包的 onedir 目录。"""
+    """使用 PyInstaller 打包为可直接运行的单个 EXE。"""
 
     base_dir = os.path.dirname(__file__) or '.'
     final_version = _read_local_version(os.path.join(base_dir, 'VERSION'))
@@ -210,7 +210,7 @@ def build():
 
     cmd = [
         sys.executable, '-m', 'PyInstaller',
-        '--onedir',
+        '--onefile',
         '--noconsole',
         '--name', 'WirelessDeviceBatteryMonitor',
         # --clean：打包前清理 PyInstaller 缓存，避免旧构建残留混入新目录。
@@ -271,7 +271,6 @@ def build():
         # 保证内部运行目录入口能完整加载依赖，避免导入阶段缺模块。
         '--collect-submodules', 'flet',
         '--collect-submodules', 'flet_desktop',
-        '--collect-all', 'velopack',
         '--hidden-import', 'updater',
         'main.py',
     ])
@@ -286,7 +285,7 @@ def build():
     print(f"Run: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=os.path.dirname(__file__) or '.')
     if result.returncode == 0:
-        print("\n[SUCCESS] Build complete! Output: dist/WirelessDeviceBatteryMonitor/")
+        print("\n[SUCCESS] Build complete! Output: dist/WirelessDeviceBatteryMonitor.exe")
     else:
         print(f"\n[ERROR] Build failed, return code: {result.returncode}")
     return result.returncode

@@ -1,32 +1,36 @@
-"""基于 Velopack 的 Windows 自动更新适配层。
-
-Velopack 负责更新包来源、校验、断点临时文件、安装目录替换与重启。
-本模块只保留应用侧的版本结果、进度回调以及托盘/GUI 进程协调。
-"""
-
-from __future__ import annotations
-
+"""有界下载与 Windows 单文件 EXE 更新。"""
+import hashlib
+import json
 import logging
 import os
+from pathlib import Path
 import re
+import subprocess
 import sys
 import threading
-from dataclasses import dataclass
-from typing import Any, Callable, Optional
-
-from velopack import App, GithubSource, UpdateManager, UpdateOptions
-from update_ipc import (
-    acknowledge_shutdown,
-    consume_shutdown_request,
-    request_process_shutdown,
-    wait_for_shutdown_ack,
-)
+import time
+import uuid
+from urllib.parse import unquote, urlparse
 from i18n import LANGUAGE_EN_US, LANGUAGE_ZH_CN
-
+from update_network import (urlopen as _urlopen, read_chunk, close_response,
+                            check_budget, UpdateCancelled)
+from update_transaction import (UpdateLease, cleanup_job, job_directory, write_atomic,
+    process_start_ticks, read_update_result, request_process_shutdown, consume_shutdown_request,
+    prepare_update_startup, confirm_update_startup, _build_swap_powershell_script,
+    _encode_powershell_command, _powershell_literal)
 logger = logging.getLogger(__name__)
+API_URL = 'https://api.github.com/repos/ZGMFX01A/mouse-battery/releases/latest'
+DOWNLOAD_MIRROR_PREFIX = 'https://ghfast.top/'
+MIN_VALID_EXE_BYTES = 1024 * 1024
+MAX_UPDATE_BYTES = 512 * 1024 * 1024
+CHECK_TIMEOUT = 12
+DOWNLOAD_SOURCE_TIMEOUT = 90
+DOWNLOAD_TOTAL_TIMEOUT = 240
+DOWNLOAD_IDLE_TIMEOUT = 5
+DOWNLOAD_RATE_WINDOW = 15
+DOWNLOAD_MIN_RATE = 1024
+_check_lock = threading.Lock()
 
-REPO_URL = "https://github.com/ZGMFX01A/mouse-battery"
-MAXIMUM_DELTAS_BEFORE_FALLBACK = 10
 _RELEASE_LANGUAGE_MARKER = re.compile(
     r"<!--\s*lang:(?P<language>zh|en)\s*-->\s*",
     re.IGNORECASE,
@@ -38,47 +42,23 @@ _RELEASE_LANGUAGE_CODES = {
     LANGUAGE_EN_US.lower(): "en",
 }
 
-StatusCallback = Callable[[str, str], None]
-ProgressCallback = Callable[[int], None]
-_check_lock = threading.Lock()
+def parse_version(version_str):
+    match = re.fullmatch(r'v?(\d+)\.(\d+)\.(\d+)', str(version_str or '').strip().lower())
+    return tuple(map(int, match.groups())) if match else (0, 0, 0)
 
 
-@dataclass(frozen=True)
-class UpdateCandidate:
-    """保存一次检查得到的更新及其对应的管理器。"""
-
-    manager: Any
-    update_info: Any
-    version: str
-    release_notes: str
+def _normalize_version_text(version):
+    value = str(version or '').strip().lower()
+    if not re.fullmatch(r'v?\d+\.\d+\.\d+', value):
+        raise ValueError('Release 版本标签非法')
+    return value.removeprefix('v')
 
 
-@dataclass(frozen=True)
-class UpdateCheckResult:
-    """向托盘和 GUI 暴露稳定的更新检查结果。"""
-
-    has_update: bool
-    latest_version: str = ""
-    release_notes: str = ""
-    candidate: Optional[UpdateCandidate] = None
-    error: str = ""
-
-
-def initialize_velopack() -> None:
-    """执行 Velopack 启动钩子；入口进程必须且只能调用一次。"""
-    App().set_auto_apply_on_startup(False).run()
-
-
-def _create_update_manager() -> Any:
-    """创建使用 GitHub Releases 的更新管理器。"""
-    source = GithubSource(REPO_URL, None, False)
-    options = UpdateOptions(False, MAXIMUM_DELTAS_BEFORE_FALLBACK)
-    return UpdateManager(source, options)
-
-
-def _format_error(error: Exception) -> str:
-    """保留异常类型和原始信息，便于区分未安装、校验和网络故障。"""
-    return f"{type(error).__name__}: {error}"
+def _pick_release_asset(assets, latest_version):
+    version = _normalize_version_text(latest_version)
+    pattern = re.compile(r'(?:WirelessDeviceBatteryMonitor|MouseBattery)-v?' + re.escape(version) + r'\.exe', re.I)
+    matching = [a for a in assets if isinstance(a, dict) and pattern.fullmatch(a.get('name', ''))]
+    return max(matching, key=lambda a: a.get('updated_at', ''), default={})
 
 
 def _release_language_code(language: str) -> str:
@@ -113,146 +93,229 @@ def _select_release_notes(notes: str, language: str) -> str:
     raise ValueError(f"更新日志缺少 {requested_code} 分段")
 
 
-def _get_release_notes(update_info: Any, language: str = LANGUAGE_ZH_CN) -> str:
-    """读取 Velopack 包内 Markdown，并只保留当前界面的语言分段。"""
-    asset = getattr(update_info, "TargetFullRelease", None)
-    notes = getattr(asset, "NotesMarkdown", "") or getattr(asset, "NotesHtml", "")
-    selected = _select_release_notes(notes, language)
-    return selected or "（此次发布未提供更新日志说明）"
-
-
-def check_for_update(current_version: str, language: str = LANGUAGE_ZH_CN) -> UpdateCheckResult:
-    """检查 GitHub Releases，并返回当前语言的更新说明与下载对象。"""
+def check_for_update(current_version, language=LANGUAGE_ZH_CN):
     if not _check_lock.acquire(blocking=False):
-        return UpdateCheckResult(
-            False,
-            latest_version=current_version,
-            error="已有更新检查正在进行，请等待当前检查结束",
-        )
+        return False, '', '', '已有更新检查正在进行', 0, ''
+    response = None
     try:
-        manager = _create_update_manager()
-        update_info = manager.check_for_updates()
-        if update_info is None:
-            return UpdateCheckResult(False, latest_version=current_version)
-
-        asset = getattr(update_info, "TargetFullRelease", None)
-        latest_version = str(getattr(asset, "Version", "")).strip()
-        if not latest_version:
-            raise RuntimeError("更新源未返回目标版本号")
-
-        candidate = UpdateCandidate(
-            manager=manager,
-            update_info=update_info,
-            version=latest_version,
-            release_notes=_get_release_notes(update_info, language),
-        )
-        logger.info("发现 Velopack 更新: current=%s, latest=%s", current_version, latest_version)
-        return UpdateCheckResult(
-            True,
-            latest_version=latest_version,
-            release_notes=candidate.release_notes,
-            candidate=candidate,
-        )
+        deadline = time.monotonic() + CHECK_TIMEOUT
+        response = _urlopen(API_URL, timeout=5, retries=1, deadline=deadline)
+        chunks, length = [], 0
+        while True:
+            chunk = read_chunk(response, 65536, deadline)
+            if not chunk:
+                break
+            length += len(chunk)
+            if length > 1024 * 1024:
+                raise ValueError('Release 元数据过大')
+            chunks.append(chunk)
+        data = json.loads(b''.join(chunks).decode('utf-8'))
+        latest = data.get('tag_name', '')
+        _normalize_version_text(latest)
+        _normalize_version_text(current_version)
+        if parse_version(latest) <= parse_version(current_version):
+            return False, latest, '', '', 0, ''
+        selected = _pick_release_asset(data.get('assets', []), latest)
+        url = selected.get('browser_download_url', '')
+        size = int(selected.get('size', 0) or 0)
+        digest = selected.get('digest', '')
+        if not selected or not url:
+            raise RuntimeError('Release 中未发现版本匹配的单文件 EXE')
+        if urlparse(url).scheme != 'https' or unquote(urlparse(url).path.rsplit('/', 1)[-1]) != selected['name']:
+            raise ValueError('Release 下载地址与资源文件名不一致')
+        if not 0 < size <= MAX_UPDATE_BYTES or not _normalize_sha256(digest):
+            raise ValueError('Release 缺少有效文件大小或 SHA-256')
+        body = _select_release_notes(data.get('body', ''), language) or '（此次发布未提供更新日志说明）'
+        return True, latest, url, body, size, digest
     except Exception as error:
-        message = _format_error(error)
-        logger.error("检查更新失败: %s", message)
-        return UpdateCheckResult(False, latest_version=current_version, error=message)
+        logger.error('检查更新失败: %s', error)
+        return False, '', '', str(error), 0, ''
     finally:
+        close_response(response)
         _check_lock.release()
 
 
-def _notify_status(callback: Optional[StatusCallback], stage: str, detail: str = "") -> None:
-    """把更新阶段传给 UI；UI 回调异常必须留下日志。"""
-    if callback is None:
-        return
+def _normalize_sha256(digest):
+    match = re.fullmatch(r'sha256:([0-9a-fA-F]{64})', str(digest or '').strip())
+    return match.group(1).lower() if match else ''
+
+
+def _notify_status(callback, stage, detail=''):
+    if callback:
+        try:
+            callback(stage, detail)
+        except Exception:
+            logger.exception('更新状态回调失败')
+
+
+def _download_to_path(url, target_path, on_progress=None, expected_size=0,
+                      retries=0, on_retry=None, *, deadline=None, cancel_event=None):
+    deadline = deadline if deadline is not None else time.monotonic() + DOWNLOAD_TOTAL_TIMEOUT
+    for attempt in range(retries + 1):
+        source_deadline = min(deadline, time.monotonic() + DOWNLOAD_SOURCE_TIMEOUT)
+        response = None
+        try:
+            response = _urlopen(url, timeout=5, retries=0, deadline=source_deadline, cancel_event=cancel_event)
+            header = str(response.info().get('Content-Length', '0')).strip()
+            total = expected_size or (int(header) if header.isdigit() else 0)
+            downloaded, hasher = 0, hashlib.sha256()
+            window_start, window_bytes = time.monotonic(), 0
+            with open(target_path, 'wb') as output:
+                while True:
+                    chunk = read_chunk(response, 256 * 1024, source_deadline, cancel_event,
+                                       idle_timeout=DOWNLOAD_IDLE_TIMEOUT)
+                    check_budget(source_deadline, cancel_event)
+                    if not chunk:
+                        break
+                    downloaded += len(chunk)
+                    if downloaded > MAX_UPDATE_BYTES or (expected_size and downloaded > expected_size):
+                        raise RuntimeError('下载字节数超过预期')
+                    output.write(chunk)
+                    hasher.update(chunk)
+                    elapsed = time.monotonic() - window_start
+                    if elapsed >= DOWNLOAD_RATE_WINDOW:
+                        if (downloaded - window_bytes) / elapsed < DOWNLOAD_MIN_RATE:
+                            raise TimeoutError('下载持续低速，切换来源')
+                        window_start, window_bytes = time.monotonic(), downloaded
+                    if on_progress:
+                        try:
+                            on_progress(min(int(downloaded / total * 100), 100) if total else -1, downloaded, total)
+                        except Exception:
+                            logger.exception('更新进度回调失败')
+                    if expected_size and downloaded == expected_size:
+                        break
+                output.flush()
+                os.fsync(output.fileno())
+            return downloaded, hasher.hexdigest()
+        except UpdateCancelled:
+            raise
+        except Exception as error:
+            check_budget(deadline, cancel_event)
+            if attempt >= retries:
+                raise
+            if on_retry:
+                on_retry(attempt + 1, retries, error)
+        finally:
+            close_response(response)
+    raise RuntimeError('下载重试耗尽')
+
+
+def _validate_download(path, downloaded, actual_sha256, expected_size, expected_sha256):
+    if downloaded < MIN_VALID_EXE_BYTES:
+        raise RuntimeError('下载到的更新文件过小，疑似截断下载')
+    with open(path, 'rb') as source:
+        size = os.fstat(source.fileno()).st_size
+        disk_hash = hashlib.file_digest(source, 'sha256').hexdigest()
+    if size != downloaded or (expected_size and size != expected_size):
+        raise RuntimeError('更新文件大小校验失败')
+    if disk_hash != expected_sha256 or actual_sha256 != expected_sha256:
+        raise RuntimeError('更新文件 SHA-256 校验失败')
+    return size
+
+
+def _wait_helper_ready(child, directory, token, cancel_event):
+    deadline = time.monotonic() + 8
+    while True:
+        check_budget(deadline, cancel_event)
+        if child.poll() is not None:
+            raise RuntimeError('替换程序启动失败，应用保持运行')
+        ready = directory / 'helper.ready'
+        if ready.exists() and ready.read_text(encoding='utf-8') == token:
+            return
+        time.sleep(0.05)
+
+
+def _stop_helper(child):
+    if child is not None and child.poll() is None:
+        child.terminate()
+        try:
+            child.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=2)
+
+
+def download_and_install(download_url, on_progress=None, host_pid=None, expected_size=0,
+                         expected_digest='', on_status=None, *, target_version=None, cancel_event=None):
+    if not getattr(sys, 'frozen', False):
+        _notify_status(on_status, 'error', 'debug_mode')
+        return False
+    exe_path = os.path.abspath(sys.executable)
+    token, child, transferred = uuid.uuid4().hex, None, False
+    directory = None
     try:
-        callback(stage, detail)
-    except Exception as error:
-        logger.warning("更新状态回调失败: stage=%s, error=%s", stage, error)
-
-
-def _notify_progress(callback: Optional[ProgressCallback], percent: int) -> None:
-    """转发 Velopack 的百分比进度。"""
-    if callback is None:
-        return
-    callback(max(0, min(int(percent), 100)))
-
-
-def _request_shutdown_and_confirm(target_pid: int, skip_gui_pid: Optional[int] = None) -> None:
-    """发出退出请求并等待主进程确认，避免 UI 把写文件误判为安装成功。"""
-    requester_pid = os.getpid()
-    if not request_process_shutdown(
-        target_pid=target_pid,
-        reason="update",
-        skip_gui_pid=skip_gui_pid,
-    ):
-        raise RuntimeError(f"无法通知更新宿主进程退出: pid={target_pid}")
-    ack = wait_for_shutdown_ack(requester_pid, target_pid)
-    if ack is None:
-        raise TimeoutError(f"等待更新宿主进程确认超时: pid={target_pid}")
-    if ack.get("status") != "accepted":
-        raise RuntimeError(f"更新宿主进程拒绝退出: {ack.get('detail') or ack}")
-
-
-def _apply_pending_update(manager: Any) -> None:
-    """在拥有托盘主进程的进程内应用已下载包并重启主入口。"""
-    pending_update = manager.get_update_pending_restart()
-    if pending_update is None:
-        raise RuntimeError("Velopack 未找到已下载的待应用更新包")
-    manager.apply_updates_and_restart_with_args(pending_update, [])
-
-
-def _request_host_shutdown(host_pid: int) -> None:
-    """让 GUI 下载完成后通知托盘主进程接管应用替换。"""
-    if not isinstance(host_pid, int) or host_pid <= 0 or host_pid == os.getpid():
-        raise ValueError(f"GUI 更新宿主 PID 非法: {host_pid!r}")
-    _request_shutdown_and_confirm(host_pid, skip_gui_pid=os.getpid())
-
-
-def _report_update_error(error: Exception, callback: Optional[StatusCallback]) -> bool:
-    """统一记录安装失败并通知界面。"""
-    message = _format_error(error)
-    logger.error("应用更新失败: %s", message)
-    _notify_status(callback, "error", message)
-    return False
-
-
-def download_and_install(
-    candidate: Optional[UpdateCandidate],
-    *,
-    on_progress: Optional[ProgressCallback] = None,
-    host_pid: Optional[int] = None,
-    on_status: Optional[StatusCallback] = None,
-) -> bool:
-    """下载并应用更新；GUI 进程只下载，托盘主进程负责最终替换和重启。"""
-    if not isinstance(candidate, UpdateCandidate):
-        return _report_update_error(ValueError("更新候选为空或类型无效"), on_status)
-    if not getattr(sys, "frozen", False):
-        return _report_update_error(
-            RuntimeError("源码模式不支持安装更新，请使用 Velopack Setup.exe 或 Portable 包运行"),
-            on_status,
-        )
-
-    try:
-        _notify_status(on_status, "downloading")
-        candidate.manager.download_updates(
-            candidate.update_info,
-            lambda percent: _notify_progress(on_progress, percent),
-        )
-        _notify_status(on_status, "verifying")
-        if host_pid is None:
-            _request_shutdown_and_confirm(os.getpid())
-            _notify_status(on_status, "applying")
+        sha256 = _normalize_sha256(expected_digest)
+        if not sha256 or not 0 < expected_size <= MAX_UPDATE_BYTES:
+            raise ValueError('Release 缺少有效文件大小或 SHA-256')
+        asset = unquote(urlparse(download_url).path.rsplit('/', 1)[-1])
+        match = re.fullmatch(r'(?:WirelessDeviceBatteryMonitor|MouseBattery)-v?(\d+\.\d+\.\d+)\.exe', asset, re.I)
+        if urlparse(download_url).scheme != 'https' or not match:
+            raise ValueError('Release 资源文件名非法')
+        version = _normalize_version_text(target_version or match.group(1))
+        if match.group(1) != version:
+            raise ValueError('Release 资源版本与目标版本不一致')
+        target = str(Path(exe_path).parent / asset)
+        pid = host_pid if isinstance(host_pid, int) and host_pid > 0 else os.getpid()
+        with UpdateLease(exe_path) as lease:
+            if os.path.normcase(target) != os.path.normcase(exe_path) and os.path.exists(target):
+                raise RuntimeError('目标版本文件已存在')
+            directory = job_directory(exe_path, token)
+            directory.mkdir()
+            staged, backup = directory / 'asset.partial', directory / 'previous.exe'
+            write_atomic(directory / 'manifest.json', dict(token=token, target_path=target, version=version))
+            deadline = time.monotonic() + DOWNLOAD_TOTAL_TIMEOUT
+            sources = [('official', download_url)]
+            if download_url.startswith('https://github.com/'):
+                sources.append(('mirror', DOWNLOAD_MIRROR_PREFIX + download_url))
+            for index, (name, url) in enumerate(sources):
+                check_budget(deadline, cancel_event)
+                _notify_status(on_status, 'connecting', name)
+                try:
+                    downloaded, actual_hash = _download_to_path(url, str(staged), on_progress=on_progress,
+                        expected_size=expected_size, retries=1 if name == 'mirror' else 0,
+                        on_retry=lambda a, n, e: _notify_status(on_status, 'retrying', str(e)),
+                        deadline=deadline, cancel_event=cancel_event)
+                    _notify_status(on_status, 'verifying')
+                    size = _validate_download(staged, downloaded, actual_hash, expected_size, sha256)
+                    break
+                except UpdateCancelled:
+                    raise
+                except Exception as error:
+                    logger.warning('下载来源失败 %s: %s', name, error)
+                    if index + 1 == len(sources):
+                        raise
+                    _notify_status(on_status, 'fallback', str(error))
+            check_budget(deadline, cancel_event)
+            script = _build_swap_powershell_script(exe_path, target, str(backup), str(staged), pid, size,
+                expected_sha256=sha256, token=token, semaphore_name=lease.name,
+                target_version=version, target_start_ticks=process_start_ticks(pid))
+            child = subprocess.Popen(['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy',
+                'Bypass', '-EncodedCommand', _encode_powershell_command(script)],
+                creationflags=subprocess.CREATE_NO_WINDOW)
+            _wait_helper_ready(child, directory, token, cancel_event)
+            check_budget(deadline, cancel_event)
+            _notify_status(on_status, 'applying')
+            check_budget(deadline, cancel_event)
+            write_atomic(directory / 'apply.request', dict(token=token, target_pid=pid))
+            lease.handoff()
+            transferred = True
+            if not request_process_shutdown(pid, reason='update',
+                    skip_gui_pid=os.getppid() if pid != os.getpid() else None, update_token=token):
+                write_atomic(directory / 'abort.request', dict(token=token))
+                raise RuntimeError('无法通知应用退出，更新已取消')
             return True
-
-        _request_host_shutdown(host_pid)
-        _notify_status(on_status, "applying")
-        return True
+    except UpdateCancelled as error:
+        _notify_status(on_status, 'cancelled', str(error))
+        return False
     except Exception as error:
-        return _report_update_error(error, on_status)
-
-
-def apply_pending_update() -> None:
-    """由托盘主进程在优雅退出后应用 GUI 已下载的更新。"""
-    manager = _create_update_manager()
-    _apply_pending_update(manager)
+        logger.exception('应用更新失败')
+        _notify_status(on_status, 'error', str(error))
+        return False
+    finally:
+        if not transferred:
+            try:
+                _stop_helper(child)
+                if directory is not None:
+                    cleanup_job(exe_path, token)
+            except Exception:
+                logger.exception('更新事务清理失败')
