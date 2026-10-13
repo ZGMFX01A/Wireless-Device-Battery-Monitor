@@ -199,13 +199,11 @@ def build():
         print("Error: PyInstaller not installed. Run: pip install pyinstaller")
         sys.exit(1)
 
-    # 获取 flet 和 flet_desktop 的路径
-    import flet
-    flet_dir = os.path.dirname(flet.__file__)
-
-    # assets 目录路径
+    # web_ui 静态资源目录
+    web_ui_dir = os.path.join(os.path.dirname(__file__) or '.', 'web_ui')
+    # assets 目录路径（含图标等）
     assets_dir = os.path.join(os.path.dirname(__file__) or '.', 'assets')
-    # app.ico 文件路径（用于运行时 Windows API 设置窗口图标）
+    # app.ico 文件路径
     ico_file = os.path.join(os.path.dirname(__file__) or '.', 'app.ico')
 
     cmd = [
@@ -213,65 +211,36 @@ def build():
         '--onefile',
         '--noconsole',
         '--name', 'WirelessDeviceBatteryMonitor',
-        # --clean：打包前清理 PyInstaller 缓存，避免旧构建残留混入新目录。
+        # --clean：打包前清理 PyInstaller 缓存
         '--clean',
-        # --noconfirm：无交互环境下直接覆盖 dist，避免打包脚本卡在交互提示。
+        # --noconfirm：无交互环境下直接覆盖 dist
         '--noconfirm',
-        # Flet 依赖资源
-        '--add-data', f'{flet_dir};flet',
-        # 应用 assets（含窗口图标等）
+        # web_ui 网页资源
+        '--add-data', f'{web_ui_dir};web_ui',
+        # 应用 assets
         '--add-data', f'{assets_dir};assets',
-        # app.ico 放到根目录供 ctypes LoadImageW 加载
+        # app.ico 放到根目录
         '--add-data', f'{ico_file};.',
         # VERSION 文件放到根目录供 config.py 读取版本号
         '--add-data', f'{os.path.join(os.path.dirname(__file__) or ".", "VERSION")};.',
     ]
 
-    try:
-        import flet_desktop
-        flet_desktop_dir = os.path.dirname(flet_desktop.__file__)
-        flet_runtime_dir = os.path.join(flet_desktop_dir, 'app', 'flet')
-        required_runtime_files = (
-            'flet.exe',
-            'flutter_windows.dll',
-            os.path.join('data', 'app.so'),
-            os.path.join('data', 'icudtl.dat'),
-        )
-        missing_runtime_files = [
-            path for path in required_runtime_files
-            if not os.path.isfile(os.path.join(flet_runtime_dir, path))
-        ]
-        if missing_runtime_files:
-            print(
-                "[ERROR] flet-desktop is missing required Windows desktop runtime files: "
-                f"{', '.join(missing_runtime_files)}"
-            )
-            print("[ERROR] Reinstall dependencies in the project virtual environment before building.")
-            return 1
-        cmd.extend(['--add-data', f'{flet_desktop_dir};flet_desktop'])
-    except ImportError:
-        print("[ERROR] flet-desktop is required to build the GUI executable.")
-        return 1
-
-    # 隐式导入和其他启动文件
+    # 隐式导入和其他启动模块
     cmd.extend([
-        # asyncio 在 Windows 上的 IOCP 事件循环依赖 _overlapped C 扩展，
-        # flet 导入 asyncio.windows_events 时需要；PyInstaller 静态分析
-        # 偶尔漏收，冻结产物运行时会报 "No module named '_overlapped'"。
-        '--hidden-import', '_overlapped',
-        '--hidden-import', 'asyncio.windows_events',
-        '--hidden-import', 'asyncio.windows_utils',
         '--hidden-import', 'pystray._win32',
         '--hidden-import', 'PIL',
         '--hidden-import', 'hid',
-        '--hidden-import', 'flet',
-        '--hidden-import', 'gui',
-        # flet 0.80+ 内部使用动态导入加载多个子模块，PyInstaller 静态分析
-        # 容易漏掉，导致冻结产物运行时缺模块；这里强制收集全 flet 子模块，
-        # 保证内部运行目录入口能完整加载依赖，避免导入阶段缺模块。
-        '--collect-submodules', 'flet',
-        '--collect-submodules', 'flet_desktop',
+        '--hidden-import', 'webview',
+        '--hidden-import', 'flyout',
         '--hidden-import', 'updater',
+        '--collect-submodules', 'webview',
+        '--collect-submodules', 'clr_loader',
+        '--collect-submodules', 'pythonnet',
+        '--exclude-module', 'numpy',
+        '--exclude-module', 'pandas',
+        '--exclude-module', 'scipy',
+        '--exclude-module', 'matplotlib',
+        '--exclude-module', 'pytest',
         'main.py',
     ])
 
