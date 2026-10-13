@@ -1,4 +1,12 @@
-"""在目标物理像素网格直接绘制托盘图标，避免二次缩放模糊。"""
+"""
+系统托盘图标渲染模块
+
+采用 4x 超采样矢量空间 (128x128 SSAA) 进行高精度几何与文字绘制，
+并通过 Lanczos 高质量平滑降采样输出无锯齿、无模糊的高清托盘位图。
+针对 Windows 11/10 现代任务栏提供胶囊电池、竖向能量柱、极简纯数字与仪表圆环 4 种样式。
+具备极致画布充满度设计，杜绝四周多余留白导致的缩小失真，文字硕大锐利、一目了然。
+"""
+
 import ctypes
 from ctypes import wintypes
 from functools import lru_cache
@@ -7,167 +15,309 @@ from pathlib import Path
 from types import MappingProxyType
 
 from PIL import Image, ImageDraw, ImageFont
-from config import TRAY_ICON_STYLE_CAPSULE
+from config import (
+    TRAY_ICON_STYLE_CAPSULE,
+    TRAY_ICON_STYLE_VERTICAL,
+    TRAY_ICON_STYLE_NUMBER,
+    TRAY_ICON_STYLE_CIRCLE,
+)
 
-# 每种任务栏网格单独指定字体和电池轮廓，不缩小同一张 64px 图。
-PIXEL_GRIDS = MappingProxyType({
-    16: (13, 9, 10, 8, (0, 3, 13, 13), (3, 2, 12, 15)),
-    24: (20, 13, 15, 12, (1, 5, 20, 19), (5, 3, 18, 23)),
-    32: (26, 18, 21, 16, (1, 7, 27, 25), (6, 4, 25, 31)),
-})
-# 更高 DPI 也在实际网格直接绘制；96 DPI 的通知区为 16px。
-BASE_ICON_SIZE = 16
+# 超采样基础画布尺寸 (128x128 矢量画布，降采样至目标托盘尺寸)
+SUPERSAMPLE_CANVAS_SIZE = 128
+
+# 现代 Windows 任务栏托盘图标推荐基础物理网格 (100% 缩放下为 32px，避免 16px 放大拉伸模糊)
+BASE_ICON_SIZE = 32
 BASE_SCALE_PERCENT = 100
-# 字体来自 Windows 自带资源，路径不依赖进程工作目录。
-FONT_NAME = 'segoeuib.ttf'
-# 图标状态配色，在浅色任务栏使用更深的数字提高对比度。
-COLORS = MappingProxyType({'charging': (6, 182, 212), 'good': (16, 185, 129),
-                          'warning': (245, 158, 11), 'low': (239, 68, 68), 'unknown': (128, 128, 128)})
+
+# 优先选用的 Windows 现代粗体无衬线字体，路径直接基于 Windows 字体目录
+FONT_CANDIDATES = ('segoeuib.ttf', 'SegoeUI-Bold.ttf', 'arialbd.ttf')
+
+# 状态配色方案 (RGB 元组)：涵盖充电、电量充足、电量预警、严重低电与设备离线
+COLORS = MappingProxyType({
+    'charging': (6, 182, 212),     # 充电中：青蓝科技色
+    'good': (16, 185, 129),        # 电量良好 (>=50%)：翡翠绿
+    'warning': (245, 158, 11),     # 电量预警 (20%~49%)：琥珀橙
+    'low': (239, 68, 68),          # 严重低电 (<20%)：警示红
+    'unknown': (148, 163, 184),    # 状态未知或设备离线：哑光灰
+})
 
 
-def taskbar_icon_size():
-    """按主任务栏显示器缩放选择物理网格，不依赖 Python 的 DPI 感知状态。"""
-    user = ctypes.WinDLL('user32', use_last_error=True)
-    user.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
-    user.MonitorFromPoint.restype = wintypes.HMONITOR
-    monitor = user.MonitorFromPoint(wintypes.POINT(0, 0), 2)
-    shcore = ctypes.WinDLL('shcore', use_last_error=True)
-    shcore.GetScaleFactorForMonitor.argtypes = [wintypes.HMONITOR, ctypes.POINTER(ctypes.c_int)]
-    shcore.GetScaleFactorForMonitor.restype = ctypes.c_long
-    scale = ctypes.c_int()
-    result = shcore.GetScaleFactorForMonitor(monitor, ctypes.byref(scale))
-    if result != 0:
-        raise OSError(f'无法读取任务栏缩放：HRESULT={result:#x}')
-    return round(BASE_ICON_SIZE * scale.value / BASE_SCALE_PERCENT)
+def taskbar_icon_size() -> int:
+    """
+    按当前主任务栏所在显示器的 DPI 缩放计算托盘图标的物理像素尺寸。
+
+    基于 32px 物理标准基准，通过 Windows shcore API 读取缩放比，
+    100% 缩放交付 32px，125% 交付 40px，150% 交付 48px，200% 交付 64px。
+    """
+    try:
+        user = ctypes.WinDLL('user32', use_last_error=True)
+        user.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+        user.MonitorFromPoint.restype = wintypes.HMONITOR
+        monitor = user.MonitorFromPoint(wintypes.POINT(0, 0), 2)
+
+        shcore = ctypes.WinDLL('shcore', use_last_error=True)
+        shcore.GetScaleFactorForMonitor.argtypes = [wintypes.HMONITOR, ctypes.POINTER(ctypes.c_int)]
+        shcore.GetScaleFactorForMonitor.restype = ctypes.c_long
+        scale = ctypes.c_int()
+        result = shcore.GetScaleFactorForMonitor(monitor, ctypes.byref(scale))
+        if result == 0 and scale.value > 0:
+            return max(BASE_ICON_SIZE, round(BASE_ICON_SIZE * scale.value / BASE_SCALE_PERCENT))
+    except Exception:
+        pass
+    return BASE_ICON_SIZE
 
 
-@lru_cache(maxsize=None)
-def font(size):
-    """复用同一字号字体，Windows 字体缺失时明确失败。"""
-    path = Path(os.environ['WINDIR']) / 'Fonts' / FONT_NAME
-    return ImageFont.truetype(str(path), size)
+@lru_cache(maxsize=32)
+def get_font(size: int) -> ImageFont.FreeTypeFont:
+    """
+    缓存加载指定字号的 Windows 系统字体。
+
+    Args:
+        size: 在 128px 超采样画布中的字体像素尺寸。
+    """
+    fonts_dir = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Fonts'
+    for candidate in FONT_CANDIDATES:
+        font_path = fonts_dir / candidate
+        if font_path.exists():
+            try:
+                return ImageFont.truetype(str(font_path), size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
 
 
-def pixel_grid(size):
-    """标准网格用专项参数，其他 DPI 在实际尺寸上计算轮廓。"""
-    if size in PIXEL_GRIDS:
-        return PIXEL_GRIDS[size]
-    ratio = size / BASE_ICON_SIZE
-    values = PIXEL_GRIDS[BASE_ICON_SIZE]
-    return tuple(round(value * ratio) if isinstance(value, int)
-                 else tuple(round(coordinate * ratio) for coordinate in value) for value in values)
+def battery_color(percentage: int, charging: bool) -> tuple[int, int, int]:
+    """
+    根据电量百分比与充电状态获取对应的状态标识色。
 
-
-def battery_color(percentage, charging):
-    """按业务状态着色，未知读数不归入低电量警告。"""
+    Args:
+        percentage: 电量百分比 (0-100)，负数代表离线/未知。
+        charging: 是否处于充电状态。
+    """
     if percentage < 0:
         return COLORS['unknown']
     if charging:
         return COLORS['charging']
     if percentage >= 50:
         return COLORS['good']
-    return COLORS['warning'] if percentage >= 20 else COLORS['low']
+    if percentage >= 20:
+        return COLORS['warning']
+    return COLORS['low']
 
 
-def draw_text(draw, text, options):
-    """在实际网格上居中绘字，使用一像素描边保持底槽上的对比度。"""
-    selected = font(options['font_size'])
-    draw.text(options['center'], text, font=selected, anchor='mm',
-              fill=options['color'], stroke_width=options.get('stroke', 0),
-              stroke_fill=options.get('stroke_color', (0, 0, 0)))
+def draw_capsule(draw: ImageDraw.ImageDraw, options: dict):
+    """
+    绘制横向胶囊电池样式：最大化利用垂直与水平高度，杜绝多余留白。
 
-
-def draw_bolt(draw, size):
-    """用像素多边形表示充电，避免闪电字体缺字或缩放模糊。"""
-    unit = max(1, size // BASE_ICON_SIZE)
-    x, y = size - 4 * unit, unit
-    draw.polygon([(x + 2 * unit, y), (x, y + 3 * unit), (x + unit, y + 3 * unit),
-                  (x, y + 6 * unit), (x + 3 * unit, y + 2 * unit), (x + unit, y + 2 * unit)],
-                 fill=(250, 204, 21))
-
-
-def draw_number(draw, options):
-    """纯数字占满通知区，100% 使用专项三位数字字号。"""
-    size, grid, text = options['size'], options['grid'], options['text']
+    内部文字硕大清晰（字号 70 / 三位数 56），包裹于安全区内，绝不溢出。
+    """
+    bx0, by0, bx1, by1 = 4, 14, 112, 114
+    radius = 18
+    shell_color = options['shell_color']
+    track_color = options['track_color']
     color = options['color']
-    if not options['dark']:
-        color = tuple(round(channel / 2) for channel in color)
-    draw_text(draw, text, {'center': (size // 2, size // 2),
-                           'font_size': grid[0] if len(text) <= 2 else grid[1], 'color': color})
-
-
-def draw_battery(draw, options):
-    """胶囊和竖向电池分别按目标网格绘制轮廓与有效电量。"""
-    vertical = options['style'] == 'vertical'
-    size, grid = options['size'], options['grid']
-    box = grid[5] if vertical else grid[4]
-    left, top, right, bottom = box
-    shell = (255, 255, 255) if options['dark'] else (32, 32, 32)
-    radius = max(1, size // 8)
-    draw.rounded_rectangle(box, radius=radius, fill=(64, 64, 64, 180))
-    if options['percentage'] >= 0:
-        fill_battery(draw, box, options)
-    draw.rounded_rectangle(box, radius=radius, outline=shell, width=max(1, size // BASE_ICON_SIZE))
-    if vertical:
-        draw.rectangle((left + 3, max(0, top - 2), right - 3, top), fill=shell)
-    else:
-        draw.rectangle((right + 1, (top + bottom) // 2 - 1, size - 1, (top + bottom) // 2 + 1), fill=shell)
-    draw_text(draw, options['text'], {'center': ((left + right) // 2, (top + bottom) // 2),
-        'font_size': (grid[3] if vertical else grid[2]) - (2 if len(options['text']) > 2 else 0),
-        'color': (255, 255, 255), 'stroke': 1, 'stroke_color': (0, 0, 0)})
-
-
-def fill_battery(draw, box, options):
-    """0% 不画填充，横向从左到右、竖向从下到上增长。"""
-    left, top, right, bottom = box
     percentage = options['percentage']
-    if percentage == 0:
-        return
-    if options['style'] == 'vertical':
-        height = round((bottom - top - 2) * percentage / 100)
-        if height == 0:
-            return
-        fill = (left + 1, max(top + 1, bottom - height), right - 1, bottom - 1)
+    text = options['text']
+
+    # 电池外壳与半透明底槽
+    draw.rounded_rectangle([bx0, by0, bx1, by1], radius=radius, fill=track_color, outline=shell_color, width=5)
+    # 右侧正极触点
+    draw.rounded_rectangle([bx1 - 2, 42, 126, 86], radius=7, fill=shell_color)
+
+    # 有效电量充盈槽
+    if percentage > 0:
+        fill_pct = min(100, max(0, percentage)) / 100.0
+        inner_w = (bx1 - 6) - (bx0 + 6)
+        cur_w = max(20, int(inner_w * fill_pct))
+        draw.rounded_rectangle([bx0 + 6, by0 + 6, bx0 + 6 + cur_w, by1 - 6], radius=13, fill=color)
+
+    # 硕大粗体居中文字
+    font_size = 56 if len(text) >= 3 else 70
+    draw.text(
+        ((bx0 + bx1) // 2, (by0 + by1) // 2),
+        text,
+        font=get_font(font_size),
+        anchor='mm',
+        fill=(255, 255, 255),
+        stroke_width=3,
+        stroke_fill=(0, 0, 0, 180),
+    )
+
+
+def draw_vertical(draw: ImageDraw.ImageDraw, options: dict):
+    """
+    绘制竖向微型能量柱样式：最大化利用宽度与高度，饱满撑满任务栏槽位。
+
+    数字硕大居中（字号 70 / 三位数 56），彻底告别文字爆出边框。
+    """
+    vx0, vy0, vx1, vy1 = 14, 18, 114, 126
+    radius = 18
+    shell_color = options['shell_color']
+    track_color = options['track_color']
+    color = options['color']
+    percentage = options['percentage']
+    text = options['text']
+
+    # 顶部正极触点
+    draw.rounded_rectangle([42, 2, 86, 20], radius=7, fill=shell_color)
+    # 电池柱外壳与底槽
+    draw.rounded_rectangle([vx0, vy0, vx1, vy1], radius=radius, fill=track_color, outline=shell_color, width=5)
+
+    # 自底向上的能量充盈槽
+    if percentage > 0:
+        fill_pct = min(100, max(0, percentage)) / 100.0
+        inner_h = (vy1 - 6) - (vy0 + 6)
+        cur_h = max(20, int(inner_h * fill_pct))
+        draw.rounded_rectangle([vx0 + 6, vy1 - 6 - cur_h, vx1 - 6, vy1 - 6], radius=13, fill=color)
+
+    # 硕大粗体居中文字
+    font_size = 56 if len(text) >= 3 else 70
+    draw.text(
+        ((vx0 + vx1) // 2, (vy0 + vy1) // 2 + 2),
+        text,
+        font=get_font(font_size),
+        anchor='mm',
+        fill=(255, 255, 255),
+        stroke_width=3,
+        stroke_fill=(0, 0, 0, 180),
+    )
+
+
+def draw_number(draw: ImageDraw.ImageDraw, options: dict):
+    """
+    绘制极简纯数字样式：超大饱满实心大字 (字号 102 / 三位数 80)，去除产生雾化感的小描边。
+    """
+    text = options['text']
+    color = options['color']
+
+    # 针对 100 与两位数进行视觉平衡字号微调
+    font_size = 80 if len(text) >= 3 else 102
+    draw.text(
+        (64, 64),
+        text,
+        font=get_font(font_size),
+        anchor='mm',
+        fill=color,
+    )
+
+
+def draw_circle(draw: ImageDraw.ImageDraw, options: dict):
+    """
+    绘制仪表圆环样式：大外径 (116px) + 饱满动态进度圆弧 + 智能自适应表盘内衬与高对比度居中数字。
+    """
+    percentage = options['percentage']
+    text = options['text']
+    color = options['color']
+    dark = options['dark']
+    track_color = options['track_color']
+
+    center = 64
+    radius = 58
+    line_width = 11
+    box = [center - radius, center - radius, center + radius, center + radius]
+
+    # 智能自适应表盘内衬与高对比度文字：根据深浅背景自动反差
+    if dark:
+        inner_disc = (15, 20, 28, 160)
+        text_color = (255, 255, 255)
+        stroke_color = (0, 0, 0, 180)
     else:
-        width = round((right - left - 2) * percentage / 100)
-        if width == 0:
-            return
-        fill = (left + 1, top + 1, min(right - 1, left + 1 + width), bottom - 1)
-    draw.rectangle(fill, fill=options['color'])
+        inner_disc = (255, 255, 255, 200)
+        text_color = (15, 23, 42)
+        stroke_color = (255, 255, 255, 200)
+
+    # 1. 绘制内部表盘底座 (将数字与外界复杂壁纸/半透明背景隔离开)
+    draw.ellipse([14, 14, 114, 114], fill=inner_disc)
+
+    # 2. 全圆半透明底槽轨道
+    draw.arc(box, start=0, end=360, fill=track_color, width=line_width)
+
+    # 3. 动态电量进度弧线 (从正上方 12 点钟位置顺时针绘制)
+    if percentage > 0:
+        sweep = 360 * (min(100, percentage) / 100.0)
+        draw.arc(box, start=-90, end=-90 + sweep, fill=color, width=line_width)
+
+    # 4. 核心区域超大居中电量数字 (带高对比度描边保护)
+    font_size = 52 if len(text) >= 3 else 68
+    draw.text(
+        (center, center),
+        text,
+        font=get_font(font_size),
+        anchor='mm',
+        fill=text_color,
+        stroke_width=2,
+        stroke_fill=stroke_color,
+    )
 
 
-def draw_circle(draw, options):
-    """保留经典圆环入口，同样在目标尺寸直接绘制。"""
-    size = options['size']
-    width = max(1, size // 8)
-    box = (1, 1, size - 2, size - 2)
-    draw.ellipse(box, outline=(80, 80, 80), width=width)
-    if options['percentage'] > 0:
-        draw.arc(box, -90, -90 + round(360 * options['percentage'] / 100),
-                 fill=options['color'], width=width)
-    draw_text(draw, options['text'], {'center': (size // 2, size // 2),
-        'font_size': options['grid'][3], 'color': (255, 255, 255)})
+def draw_charging_bolt(draw: ImageDraw.ImageDraw):
+    """
+    在右上角专用微标角标区绘制发光金色闪电，杜绝遮挡切断主体数字。
+    """
+    bolt_points = [(108, 4), (90, 26), (102, 26), (94, 48), (120, 20), (106, 20)]
+    draw.polygon(bolt_points, fill=(250, 204, 21), outline=(0, 0, 0, 180))
 
 
-def create_battery_icon(percentage=-1, charging=False, *, style=TRAY_ICON_STYLE_CAPSULE,
-                        is_dark_taskbar=True, size=None):
-    """生成当前任务栏目标尺寸的 RGBA 图标，供 pystray 直接提交。"""
-    size = taskbar_icon_size() if size is None else size
-    if percentage < -1 or percentage > 100 or size <= 0:
+def create_battery_icon(
+    percentage: int = -1,
+    charging: bool = False,
+    *,
+    style: str = TRAY_ICON_STYLE_CAPSULE,
+    is_dark_taskbar: bool = True,
+    size: int | None = None,
+) -> Image.Image:
+    """
+    生成当前任务栏目标尺寸的高质量 RGBA 托盘图标。
+
+    Args:
+        percentage: 电量百分比 (-1 到 100)，负数代表未知/离线。
+        charging: 是否正在充电。
+        style: 托盘图标样式 (capsule / vertical / number / circle)。
+        is_dark_taskbar: Windows 任务栏是否为深色模式。
+        size: 目标物理像素尺寸，留空则自动按当前显示器 DPI 计算。
+
+    Returns:
+        包含完整抗锯齿的高质量 PIL RGBA 图像对象。
+    """
+    target_size = taskbar_icon_size() if size is None else size
+    if percentage < -1 or percentage > 100 or target_size <= 0:
         raise ValueError('非法电量或托盘图标尺寸')
-    image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
-    options = dict(size=size, grid=pixel_grid(size), style=style, dark=is_dark_taskbar,
-                   percentage=percentage, text='--' if percentage < 0 else str(percentage),
-                   color=battery_color(percentage, charging))
-    draw = ImageDraw.Draw(image)
-    if style == 'number':
+
+    # 在 128x128 矢量画布上超采样绘制
+    canvas = Image.new('RGBA', (SUPERSAMPLE_CANVAS_SIZE, SUPERSAMPLE_CANVAS_SIZE), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+
+    # 任务栏深浅色环境配色自适应
+    shell_color = (255, 255, 255, 230) if is_dark_taskbar else (30, 41, 59, 230)
+    track_color = (255, 255, 255, 45) if is_dark_taskbar else (0, 0, 0, 45)
+    text_color = (255, 255, 255) if is_dark_taskbar else (15, 23, 42)
+
+    options = {
+        'percentage': percentage,
+        'text': '--' if percentage < 0 else str(percentage),
+        'color': battery_color(percentage, charging),
+        'dark': is_dark_taskbar,
+        'shell_color': shell_color,
+        'track_color': track_color,
+        'text_color': text_color,
+    }
+
+    if style == TRAY_ICON_STYLE_CAPSULE:
+        draw_capsule(draw, options)
+    elif style == TRAY_ICON_STYLE_VERTICAL:
+        draw_vertical(draw, options)
+    elif style == TRAY_ICON_STYLE_NUMBER:
         draw_number(draw, options)
-    elif style == 'circle':
+    elif style == TRAY_ICON_STYLE_CIRCLE:
         draw_circle(draw, options)
-    elif style in ('capsule', 'vertical'):
-        draw_battery(draw, options)
     else:
         raise ValueError(f'非法托盘图标样式：{style}')
+
+    # 充电时在右上角微标位置绘制清晰闪电
     if charging:
-        draw_bolt(draw, size)
-    return image
+        draw_charging_bolt(draw)
+
+    # 高质量 Lanczos 降采样至目标尺寸，获得极致平滑边缘
+    if target_size == SUPERSAMPLE_CANVAS_SIZE:
+        return canvas
+    return canvas.resize((target_size, target_size), resample=Image.Resampling.LANCZOS)

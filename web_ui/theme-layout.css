@@ -15,8 +15,8 @@ body.theme-dark {
     --border-card-top: rgba(255, 255, 255, 0.28);
 
     --text-primary: #ffffff;
-    --text-secondary: #cbd5e1;
-    --text-dim: #94a3b8;
+    --text-secondary: #d8e2ec;
+    --text-dim: #a5b5c7;
 
     --accent-green: #10b981;
     --accent-cyan: #06b6d4;
@@ -92,6 +92,8 @@ html, body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", Roboto, sans-serif;
     color: var(--text-primary);
     line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
 }
 
 /* 浮窗主框架容器：深度亚克力磨砂与晶莹高光 */

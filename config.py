@@ -87,7 +87,7 @@ def is_windows_dark_mode() -> bool:
 
 
 def is_windows_taskbar_dark_mode() -> bool:
-    """检测 Windows 任务栏通知区是否为深色模式（SystemUsesLightTheme）。"""
+    """检测 Windows 任务栏通知区是否为深色模式。"""
     if os.name != 'nt':
         return True
     try:
@@ -97,9 +97,21 @@ def is_windows_taskbar_dark_mode() -> bool:
             0,
             winreg.KEY_READ,
         )
-        val, _ = winreg.QueryValueEx(key, "SystemUsesLightTheme")
+        system_light = 0
+        try:
+            system_light, _ = winreg.QueryValueEx(key, "SystemUsesLightTheme")
+        except Exception:
+            pass
+        apps_light = 0
+        try:
+            apps_light, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        except Exception:
+            pass
         winreg.CloseKey(key)
-        return val == 0
+        # 如果系统显式设定浅色，或者应用设定为浅色（自定义浅色模式下任务栏通常为浅灰米白色）
+        if system_light == 1 or apps_light == 1:
+            return False
+        return True
     except Exception:
         return True
 
