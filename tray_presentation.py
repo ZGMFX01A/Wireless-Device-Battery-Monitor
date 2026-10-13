@@ -52,11 +52,13 @@ class TrayPresentation:
         """只对有效且未充电的读数发送低电量通知。"""
         if device.percentage < 0 or device.charging:
             return
-        if not self.config_manager.should_notify(identity, device.percentage):
+        raw = getattr(device, 'raw_percentage', None)
+        percent = raw if type(raw) is int and 0 <= raw <= 100 else device.percentage
+        if not self.config_manager.should_notify(identity, percent):
             return
         try:
             self._tray.notify(self._t('tray.notification.low_battery_message',
-                name=self._translate_runtime_text(device.name), percent=device.percentage),
+                name=self._translate_runtime_text(device.name), percent=percent),
                 title=self._t('tray.notification.low_battery_title'))
         except Exception:
             # 系统通知失败需要日志，不能中断后续图标与菜单刷新。

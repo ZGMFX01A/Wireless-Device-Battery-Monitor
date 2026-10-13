@@ -16,10 +16,11 @@ from flyout_update import FlyoutUpdate
 from gui_process import process_alive, GUI_IDLE_EXIT_CODE
 import updater
 import webview
+from webview_prerequisite import (detect_webview2, show_runtime_guidance,
+                                  WebView2Unavailable, WEBVIEW2_INSTALL_URL)
 
 logger = logging.getLogger(__name__)
 # 缺少运行时时提供微软官方入口，不假定所有 Windows 10 都已安装。
-WEBVIEW2_INSTALL_URL = 'https://developer.microsoft.com/microsoft-edge/webview2/'
 # Windows 错误对话框样式：无控制台 EXE 也必须显示启动失败。
 ERROR_DIALOG_STYLE = 0x10
 
@@ -31,10 +32,12 @@ def require_webview2():
     webview.settings['DRAG_REGION_SELECTOR'] = ':not(*)'
     # 控制器创建前指定透明底色，避免初始化阶段先铺不透明背景再切换。
     os.environ.setdefault('WEBVIEW2_DEFAULT_BACKGROUND_COLOR', '00000000')
+    version = detect_webview2(webview.settings.get('WEBVIEW2_RUNTIME_PATH'))
     from webview.guilib import initialize
     gui = initialize('edgechromium')
     if gui.renderer != 'edgechromium':
-        raise RuntimeError(f'缺少 Microsoft Edge WebView2 Runtime，请安装：{WEBVIEW2_INSTALL_URL}')
+        raise RuntimeError('WebView2 已检测到，但 GUI 引擎未能初始化。请检查 .NET/程序依赖；不会切换到旧 IE 引擎。')
+    logger.info('WebView2 环境检测通过：%s', version)
 
 
 def run_gui(mode):
@@ -54,6 +57,10 @@ def run_gui(mode):
         if manager.startup_error:
             raise manager.startup_error
         return GUI_IDLE_EXIT_CODE if manager.idle_exit else 0
+    except WebView2Unavailable as error:
+        logger.warning('WebView2 运行时不可用：%s', error)
+        show_runtime_guidance(error)
+        return 1
     except Exception as error:
         # 运行时缺失和资源加载失败必须对用户可见。
         logger.exception('WebView GUI 启动或运行失败')

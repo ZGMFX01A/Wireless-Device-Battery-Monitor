@@ -45,6 +45,7 @@ from tray_icons import create_battery_icon
 
 from tray_presentation import TrayPresentation
 from tray_menu import TrayMenu
+from power_notifications import PowerNotifications
 
 
 class TrayApp(TrayPresentation, TrayMenu):
@@ -64,6 +65,7 @@ class TrayApp(TrayPresentation, TrayMenu):
         self._tray: Optional[pystray.Icon] = None
         self._running = False
         self._stopping = False
+        self._power_notifications = PowerNotifications(device_manager.on_power_event)
 
     def _effective_language(self) -> str:
         """返回当前 tray 应采用的实际语言。"""
@@ -84,6 +86,7 @@ class TrayApp(TrayPresentation, TrayMenu):
     def start(self, detached=False):
         """启动主线程托盘循环，硬件初始化交给后台工作线程。"""
         self._running = True
+        self._power_notifications.start()
         self.device_manager.add_on_update(self._update_icon)
         self._tray = pystray.Icon(
             name='MouseBattery',
@@ -166,6 +169,7 @@ class TrayApp(TrayPresentation, TrayMenu):
             return
         self._stopping = True
         self._running = False
+        self._power_notifications.close()
 
         # 移除回调避免在停止时被调用
         self.device_manager.remove_on_update(self._update_icon)

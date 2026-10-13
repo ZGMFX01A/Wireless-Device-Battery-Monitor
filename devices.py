@@ -26,6 +26,8 @@ from core_bridge import (
     MouseBackendHandle,
     RazerBatteryInfo,
     close_mouse_backend,
+    reopen_mouse_backend,
+    reset_mouse_battery_filter,
     bluetooth_binding_from_candidate,
     enumerate_bluetooth_candidates,
     enumerate_keyboard_candidates,
@@ -39,6 +41,7 @@ from core_bridge import (
 )
 
 from device_command_service import execute_reported_command
+from adaptive_polling import MousePollPlan
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +121,9 @@ class MouseInfo:
     online: bool = False
     last_update: float = 0.0
     product_id: int = 0
+    raw_percentage: Optional[int] = None
+    voltage_mv: Optional[int] = None
+    battery_source: str = ''
 
     @property
     def display_percentage(self) -> str:
@@ -213,6 +219,16 @@ class DeviceManager:
         self._auto_refresh_stop_event = threading.Event()
         self._auto_refresh_thread_lock = threading.Lock()
         self._refresh_interval = 60  # 秒
+        self._poll_plan = MousePollPlan()
+        self._auxiliary_due = time.monotonic() + 60
+        self._auto_refresh_wake = threading.Event()
+        self._power_suspended = threading.Event()
+        self._resume_pending = threading.Event()
+        self._last_resume = float('-inf')
+        self._resume_automatic_seen = False
+        self._power_lock = threading.Lock()
+        self._reconnect_at = {}
+        self._rebaseline = set()
         self._command_thread: Optional[threading.Thread] = None
         self._command_stop_event = threading.Event()
         self._command_thread_lock = threading.Lock()
@@ -402,9 +418,8 @@ class DeviceManager:
             self._refresh_keyboard_locked()
             self._refresh_bluetooth_locked()
 
-            # 唤醒后若每台已发现设备都连续失败，则触发一次自动重连/重扫。
+            # 单设备达到失败阈值即可恢复，不关闭其它健康连接。
             if self._should_reconnect_after_refresh():
-                logger.warning("检测到连续读取失败，触发自动重连恢复流程")
                 self._recover_connections_locked()
 
         self._notify_update()
@@ -436,18 +451,44 @@ class DeviceManager:
             self._battery_refresh_state = state
             self._battery_refresh_message = message
 
-    def _recover_connections_locked(self):
-        """自动恢复连接（调用方需持有 _io_lock）。"""
-        try:
+    def _recover_connections_locked(self, attempted=None):
+        """只恢复达到阈值的端点；调用方持有 I/O 锁。"""
+        unopened = 0
+        for idx, (mouse, (_, backend)) in enumerate(zip(self._mice, self._mouse_to_device)):
+            key = self._device_key(mouse, idx)
+            # 其它设备到期不能绕过此端点的失败退避，只有本轮实际采样者可重连。
+            if attempted is not None and key not in attempted:
+                continue
+            now = time.monotonic()
+            if self._consecutive_failures.get(key, 0) < self._reconnect_failure_threshold:
+                continue
+            if now < self._reconnect_at.get(key, 0):
+                continue
+            if not self._reopen_one_locked(key, backend, now):
+                unopened += 1
+        # 保留旧版在全部端点消失/路径变化后的重扫兜底；有健康设备就不能全量关闭。
+        now = time.monotonic()
+        if (unopened and unopened == len(self._mouse_to_device)
+                and now - self._last_reconnect_time >= 60):
+            self._last_reconnect_time = now
+            logger.warning('全部已知端点均无法重开，执行冷却期内一次恢复扫描')
             self._close_all()
             self._scan_devices()
-            self._refresh_battery(BatteryRefreshMode.AUTO)
-            self._refresh_keyboard_locked()
-            self._refresh_bluetooth_locked()
-            self._last_reconnect_time = time.time()
-            logger.info("自动重连/重扫完成")
-        except Exception as e:
-            logger.error(f"自动重连恢复失败: {e}")
+            self._refresh_battery(BatteryRefreshMode.STARTUP)
+
+    def _reopen_one_locked(self, key, backend, now):
+        self._reconnect_at[key] = now + max(60, self._refresh_interval)
+        self._rebaseline.add(key)
+        try:
+            if reopen_mouse_backend(backend):
+                slot = self._poll_plan.slots.get(key)
+                if slot is not None:
+                    slot.due = time.monotonic() + 1
+                logger.info('已重开单设备端点，等待有效读数：%s', key)
+                return True
+        except Exception:
+            logger.exception('恢复单设备端点失败：%s', key)
+        return False
 
     def _refresh_keyboard_locked(self):
         """刷新当前绑定键盘的电量快照（调用方需持有 _io_lock）。"""
@@ -458,7 +499,7 @@ class DeviceManager:
             return
 
         keyboard = read_keyboard_battery(binding)
-        if keyboard.online:
+        if keyboard.online and keyboard_binding_from_info(keyboard) != binding:
             # 读取成功后，把当前真实接口 path 回写到配置，避免重插后继续沿用旧 path。
             self.config_manager.keyboard_binding = keyboard_binding_from_info(keyboard)
 
@@ -811,34 +852,12 @@ class DeviceManager:
                 logger.error(f'处理设备命令失败: {e}')
 
     def _should_reconnect_after_refresh(self) -> bool:
-        """判断是否需要执行自动重连。"""
-        now = time.time()
-        if now - self._last_reconnect_time < self._reconnect_cooldown_sec:
-            return False
-
-        with self._lock:
-            mice = list(self._mice)
-
-        # 无设备时不做重连（由用户手动扫描或后续周期处理）
-        if not mice:
-            return False
-
-        # 逐台判断失败次数；不能因为某台仍保留旧电量，就阻断另一台失效句柄的恢复。
-        all_reached_threshold = True
-        for idx, mouse in enumerate(mice):
-            key = self._device_key(mouse, idx)
-            fail_count = self._consecutive_failures.get(key, 0)
-            if fail_count < self._reconnect_failure_threshold:
-                all_reached_threshold = False
-                break
-
-        if all_reached_threshold:
-            logger.warning(
-                "所有设备连续读取失败达到阈值，可能发生睡眠唤醒后句柄失效/路径变化，准备自动重连"
-            )
-            return True
-
-        return False
+        """每台设备独立判断失败次数和冷却期，不要求全部设备一起失败。"""
+        now = time.monotonic()
+        return any(self._consecutive_failures.get(self._device_key(mouse, idx), 0)
+                   >= self._reconnect_failure_threshold
+                   and now >= self._reconnect_at.get(self._device_key(mouse, idx), 0)
+                   for idx, mouse in enumerate(self.mice))
 
     def _scan_devices(self):
         """扫描所有已连接设备"""
@@ -846,6 +865,9 @@ class DeviceManager:
             self._mice.clear()
             self._mouse_to_device.clear()
         self._consecutive_failures.clear()
+        self._poll_plan.slots.clear()
+        self._reconnect_at.clear()
+        self._rebaseline.clear()
 
         self._mouse_backends = enumerate_mouse_backends()
         for backend in self._mouse_backends:
@@ -913,13 +935,20 @@ class DeviceManager:
                 f"(此前连续失败 {fail_count} 次)"
             )
 
-    def _refresh_battery(self, mode: BatteryRefreshMode = BatteryRefreshMode.AUTO):
+    def _refresh_battery(self, mode: BatteryRefreshMode = BatteryRefreshMode.AUTO, *, due_only=False):
         """按刷新入口读取所有鼠标，启动和手动刷新不套用历史跳变过滤。"""
         with self._lock:
             snapshot = list(zip(self._mice, self._mouse_to_device))
-
+        attempted = set()
         for idx, (mouse, (brand, device_obj)) in enumerate(snapshot):
+            key = self._device_key(mouse, idx)
+            if due_only and not self._poll_plan.due(key, time.monotonic()):
+                continue
+            attempted.add(key)
+            success, battery = False, None
             try:
+                if mode != BatteryRefreshMode.AUTO or key in self._rebaseline:
+                    reset_mouse_battery_filter(device_obj)
                 with self._lock:
                     prev_online = mouse.online
                 battery = self._read_battery_by_brand(brand, device_obj)
@@ -930,7 +959,8 @@ class DeviceManager:
                     self._handle_negative_battery(mouse, idx=idx, device_obj=device_obj)
                     continue
                 if not self._is_battery_sample_valid(
-                    mouse, battery.percentage, battery.charging, mode=mode
+                    mouse, battery.percentage, battery.charging,
+                    mode=BatteryRefreshMode.STARTUP if key in self._rebaseline else mode
                 ):
                     self._handle_invalid_battery_sample(mouse, idx=idx, device_obj=device_obj)
                     continue
@@ -941,6 +971,8 @@ class DeviceManager:
                     device_obj=device_obj,
                     prev_online=prev_online,
                 )
+                success = True
+                self._rebaseline.discard(key)
             except Exception as exc:
                 self._handle_battery_exception(
                     mouse,
@@ -949,6 +981,16 @@ class DeviceManager:
                     idx=idx,
                     device_obj=device_obj,
                 )
+            finally:
+                if not success:
+                    reset_mouse_battery_filter(device_obj)
+                self._poll_plan.record(key, time.monotonic(), success=success,
+                    charging=bool(battery and battery.charging),
+                    full=bool(battery and (getattr(battery, 'fully_charged', False)
+                                           or battery.percentage == 100)),
+                    base=self._refresh_interval)
+                self._auto_refresh_wake.set()
+        return attempted
 
     def _read_battery_by_brand(self, brand: Brand, device_obj: MouseBackendHandle):
         """按品牌选择桥接层读取器，协议校验仍由 Core 适配器负责。"""
@@ -986,7 +1028,13 @@ class DeviceManager:
                              device_obj: MouseBackendHandle, prev_online: bool):
         """写入有效电量，并在设备从离线恢复时记录诊断日志。"""
         with self._lock:
-            mouse.percentage = battery.percentage
+            display = getattr(battery, 'display_percentage', None)
+            adapted = (mouse.brand == Brand.LOGITECH
+                       and getattr(battery, 'source', '') == 'hidpp20:1001')
+            mouse.percentage = display if adapted and type(display) is int and 0 <= display <= 100 else battery.percentage
+            mouse.raw_percentage = battery.percentage
+            mouse.voltage_mv = getattr(battery, 'voltage_mv', None)
+            mouse.battery_source = getattr(battery, 'source', '')
             mouse.charging = battery.charging
             mouse.status_text = battery.status_text
             mouse.online = True
@@ -1058,10 +1106,12 @@ class DeviceManager:
             return False
 
         # 启动和手动刷新要以设备当前读数为准，不能被旧快照或充电前电量拦截。
-        if mode != BatteryRefreshMode.AUTO or mouse.percentage < 0:
+        if (mode != BatteryRefreshMode.AUTO or mouse.percentage < 0 or not mouse.online
+                or (mouse.last_update > 0 and time.time() - mouse.last_update > 300)):
             return True
 
-        delta = abs(percentage - mouse.percentage)
+        previous = mouse.raw_percentage if mouse.raw_percentage is not None else mouse.percentage
+        delta = abs(percentage - previous)
 
         max_non_charging_delta = (
             MAX_ROG_NON_CHARGING_BATTERY_DELTA
@@ -1102,6 +1152,7 @@ class DeviceManager:
                 daemon=True,
                 name="device-auto-refresh",
             )
+            self._auxiliary_due = time.monotonic() + safe_interval
             self._auto_refresh_thread.start()
         logger.info(f"自动刷新已启动，间隔 {safe_interval} 秒")
 
@@ -1111,6 +1162,7 @@ class DeviceManager:
         with self._auto_refresh_thread_lock:
             self._auto_refresh_running = False
             self._auto_refresh_stop_event.set()
+            self._auto_refresh_wake.set()
             thread = self._auto_refresh_thread
 
         if thread and thread.is_alive() and thread is not threading.current_thread():
@@ -1122,16 +1174,75 @@ class DeviceManager:
         logger.info("自动刷新已停止")
 
     def _auto_refresh_loop(self):
-        """自动刷新循环"""
-        while not self._auto_refresh_stop_event.wait(self._refresh_interval):
+        """单个可唤醒调度线程，按端点到期读取，不堆积错过的采样任务。"""
+        while not self._auto_refresh_stop_event.is_set():
+            self._auto_refresh_wake.clear()
             try:
-                self.refresh_only()
+                delay = self._refresh_due()
             except Exception as e:
                 logger.error(f"自动刷新出错: {e}")
+                delay = self._refresh_interval
+            self._auto_refresh_wake.wait(delay)
         with self._auto_refresh_thread_lock:
             self._auto_refresh_running = False
             if threading.current_thread() is self._auto_refresh_thread:
                 self._auto_refresh_thread = None
+
+    def on_power_event(self, event):
+        """原生回调只标记状态，避免与在途 HID 读取并发关闭句柄。"""
+        with self._power_lock:
+            if event == 4:
+                self._power_suspended.set()
+                self._last_resume = float('-inf')
+                self._resume_automatic_seen = False
+            elif event in (7, 18):
+                self._power_suspended.clear()
+                # 自动恢复后的用户交互通知可能迟到很久，不应二次重开健康句柄。
+                if event == 7 and self._resume_automatic_seen:
+                    return
+                if event == 18:
+                    self._resume_automatic_seen = True
+                now = time.monotonic()
+                if now - self._last_resume >= 10:
+                    self._last_resume = now
+                    self._resume_pending.set()
+            else:
+                return
+        self._auto_refresh_wake.set()
+
+    def _refresh_due(self):
+        if self._power_suspended.is_set():
+            return 60
+        # 手动扫描/绑定优先。调度线程不排队积压，也不抢走在途读取的句柄。
+        if not self._io_lock.acquire(blocking=False):
+            return 1
+        changed = False
+        try:
+            now = time.monotonic()
+            if self._resume_pending.is_set():
+                self._resume_pending.clear()
+                for idx, (_, backend) in enumerate(self._mouse_to_device):
+                    key = self._device_key(self._mice[idx], idx)
+                    self._poll_plan.arm(key, now)
+                    self._reopen_one_locked(key, backend, now)
+                self._auxiliary_due = now + 1
+            if any(self._poll_plan.due(self._device_key(mouse, idx), now)
+                   for idx, mouse in enumerate(self._mice)):
+                attempted = self._refresh_battery(BatteryRefreshMode.AUTO, due_only=True)
+                self._recover_connections_locked(attempted)
+                changed = True
+            if time.monotonic() >= self._auxiliary_due:
+                # 键盘/BLE 维持原周期，不被一只充电鼠标带入高频采样。
+                self._refresh_keyboard_locked()
+                self._refresh_bluetooth_locked()
+                self._auxiliary_due = time.monotonic() + self._refresh_interval
+                changed = True
+            delay = self._poll_plan.delay(time.monotonic(), self._auxiliary_due)
+        finally:
+            self._io_lock.release()
+        if changed:
+            self._notify_update()
+        return delay
 
     def _close_all(self):
         """关闭所有设备连接"""
@@ -1200,6 +1311,9 @@ def _serialize_mouse_state(mouse: MouseInfo) -> dict:
         'status_text': mouse.status_text,
         'online': mouse.online,
         'last_update': mouse.last_update,
+        'raw_percentage': mouse.raw_percentage,
+        'voltage_mv': mouse.voltage_mv,
+        'battery_source': mouse.battery_source,
     }
 
 
@@ -1324,6 +1438,10 @@ def _deserialize_mouse_state(item: dict, index: int) -> Optional[MouseInfo]:
         status_text=str(item.get('status_text', '未知')),
         online=_coerce_shared_bool(item.get('online', False)),
         last_update=last_update,
+        raw_percentage=_coerce_shared_percentage(item['raw_percentage'])
+            if item.get('raw_percentage') is not None else None,
+        voltage_mv=item.get('voltage_mv') if type(item.get('voltage_mv')) is int else None,
+        battery_source=str(item.get('battery_source', '')),
     )
 
 

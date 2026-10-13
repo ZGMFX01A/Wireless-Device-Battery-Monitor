@@ -119,6 +119,42 @@ def close_mouse_backend(handle: MouseBackendHandle):
     handle.device.close()
 
 
+def reset_mouse_battery_filter(handle: MouseBackendHandle):
+    """只重置已适配的 HID++ 电压显示历史，不改其它协议。兼容较旧 core。"""
+    if handle.brand == 'logitech':
+        reset = getattr(handle.device, 'reset_battery_filter', None)
+        if reset is not None:
+            reset()
+
+
+def reopen_mouse_backend(handle: MouseBackendHandle) -> bool:
+    """调用方须持有 I/O 锁；优先重开原端点，不关闭其它在线设备。"""
+    handle.device.close()
+    if handle.device.open():
+        return True
+    # 路径变化时只能凭同型号+唯一序列号恢复，不能按 PID 随便选同款设备。
+    old_info = handle.device.device_info
+    serial = str(old_info.get('serial_number') or '').strip().casefold()
+    if not serial:
+        return False
+    find, create = {
+        'logitech': (find_logitech_receivers, LogitechReceiver),
+        'razer': (find_razer_devices, RazerDevice),
+        'asus': (find_asus_mouse_devices, create_asus_mouse_device),
+    }[handle.brand]
+    matches = [info for info in find() if info['product_id'] == handle.product_id
+               and str(info.get('serial_number') or '').strip().casefold() == serial]
+    if len(matches) != 1:
+        return False
+    replacement = create(matches[0])
+    if not replacement.open():
+        replacement.close()
+        return False
+    handle.device = replacement
+    handle.path = replacement.path
+    return True
+
+
 def read_mouse_battery(handle: MouseBackendHandle) -> Optional[BatteryInfo | RazerBatteryInfo | AsusBatteryInfo]:
     """统一读取鼠标后端电量。
 
