@@ -1,0 +1,72 @@
+.update-notes-box {
+    margin: 4px 16px 12px;
+    padding: 10px 12px;
+    max-height: 140px;
+    overflow-y: auto;
+    background: var(--bg-card);
+    border: 1px solid var(--border-card);
+    border-radius: 8px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.update-status-row {
+    padding: 14px 16px 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.status-pulse-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent-green);
+    box-shadow: 0 0 8px var(--accent-green);
+    animation: pulseDot 1.4s infinite ease-in-out;
+}
+
+@keyframes pulseDot {
+    0%, 100% { transform: scale(0.9); opacity: 0.6; }
+    50% { transform: scale(1.2); opacity: 1; }
+}
+
+.update-stage-text {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.update-progress-track {
+    margin: 8px 16px;
+    height: 6px;
+    background: var(--bg-control);
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+}
+
+.update-progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #10b981 0%, #06b6d4 100%);
+    border-radius: 4px;
+    transition: width 0.25s ease-out;
+    box-shadow: 0 0 10px rgba(16, 185, 129, 0.4);
+}
+
+.update-metrics-row {
+    padding: 0 16px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-dim);
+}
+
+.update-speed-stat {
+    font-weight: 600;
+    color: var(--accent-cyan);
+}

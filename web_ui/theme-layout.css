@@ -1,0 +1,251 @@
+:root,
+body.theme-auto,
+body.theme-dark {
+    /* 暗夜烟熏亚克力 (Dark Acrylic Glass)：通透微光深色磨砂晶体、与 Windows 11 现代深色模式无缝契合 */
+    --bg-window: linear-gradient(145deg, rgba(32, 38, 52, var(--glass-dark-start, 0.63)) 0%, rgba(18, 22, 32, var(--glass-dark-end, 0.66)) 100%);
+    --bg-card: linear-gradient(145deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.035) 100%);
+    --bg-card-hover: linear-gradient(145deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.06) 100%);
+    --bg-card-offline: rgba(255, 255, 255, 0.025);
+    --bg-control: rgba(255, 255, 255, 0.08);
+    --bg-control-active: #10b981;
+    --bg-seg-active: rgba(255, 255, 255, 0.16);
+
+    --border-window: rgba(255, 255, 255, 0.16);
+    --border-card: rgba(255, 255, 255, 0.09);
+    --border-card-top: rgba(255, 255, 255, 0.28);
+
+    --text-primary: #ffffff;
+    --text-secondary: #cbd5e1;
+    --text-dim: #94a3b8;
+
+    --accent-green: #10b981;
+    --accent-cyan: #06b6d4;
+    --accent-orange: #f59e0b;
+    --accent-red: #ef4444;
+
+    --shadow-window: inset 0 1px 1.5px 0 rgba(255, 255, 255, 0.25), 0 24px 50px -12px rgba(0, 0, 0, 0.7);
+    --shadow-card: inset 0 1px 0 0 rgba(255, 255, 255, 0.16), 0 8px 24px -4px rgba(0, 0, 0, 0.4);
+
+    --brand-logitech: #60a5fa;
+    --brand-razer: #34d399;
+    --brand-rog: #f87171;
+}
+
+body.theme-light {
+    /* 白霜晶莹亚克力 (Frost White Acrylic)：通透微霜晶体、极细白光倒角、原汁原味 Win11 亚克力质感 */
+    --bg-window: linear-gradient(145deg, rgba(250, 252, 255, var(--glass-light-start, 0.615)) 0%, rgba(238, 243, 250, var(--glass-light-end, 0.5625)) 100%);
+    --bg-card: linear-gradient(145deg, rgba(255, 255, 255, 0.88) 0%, rgba(255, 255, 255, 0.68) 100%);
+    --bg-card-hover: linear-gradient(145deg, rgba(255, 255, 255, 0.96) 0%, rgba(255, 255, 255, 0.82) 100%);
+    --bg-card-offline: rgba(255, 255, 255, 0.45);
+    --bg-control: rgba(230, 236, 245, 0.75);
+    --bg-control-active: #10b981;
+    --bg-seg-active: #ffffff;
+
+    --border-window: rgba(255, 255, 255, 0.95);
+    --border-card: rgba(0, 0, 0, 0.05);
+    --border-card-top: rgba(255, 255, 255, 1);
+
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-dim: #94a3b8;
+
+    --shadow-window: inset 0 1px 1.5px 0 rgba(255, 255, 255, 1), 0 20px 48px -10px rgba(15, 23, 42, 0.14), 0 4px 12px -2px rgba(15, 23, 42, 0.04);
+    --shadow-card: inset 0 1px 0 0 rgba(255, 255, 255, 1), 0 8px 20px -3px rgba(15, 23, 42, 0.06), 0 2px 6px -1px rgba(15, 23, 42, 0.02);
+}
+
+@media (prefers-color-scheme: light) {
+    body.theme-auto {
+        --bg-window: linear-gradient(145deg, rgba(250, 252, 255, var(--glass-light-start, 0.615)) 0%, rgba(238, 243, 250, var(--glass-light-end, 0.5625)) 100%);
+        --bg-card: linear-gradient(145deg, rgba(255, 255, 255, 0.88) 0%, rgba(255, 255, 255, 0.68) 100%);
+        --bg-card-hover: linear-gradient(145deg, rgba(255, 255, 255, 0.96) 0%, rgba(255, 255, 255, 0.82) 100%);
+        --bg-card-offline: rgba(255, 255, 255, 0.45);
+        --bg-control: rgba(230, 236, 245, 0.75);
+        --bg-control-active: #10b981;
+        --bg-seg-active: #ffffff;
+
+        --border-window: rgba(255, 255, 255, 0.95);
+        --border-card: rgba(0, 0, 0, 0.05);
+        --border-card-top: rgba(255, 255, 255, 1);
+
+        --text-primary: #0f172a;
+        --text-secondary: #475569;
+        --text-dim: #94a3b8;
+
+        --shadow-window: inset 0 1px 1.5px 0 rgba(255, 255, 255, 1), 0 20px 48px -10px rgba(15, 23, 42, 0.14), 0 4px 12px -2px rgba(15, 23, 42, 0.04);
+        --shadow-card: inset 0 1px 0 0 rgba(255, 255, 255, 1), 0 8px 20px -3px rgba(15, 23, 42, 0.06), 0 2px 6px -1px rgba(15, 23, 42, 0.02);
+    }
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+html, body {
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    background: transparent !important;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", Roboto, sans-serif;
+    color: var(--text-primary);
+    line-height: 1.4;
+}
+
+/* 浮窗主框架容器：深度亚克力磨砂与晶莹高光 */
+.flyout-container {
+    width: 100%;
+    height: 100%;
+    background: var(--bg-window);
+    backdrop-filter: blur(36px) saturate(200%);
+    -webkit-backdrop-filter: blur(36px) saturate(200%);
+    border: 1px solid var(--border-window);
+    border-radius: 16px;
+    box-shadow: var(--shadow-window);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: flyoutFadeIn 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes flyoutFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(8px) scale(0.98);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+/* 标题栏 */
+.flyout-header {
+    height: 48px;
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--border-card);
+    flex-shrink: 0;
+}
+
+/* 窗口模式下支持标题栏拖拽 */
+body.window-mode .flyout-header {
+    cursor: move;
+    -webkit-app-region: drag;
+}
+
+body.window-mode .header-actions button {
+    cursor: pointer;
+    -webkit-app-region: no-drag;
+}
+
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.status-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent-green);
+    box-shadow: 0 0 8px var(--accent-green);
+}
+
+.header-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.version-tag {
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--bg-card);
+    padding: 1px 6px;
+    border-radius: 8px;
+    border: 1px solid var(--border-card);
+}
+
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.icon-btn {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.icon-btn:hover {
+    background: var(--bg-card);
+    color: var(--text-primary);
+    transform: translateY(-1px);
+}
+
+.icon-btn.close-btn:hover {
+    background: rgba(239, 68, 68, 0.18);
+    color: #ef4444;
+}
+
+.icon-btn.rotating svg {
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* 主内容滚动区 */
+.flyout-body {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 14px;
+    position: relative;
+}
+
+.flyout-body::-webkit-scrollbar {
+    width: 6px;
+}
+.flyout-body::-webkit-scrollbar-thumb {
+    background: var(--border-card);
+    border-radius: 3px;
+}
+
+/* 视图面板切换 */
+.view-panel {
+    display: none;
+}
+.view-panel.active {
+    display: block;
+    animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* 设备列表流 */
+.device-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}

@@ -1,0 +1,232 @@
+.seg-btn {
+    flex: 1;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 11px;
+    padding: 6px 4px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+    text-align: center;
+}
+.seg-btn:hover {
+    color: var(--text-primary);
+}
+.seg-btn.active {
+    background: var(--bg-seg-active);
+    color: var(--text-primary);
+    font-weight: 600;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+
+/* 下拉菜单控件 */
+.select-control {
+    background: var(--bg-control);
+    border: 1px solid var(--border-card);
+    color: var(--text-primary);
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 500;
+    outline: none;
+    cursor: pointer;
+}
+
+/* 步进器控件 */
+.stepper-control {
+    display: flex;
+    align-items: center;
+    background: var(--bg-control);
+    border: 1px solid var(--border-card);
+    border-radius: 8px;
+    padding: 2px;
+}
+.step-btn {
+    width: 26px;
+    height: 24px;
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: bold;
+    cursor: pointer;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.step-btn:hover {
+    background: var(--bg-card);
+}
+.step-value {
+    min-width: 36px;
+    text-align: center;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+/* Switch 开关控件 */
+.switch-control {
+    position: relative;
+    display: inline-block;
+    width: 40px;
+    height: 22px;
+}
+.switch-control input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+.slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: var(--bg-control);
+    border: 1px solid var(--border-card);
+    border-radius: 22px;
+    transition: 0.2s;
+}
+.slider:before {
+    position: absolute;
+    content: "";
+    height: 16px;
+    width: 16px;
+    left: 2px;
+    bottom: 2px;
+    background-color: white;
+    border-radius: 50%;
+    transition: 0.2s;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+input:checked + .slider {
+    background-color: var(--accent-green);
+    border-color: var(--accent-green);
+    box-shadow: 0 0 10px rgba(16, 185, 129, 0.35);
+}
+input:checked + .slider:before {
+    transform: translateX(18px);
+}
+
+/* 设置底部操作按钮 */
+.settings-footer {
+    margin-top: 14px;
+    display: flex;
+    justify-content: center;
+}
+.action-btn {
+    border: 1px solid var(--border-card);
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+.action-btn:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+    transform: translateY(-1px);
+}
+
+/* ============================================================
+   设备快捷操作栏 (重新扫描、添加键盘、添加蓝牙设备)
+   ============================================================ */
+.device-actions-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 12px;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+.device-actions-bar::-webkit-scrollbar {
+    display: none;
+}
+.action-pill-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-card);
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 500;
+    padding: 6px 10px;
+    border-radius: 20px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s ease;
+}
+.action-pill-btn:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+    border-color: var(--border-window);
+    transform: translateY(-1px);
+}
+.action-pill-btn:active {
+    transform: translateY(0);
+}
+.action-pill-btn svg {
+    color: var(--accent-green);
+    flex-shrink: 0;
+}
+
+/* 卡片右上角移除按钮 */
+.card-btn-remove {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    padding: 2px 4px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    transition: all 0.15s ease;
+}
+.card-btn-remove:hover {
+    color: var(--accent-red);
+    background: rgba(239, 68, 68, 0.12);
+}
+
+/* 空状态操作按钮 */
+.empty-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+}
+.primary-btn {
+    background: var(--accent-green);
+    color: #ffffff;
+    border: none;
+    border-radius: 8px;
+    padding: 7px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity 0.15s ease;
+}
+.primary-btn:hover {
+    opacity: 0.9;
+}
+.secondary-btn {
+    background: var(--bg-control);
+    color: var(--text-primary);
+    border: 1px solid var(--border-card);
+    border-radius: 8px;
+    padding: 7px 14px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+.secondary-btn:hover {
+    background: var(--bg-card);
+}

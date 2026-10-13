@@ -75,6 +75,7 @@ class UpdateLease:
 
 
 def process_start_ticks(pid):
+    """返回存活进程的创建时间；已退出但句柄未释放的进程必须返回 0。"""
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
     kernel.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_bool, ctypes.c_ulong]
     kernel.OpenProcess.restype = ctypes.c_void_p
@@ -87,6 +88,9 @@ def process_start_ticks(pid):
     try:
         values = [ctypes.c_ulonglong() for _ in range(4)]
         if not kernel.GetProcessTimes(handle, *(ctypes.byref(value) for value in values)):
+            return 0
+        # Windows 在父进程仍持有句柄时保留退出进程的创建时间，不能据此判为存活。
+        if values[1].value:
             return 0
         return values[0].value
     finally:

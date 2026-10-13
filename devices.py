@@ -38,6 +38,8 @@ from core_bridge import (
     read_mouse_battery,
 )
 
+from device_command_service import execute_reported_command
+
 logger = logging.getLogger(__name__)
 
 
@@ -176,6 +178,7 @@ class DeviceManager:
 
     def __init__(self, config_manager: Optional[ConfigManager] = None):
         self.config_manager = config_manager or ConfigManager()
+        self._command_results = {}
         self._mice: list[MouseInfo] = []
         # 鼠标后端统一通过桥接层句柄流转，避免公开壳继续持有私有品牌类。
         self._mouse_backends: list[MouseBackendHandle] = []
@@ -214,6 +217,12 @@ class DeviceManager:
         self._command_stop_event = threading.Event()
         self._command_thread_lock = threading.Lock()
         self._on_update_callbacks: list[Callable] = []
+
+    @property
+    def command_results(self) -> dict:
+        """返回命令回执副本，供 GUI 按请求 ID 等待完成。"""
+        with self._lock:
+            return {key: dict(value) for key, value in self._command_results.items()}
 
     @property
     def mice(self) -> list[MouseInfo]:
@@ -311,6 +320,12 @@ class DeviceManager:
             except Exception as e:
                 logger.error(f"更新回调出错: {e}")
 
+    def record_command_result(self, action, result):
+        """按动作记录最新命令回执，并原子发布给只读 GUI。"""
+        with self._lock:
+            self._command_results = {**self._command_results, action: dict(result)}
+        self._notify_update()
+
     def _write_shared_state(self):
         """将当前设备状态原子写入共享 JSON 文件，供 GUI 子进程读取。
 
@@ -328,6 +343,7 @@ class DeviceManager:
                 # 核心：必须在获得写锁之后抓取当前最新快照，彻底杜绝“旧快照后写覆盖新快照”
                 with self._lock:
                     data = {
+                        'command_results': dict(self._command_results),
                         'mice': [_serialize_mouse_state(m) for m in self._mice],
                         'keyboard': _serialize_keyboard_state(self._keyboard),
                         'keyboard_candidates': [_serialize_keyboard_candidate(candidate) for candidate in self._keyboard_candidates],
@@ -710,6 +726,10 @@ class DeviceManager:
             os.remove(command_file)
         except OSError:
             pass
+
+        if command.get('payload', {}).get('report_result') is True:
+            execute_reported_command(self, command)
+            return
 
         action = str(command.get('action', '') or '')
         request_id = int(command.get('request_id', 0) or 0)
@@ -1399,9 +1419,12 @@ class SharedStateDeviceManager:
     """
 
     def __init__(self):
+        self._command_results = {}
         self._mice: list[MouseInfo] = []
         self._keyboard: Optional[KeyboardInfo] = None
         self._keyboard_candidates: list[KeyboardCandidate] = []
+        self._keyboard_scan_state = 'idle'
+        self._keyboard_scan_message = ''
         self._keyboard_request_id = 0
         self._keyboard_bind_state = 'idle'
         self._keyboard_bind_message = ''
@@ -1423,6 +1446,12 @@ class SharedStateDeviceManager:
         # 最近一次共享状态读取结果，供 GUI 明确区分「空状态」和「读取失败」。
         self._last_read_state = 'idle'
         self._last_read_error = ''
+
+    @property
+    def command_results(self) -> dict:
+        """返回命令回执副本，供 GUI 按请求 ID 等待完成。"""
+        with self._lock:
+            return {key: dict(value) for key, value in self._command_results.items()}
 
     @property
     def mice(self) -> list[MouseInfo]:
@@ -1618,6 +1647,7 @@ class SharedStateDeviceManager:
                     mice.append(mouse)
 
             with self._lock:
+                self._command_results = data.get('command_results', {}) if isinstance(data, dict) else {}
                 self._mice = mice
                 self._keyboard = keyboard
                 self._keyboard_candidates = keyboard_candidates

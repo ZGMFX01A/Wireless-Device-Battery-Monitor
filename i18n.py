@@ -126,6 +126,50 @@ _TRANSLATIONS = {
         LANGUAGE_ZH_CN: '关闭',
         LANGUAGE_EN_US: 'Off',
     },
+    'settings.tray_style.title': {
+        LANGUAGE_ZH_CN: '托盘图标样式',
+        LANGUAGE_EN_US: 'Tray Icon Style',
+    },
+    'settings.tray_style.subtitle': {
+        LANGUAGE_ZH_CN: '选择胶囊电池、极简纯数字或经典圆环',
+        LANGUAGE_EN_US: 'Choose between capsule battery, number, or circle',
+    },
+    'settings.tray_style.capsule': {
+        LANGUAGE_ZH_CN: '胶囊电池 (Win11)',
+        LANGUAGE_EN_US: 'Capsule Battery (Win11)',
+    },
+    'settings.tray_style.vertical': {
+        LANGUAGE_ZH_CN: '竖向小电池',
+        LANGUAGE_EN_US: 'Vertical Battery',
+    },
+    'settings.tray_style.number': {
+        LANGUAGE_ZH_CN: '极简纯数字',
+        LANGUAGE_EN_US: 'Minimal Number',
+    },
+    'settings.tray_style.circle': {
+        LANGUAGE_ZH_CN: '经典圆环',
+        LANGUAGE_EN_US: 'Classic Circle',
+    },
+    'tray.menu.icon_style': {
+        LANGUAGE_ZH_CN: '图标样式',
+        LANGUAGE_EN_US: 'Icon Style',
+    },
+    'tray.menu.style_capsule': {
+        LANGUAGE_ZH_CN: '胶囊电池 (Win11)',
+        LANGUAGE_EN_US: 'Capsule Battery (Win11)',
+    },
+    'tray.menu.style_vertical': {
+        LANGUAGE_ZH_CN: '竖向小电池',
+        LANGUAGE_EN_US: 'Vertical Battery',
+    },
+    'tray.menu.style_number': {
+        LANGUAGE_ZH_CN: '极简纯数字',
+        LANGUAGE_EN_US: 'Minimal Number',
+    },
+    'tray.menu.style_circle': {
+        LANGUAGE_ZH_CN: '经典圆环',
+        LANGUAGE_EN_US: 'Classic Circle',
+    },
     'settings.theme.title': {
         LANGUAGE_ZH_CN: '外观风格',
         LANGUAGE_EN_US: 'Appearance',

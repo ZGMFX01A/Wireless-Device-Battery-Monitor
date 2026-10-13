@@ -36,6 +36,18 @@ TRAY_ICON_PRIORITY_VALUES = {
     TRAY_ICON_PRIORITY_LOWEST_BATTERY,
 }
 
+# 托盘图标外观样式枚举值：Windows 11 胶囊电池、竖向小电池、极简纯数字、经典圆环
+TRAY_ICON_STYLE_CAPSULE = "capsule"
+TRAY_ICON_STYLE_VERTICAL = "vertical"
+TRAY_ICON_STYLE_NUMBER = "number"
+TRAY_ICON_STYLE_CIRCLE = "circle"
+TRAY_ICON_STYLE_VALUES = {
+    TRAY_ICON_STYLE_CAPSULE,
+    TRAY_ICON_STYLE_VERTICAL,
+    TRAY_ICON_STYLE_NUMBER,
+    TRAY_ICON_STYLE_CIRCLE,
+}
+
 # 界面外观主题枚举值：支持自动跟随系统、明亮浅色、深色磨砂
 THEME_MODE_AUTO = "auto"
 THEME_MODE_LIGHT = "light"
@@ -45,6 +57,15 @@ SUPPORTED_THEME_MODES = {
     THEME_MODE_LIGHT,
     THEME_MODE_DARK,
 }
+
+# 仅调节覆盖在原生 Acrylic 上的背景色层，0 为原浓度，100 为最通透。
+DEFAULT_GLASS_TRANSPARENCY = 25
+
+
+def validate_glass_transparency(value):
+    if type(value) is not int or not 0 <= value <= 100:
+        raise ValueError('磨砂通透度必须是 0 至 100 的整数')
+    return value
 
 
 def is_windows_dark_mode() -> bool:
@@ -63,6 +84,24 @@ def is_windows_dark_mode() -> bool:
         return val == 0
     except Exception:
         return False
+
+
+def is_windows_taskbar_dark_mode() -> bool:
+    """检测 Windows 任务栏通知区是否为深色模式（SystemUsesLightTheme）。"""
+    if os.name != 'nt':
+        return True
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            0,
+            winreg.KEY_READ,
+        )
+        val, _ = winreg.QueryValueEx(key, "SystemUsesLightTheme")
+        winreg.CloseKey(key)
+        return val == 0
+    except Exception:
+        return True
 
 def _read_version() -> str:
     """从 VERSION 文件读取版本号，兼容打包与源码环境"""
@@ -216,8 +255,10 @@ class ConfigManager:
             "keyboard_binding": None, # 单键盘绑定信息，供 tray 进程读取指定 HID 接口
             "bluetooth_bindings": [], # 多个标准 BLE Battery Service 设备绑定
             "tray_icon_priority": TRAY_ICON_PRIORITY_MOUSE_FIRST, # 托盘图标显示逻辑
+            "tray_icon_style": TRAY_ICON_STYLE_CAPSULE, # 托盘图标样式：capsule (胶囊电池), number (纯数字), circle (经典圆环)
             "ui_language": LANGUAGE_AUTO, # 界面语言策略：默认跟随系统语言，手动切换后写入显式覆盖值
             "theme_mode": THEME_MODE_AUTO, # 界面外观风格：默认跟随系统，支持 light/dark 显式指定
+            "glass_transparency": DEFAULT_GLASS_TRANSPARENCY,
         }
 
     def _load_unlocked(self):
@@ -232,6 +273,11 @@ class ConfigManager:
             if not isinstance(data, dict):
                 raise ValueError('配置文件根节点必须是对象')
             config.update(data)
+            try:
+                validate_glass_transparency(config['glass_transparency'])
+            except ValueError:
+                logger.warning('配置中的磨砂通透度无效，采用默认值')
+                config['glass_transparency'] = DEFAULT_GLASS_TRANSPARENCY
             self.config = config
         except Exception as e:
             logger.error(f"读取配置异常: {e}")
@@ -454,6 +500,23 @@ class ConfigManager:
         self._mutate(lambda: self.config.__setitem__("tray_icon_priority", val))
 
     @property
+    def tray_icon_style(self) -> str:
+        """返回托盘图标外观样式风格（capsule / number / circle）。"""
+        self._reload_from_disk()
+        value = str(self.config.get("tray_icon_style", TRAY_ICON_STYLE_CAPSULE) or "")
+        if value not in TRAY_ICON_STYLE_VALUES:
+            return TRAY_ICON_STYLE_CAPSULE
+        return value
+
+    @tray_icon_style.setter
+    def tray_icon_style(self, val: str):
+        """设置托盘图标外观样式风格。"""
+        if val not in TRAY_ICON_STYLE_VALUES:
+            logger.warning(f"托盘图标样式非法值: {val!r}")
+            return
+        self._mutate(lambda: self.config.__setitem__("tray_icon_style", val))
+
+    @property
     def ui_language(self) -> str:
         """返回当前界面语言偏好。
 
@@ -510,6 +573,19 @@ class ConfigManager:
         if mode == THEME_MODE_AUTO:
             return THEME_MODE_DARK if is_windows_dark_mode() else THEME_MODE_LIGHT
         return mode
+
+    @property
+    def glass_transparency(self) -> int:
+        self._reload_from_disk()
+        return self.config['glass_transparency']
+
+    @glass_transparency.setter
+    def glass_transparency(self, value: int):
+        validate_glass_transparency(value)
+        self._mutate(lambda: self.config.__setitem__('glass_transparency', value))
+        # 旧配置存储接口只记录 I/O 异常；此入口必须确认实际保存结果。
+        if self.glass_transparency != value:
+            raise OSError('磨砂通透度未能保存，请检查配置文件写入权限')
 
     def check_autostart(self) -> bool:
         """检查是否已注册开机自启"""

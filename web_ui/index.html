@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>无线设备电量监控</title>
+    <script src="bootstrap.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="theme-auto">
+    <div id="app" class="flyout-container">
+        <!-- 顶部微标题栏 -->
+        <header class="flyout-header pywebview-drag-region">
+            <div class="header-left">
+                <span class="status-indicator"></span>
+                <span class="header-title" data-i18n="app.header_title">无线设备电量</span>
+                <span class="version-tag" id="appVersion"></span>
+            </div>
+            <div class="header-actions">
+                <button class="icon-btn" id="btnRefresh" title="立即刷新" data-i18n-title="tray.menu.refresh_now">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"/>
+                    </svg>
+                </button>
+                <button class="icon-btn" id="btnToggleSettings" title="设置" data-i18n-title="settings.title">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"/>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                    </svg>
+                </button>
+                <button class="icon-btn close-btn" id="btnClose" title="收起" data-i18n-title="action.close">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- 主内容滚动区 -->
+        <main class="flyout-body">
+            <!-- 设备卡片列表视图 -->
+            <section id="deviceView" class="view-panel active">
+                <!-- 设备快捷管理操作栏 -->
+                <div class="device-actions-bar">
+                    <button class="action-pill-btn" id="btnScanDevices" title="重新扫描所有 2.4G 接收器与 HID 外设">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"/>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                        </svg>
+                        <span data-i18n="action.scan">重新扫描</span>
+                    </button>
+                    <button class="action-pill-btn" id="btnAddKeyboard" title="扫描并绑定 2.4G 接收器键盘">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="2" y="4" width="20" height="16" rx="2"/>
+                            <line x1="6" y1="8" x2="6.01" y2="8"/>
+                            <line x1="10" y1="8" x2="10.01" y2="8"/>
+                            <line x1="14" y1="8" x2="14.01" y2="8"/>
+                            <line x1="18" y1="8" x2="18.01" y2="8"/>
+                            <line x1="6" y1="12" x2="6.01" y2="12"/>
+                            <line x1="18" y1="12" x2="18.01" y2="12"/>
+                            <line x1="8" y1="16" x2="16" y2="16"/>
+                        </svg>
+                        <span data-i18n="action.add_keyboard">添加键盘</span>
+                    </button>
+                    <button class="action-pill-btn" id="btnAddBluetooth" title="扫描并绑定 Windows 已配对蓝牙设备">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M6.5 6.5l11 11L12 23V1l5.5 5.5-11 11"/>
+                        </svg>
+                        <span data-i18n="action.add_bluetooth">添加蓝牙设备</span>
+                    </button>
+                </div>
+
+                <div id="deviceStatus" class="setting-desc" role="status"></div>
+                <div id="deviceList" class="device-list">
+                    <!-- 动态注入设备卡片 -->
+                </div>
+                <div id="emptyState" class="empty-state" style="display: none;">
+                    <div class="empty-icon">
+                        <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <rect x="5" y="2" width="14" height="20" rx="7"/>
+                            <line x1="12" y1="6" x2="12" y2="10"/>
+                        </svg>
+                    </div>
+                    <div class="empty-title" data-i18n="tray.menu.no_device">暂未发现连接的无线设备</div>
+                    <div class="empty-desc" data-i18n="device.offline_no_data">请确认 2.4G 接收器已插入或蓝牙已配对</div>
+                    <div class="empty-actions">
+                        <button class="primary-btn" id="btnEmptyScan" data-i18n="action.scan">扫描设备</button>
+                        <button class="secondary-btn" id="btnEmptyAddBt" data-i18n="action.add_bluetooth">添加蓝牙设备</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 设置面板视图 (折叠/展开) -->
+            <section id="settingsView" class="view-panel settings-panel">
+                <div class="settings-group">
+                    <div class="group-title" data-i18n="settings.title">偏好设置</div>
+
+                    <!-- 语言偏好 -->
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <div class="setting-label" data-i18n="settings.language.title">界面语言 (Language)</div>
+                            <div class="setting-desc" data-i18n="settings.language.subtitle">实时切换中文、英文或跟随系统</div>
+                        </div>
+                        <div class="segmented-control" id="languageControl">
+                            <button class="seg-btn" data-value="auto" data-i18n="settings.theme.auto">跟随系统</button>
+                            <button class="seg-btn" data-value="zh-CN">简体中文</button>
+                            <button class="seg-btn" data-value="en-US">English</button>
+                        </div>
+                    </div>
+
+                    <!-- 托盘图标样式 -->
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <div class="setting-label" data-i18n="settings.tray_style.title">托盘图标样式</div>
+                            <div class="setting-desc" data-i18n="settings.tray_style.subtitle">选择胶囊电池、极简纯数字或圆环</div>
+                        </div>
+                        <div class="segmented-control" id="trayIconStyleControl">
+                            <button class="seg-btn" data-value="capsule" data-i18n="settings.tray_style.capsule">胶囊</button>
+                            <button class="seg-btn" data-value="vertical" data-i18n="settings.tray_style.vertical">竖向</button>
+                            <button class="seg-btn" data-value="number" data-i18n="settings.tray_style.number">纯数字</button>
+                            <button class="seg-btn" data-value="circle" data-i18n="settings.tray_style.circle">圆环</button>
+                        </div>
+                    </div>
+
+                    <!-- 托盘显示优先级 -->
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <div class="setting-label" data-i18n="settings.tray_priority.title">多设备显示优先级</div>
+                            <div class="setting-desc" data-i18n="settings.tray_priority.subtitle">托盘优先展示哪台设备的电量</div>
+                        </div>
+                        <select id="trayPrioritySelect" class="select-control">
+                            <option value="mouse_first" data-i18n="settings.tray_priority.mouse_first">优先鼠标</option>
+                            <option value="keyboard_first" data-i18n="settings.tray_priority.keyboard_first">优先键盘</option>
+                            <option value="lowest_battery_first" data-i18n="settings.tray_priority.lowest_battery">低电量优先</option>
+                        </select>
+                    </div>
+
+                    <!-- 低电量提醒阈值 -->
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <div class="setting-label" data-i18n="settings.low_battery.title">低电量提醒</div>
+                            <div class="setting-desc" data-i18n="settings.low_battery.subtitle">低于设定百分比时发送系统通知</div>
+                        </div>
+                        <div class="stepper-control">
+                            <button class="step-btn" id="btnLowBatteryDec">-</button>
+                            <span class="step-value" id="lowBatteryValue">20%</span>
+                            <button class="step-btn" id="btnLowBatteryInc">+</button>
+                        </div>
+                    </div>
+
+                    <!-- 自动刷新只控制 GUI 会话的共享快照轮询 -->
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <div class="setting-label" data-i18n="settings.auto_refresh.title">自动刷新</div>
+                            <div class="setting-desc" data-i18n="settings.auto_refresh.subtitle">仅控制此窗口的电量状态同步</div>
+                        </div>
+                        <label class="switch-control"><input type="checkbox" id="autoRefreshSwitch"><span class="slider"></span></label>
+                    </div>
+
+                    <!-- 自动检查更新 -->
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <div class="setting-label" data-i18n="settings.auto_update.title">自动检查更新</div>
+                            <div class="setting-desc" data-i18n="settings.auto_update.subtitle">启动时自动检测新版本并静默升级</div>
+                        </div>
+                        <label class="switch-control">
+                            <input type="checkbox" id="autoUpdateSwitch">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+
+                    <!-- 开机自动启动 -->
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <div class="setting-label" data-i18n="settings.autostart.title">开机自启动</div>
+                            <div class="setting-desc" data-i18n="settings.autostart.subtitle">开机后在后台静默运行</div>
+                        </div>
+                        <label class="switch-control">
+                            <input type="checkbox" id="autostartSwitch">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+
+                    <!-- 外观主题 -->
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <div class="setting-label" data-i18n="settings.theme.title">外观风格</div>
+                            <div class="setting-desc" data-i18n="settings.theme.subtitle">跟随系统、浅色玻璃或暗夜磨砂</div>
+                        </div>
+                        <div class="segmented-control" id="themeModeControl">
+                            <button class="seg-btn" data-value="auto" data-i18n="settings.theme.auto">跟随系统</button>
+                            <button class="seg-btn" data-value="light" data-i18n="settings.theme.light">浅色</button>
+                            <button class="seg-btn" data-value="dark" data-i18n="settings.theme.dark">暗夜</button>
+                        </div>
+                    </div>
+                    <!-- 仅调整原生磨砂上方的背景色层，不改变文字或整窗透明度 -->
+                    <div class="setting-item">
+                        <div class="setting-info">
+                            <div class="setting-label" id="glassTransparencyLabel" data-i18n="settings.glass.title">磨砂通透度</div>
+                            <div class="setting-desc" data-i18n="settings.glass.subtitle">仅调节背景，数值越大越通透</div>
+                        </div>
+                        <div class="stepper-control" role="group" aria-labelledby="glassTransparencyLabel">
+                            <button class="step-btn" id="btnGlassDec" data-i18n-title="settings.glass.less" title="降低通透度">-</button>
+                            <span class="step-value" id="glassTransparencyValue" aria-live="polite">25%</span>
+                            <button class="step-btn" id="btnGlassInc" data-i18n-title="settings.glass.more" title="提高通透度">+</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 底部维护按钮 -->
+                <div class="settings-footer">
+                    <button class="action-btn" id="btnCheckUpdate">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                        </svg>
+                        <span data-i18n="action.check_update">检查更新</span>
+                    </button>
+                </div>
+            </section>
+        </main>
+
+        <!-- 统一模态对话框 (设备配对 / 移除确认) -->
+        <div id="modalOverlay" class="modal-overlay" style="display: none;">
+            <div class="modal-card">
+                <div class="modal-header">
+                    <div class="modal-title" id="modalTitle">对话框标题</div>
+                    <div class="modal-subtitle" id="modalSubtitle">辅助说明</div>
+                </div>
+                <div class="modal-body" id="modalBody">
+                    <!-- 动态列表或提示内容 -->
+                </div>
+                <div class="modal-footer" id="modalFooter">
+                    <button class="btn-dialog-secondary" id="modalBtnCancel" data-i18n="dialog.cancel">取消</button>
+                    <button class="btn-dialog-primary" id="modalBtnConfirm" data-i18n="dialog.ok">确定</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 软件更新专用模态对话框 (支持 Release Notes、平滑进度条、实时速率与状态机) -->
+        <div id="updateModalOverlay" class="modal-overlay" style="display: none;">
+            <div class="modal-card update-modal-card">
+                <div class="modal-header">
+                    <div class="update-header-left">
+                        <div class="modal-title" data-i18n="update.modal_title">发现新版本</div>
+                        <span class="update-version-badge" id="updateVersionBadge"></span>
+                    </div>
+                    <span class="update-size-tag" id="updateSizeTag"></span>
+                </div>
+
+                <!-- 视图 1：更新日志说明页 -->
+                <div id="updateNotesView" class="update-view-panel">
+                    <div class="update-notes-label" data-i18n="update.notes_title">更新说明</div>
+                    <div class="update-notes-box" id="updateNotesBox">
+                        <!-- 更新说明文字 -->
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn-dialog-secondary" id="updateBtnLater" data-i18n="update.later">稍后再说</button>
+                        <button class="btn-dialog-primary" id="updateBtnStart" data-i18n="update.start">立即更新</button>
+                    </div>
+                </div>
+
+                <!-- 视图 2：下载安装进度面板 -->
+                <div id="updateProgressView" class="update-view-panel" style="display: none;">
+                    <div class="update-status-row">
+                        <span class="status-pulse-dot"></span>
+                        <span class="update-stage-text" id="updateStageText">正在准备连接...</span>
+                    </div>
+
+                    <!-- 进度条轨道 -->
+                    <div class="update-progress-track">
+                        <div class="update-progress-bar" id="updateProgressBar" style="width: 0%;"></div>
+                    </div>
+
+                    <!-- 下载指标与速度 -->
+                    <div class="update-metrics-row">
+                        <span class="update-size-stat" id="updateSizeStat">0.0 / 0.0 MB</span>
+                        <span class="update-speed-stat" id="updateSpeedStat">0.00 MB/s</span>
+                    </div>
+
+                    <div class="modal-footer">
+                        <button class="btn-dialog-secondary" id="updateBtnCancel" data-i18n="update.cancel">取消下载</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 浮动轻量 Toast 提示 -->
+        <div id="toastNotification" class="toast-notification" style="display: none;"></div>
+    </div>
+
+    <script type="module" src="app.js"></script>
+</body>
+</html>

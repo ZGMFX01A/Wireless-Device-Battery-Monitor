@@ -18,6 +18,8 @@ from devices import DeviceManager
 from tray import TrayApp
 from config import ConfigManager
 import updater
+from gui_process import GuiProcessController
+from flyout_geometry import initialize_dpi_awareness, capture_tray_anchor
 
 
 ERROR_ALREADY_EXISTS = 183
@@ -120,13 +122,14 @@ def run_smoke_test() -> int:
 
 
 _settings_processes = []
+_gui_controller = None
 
 
 def start_update_shutdown_watchdog(current_pid: int, on_shutdown=None):
-    """监听热更新退出请求，尽量优雅关闭主进程。"""
+    """监听热更新退出请求，优雅关闭主进程。"""
 
     def worker():
-        global _shutdown_for_update, _shutdown_skip_gui_pid
+        global _shutdown_for_update
         while True:
             try:
                 request = updater.consume_shutdown_request(current_pid)
@@ -136,11 +139,7 @@ def start_update_shutdown_watchdog(current_pid: int, on_shutdown=None):
                 continue
             if request:
                 _shutdown_for_update = request.get('reason') == 'update'
-                skip_gui_pid = request.get('skip_gui_pid')
-                _shutdown_skip_gui_pid = skip_gui_pid if isinstance(skip_gui_pid, int) and skip_gui_pid > 0 else None
-                logging.getLogger(__name__).info(
-                    f"收到热更新退出请求，准备优雅关闭主进程: skip_gui_pid={_shutdown_skip_gui_pid}"
-                )
+                logging.getLogger(__name__).info("收到热更新退出请求，准备优雅关闭主进程")
                 if on_shutdown is not None:
                     on_shutdown()
                 else:
@@ -151,147 +150,62 @@ def start_update_shutdown_watchdog(current_pid: int, on_shutdown=None):
     threading.Thread(target=worker, daemon=True, name="update-shutdown-watchdog").start()
 
 
-def open_settings_window():
-    """用子进程打开 Flet 设置窗口（避免 signal 线程限制）"""
-    global _settings_processes
-    # 清理已经退出的子进程句柄
-    _settings_processes = [p for p in _settings_processes if p.poll() is None]
 
-    # 单窗口防护：如果已有活动的 GUI 子进程，不再重复打开
-    if _settings_processes:
-        logging.getLogger(__name__).info("设置窗口已打开，不重复创建")
+
+
+def _bring_existing_settings_to_front():
+    """激活现有设置窗口，保持重复打开时不重新创建进程。"""
+    if os.name != 'nt':
+        return False
+    user32 = ctypes.windll.user32
+    user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+    user32.FindWindowW.restype = ctypes.c_void_p
+    hwnd = user32.FindWindowW(None, '无线设备电量监控')
+    if not hwnd:
+        return False
+    # 首屏尚未就绪的隐藏窗体由 GUI 控制器接管，不能提前激活。
+    user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+    user32.IsWindowVisible.restype = ctypes.c_bool
+    if not user32.IsWindowVisible(hwnd):
+        return False
+    user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+    user32.ShowWindow(hwnd, 9)
+    user32.SetForegroundWindow(hwnd)
+    return True
+
+
+def open_settings_window(anchor=None):
+    """已有设置先激活；否则由进程控制器打开或切换设置视图。"""
+    global _settings_processes
+    active = [process for process in _settings_processes if process.poll() is None]
+    if active and _bring_existing_settings_to_front():
+        if _gui_controller is not None:
+            _gui_controller.open('settings', anchor)
         return
-
-    try:
-        # 当打包成 exe 后，sys.executable 会变成当前的 exe 路径
-        # 因此通过传入 --gui 参数，再次启动本程序，但进入 GUI 逻辑
-        env = os.environ.copy()
-        env['MOUSE_BATTERY_HOST_PID'] = str(os.getpid())
-        # PyInstaller 6.9+ onefile：用同 exe 拉起子进程时默认复用父进程 _MEI 目录。
-        # 设置窗口是独立实例且可能长于托盘生命周期之外的交互，必须重置环境，
-        # 否则子进程会 Failed to import encodings module。
-        if getattr(sys, 'frozen', False):
-            env['PYINSTALLER_RESET_ENVIRONMENT'] = '1'
-        p = subprocess.Popen(
-            [sys.executable, '--gui'],
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
-            env=env
-        )
-        _settings_processes.append(p)
-    except Exception as e:
-        logging.getLogger(__name__).error(f"设置窗口启动失败: {e}")
-
-
-@atexit.register
-def cleanup_settings_windows():
-    """退出主程序时，确保拉起的独立 GUI 进程被关闭"""
-    global _settings_processes
-    for p in _settings_processes:
-        if p.poll() is None:
-            try:
-                if _shutdown_for_update and _shutdown_skip_gui_pid == p.pid:
-                    logging.getLogger(__name__).info(
-                        f"热更新退出时等待 GUI 正常释放运行时: pid={p.pid}"
-                    )
-                    try:
-                        p.wait(timeout=15)
-                        continue
-                    except subprocess.TimeoutExpired:
-                        logging.getLogger(__name__).warning(
-                            f"GUI 热更新收尾超时，将强制关闭: pid={p.pid}"
-                        )
-                if os.name == 'nt':
-                    subprocess.call(['taskkill', '/F', '/T', '/PID', str(p.pid)],
-                                    creationflags=subprocess.CREATE_NO_WINDOW)
-                else:
-                    p.terminate()
-            except Exception as e:
-                logging.getLogger(__name__).debug(f"清理 GUI 子进程失败: pid={p.pid}, err={e}")
-    _settings_processes.clear()
-
-
-def launch_gui_mode():
-    """GUI 模式启动逻辑"""
-    import flet as ft
-    import threading
-    import time
-    from gui import MouseBatteryApp
-    from devices import SharedStateDeviceManager
-
-    # 确定资源基准目录（打包后用 _MEIPASS，源码用文件所在目录）
-    if getattr(sys, 'frozen', False):
-        base_dir = sys._MEIPASS
-        flet_view_path = os.path.join(base_dir, 'flet_desktop', 'app', 'flet')
-        flet_executable = os.path.join(flet_view_path, 'flet.exe')
-        if not os.path.isfile(flet_executable):
-            raise FileNotFoundError(f"打包产物缺少 Flet 桌面运行时: {flet_executable}")
-        os.environ['FLET_VIEW_PATH'] = flet_view_path
-        # Flet 优先扫描当前目录的 build/windows；固定到解压目录，避免误用外部 exe。
-        os.chdir(base_dir)
-    else:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-
-    def _set_window_icon(title: str):
-        """通过 Windows API 强制设置窗口图标（Flet 自身不支持桌面窗口图标）"""
-        if os.name != 'nt':
-            return
-        user32 = ctypes.windll.user32
-        ico_path = os.path.join(base_dir, 'app.ico')
-        if not os.path.exists(ico_path):
-            logging.warning(f"图标文件不存在: {ico_path}")
-            return
-        hicon_big = user32.LoadImageW(None, ico_path, 1, 0, 0, 0x10)
-        hicon_small = user32.LoadImageW(None, ico_path, 1, 16, 16, 0x10)
-        if not hicon_big:
-            return
-        # 轮询等待窗口出现（最多 5 秒）
-        for _ in range(10):
-            hwnd = user32.FindWindowW(None, title)
-            if hwnd:
-                user32.SendMessageW(hwnd, 0x80, 1, hicon_big)    # WM_SETICON, ICON_BIG
-                user32.SendMessageW(hwnd, 0x80, 0, hicon_small)  # WM_SETICON, ICON_SMALL
-                logging.info("窗口图标已通过 Windows API 设置")
-                return
-            time.sleep(0.5)
-
-    def _flet_main(page: ft.Page):
-        page.title = "无线设备电量监控"
-        # 后台线程设置窗口图标
-        threading.Thread(target=_set_window_icon, args=(page.title,), daemon=True).start()
-
-        # 使用只读的共享状态 DeviceManager，不打开任何 HID 设备
-        dm = SharedStateDeviceManager()
-        app = MouseBatteryApp(dm)
-        app.build(page)
-
-    logging.info("启动 Flet 设置界面...")
-    assets_path = os.path.join(base_dir, 'assets')
-    ft.app(target=_flet_main, assets_dir=assets_path)
+    if _gui_controller is None:
+        raise RuntimeError('托盘 GUI 进程控制器尚未初始化')
+    _gui_controller.open('settings', anchor)
+    _settings_processes = [_gui_controller.process]
 
 
 if __name__ == '__main__':
     setup_logging()
+    initialize_dpi_awareness()
     updater.prepare_update_startup()
     logger = logging.getLogger(__name__)
 
-    # `--smoke-test` 用于 CI / 本地打包后的最小启动验证：
-    # 只检查导入与轻量初始化是否通过，不进入单实例、托盘或 GUI 主流程。
+    # `--smoke-test` 用于 CI / 本地打包后的最小启动验证
     if len(sys.argv) > 1 and sys.argv[1] == '--smoke-test':
         sys.exit(run_smoke_test())
 
-    # 如果带有 --gui 参数，则启动 Flet GUI 设置页面
-    if len(sys.argv) > 1 and sys.argv[1] == '--gui':
-        if not acquire_single_instance("Global\\MouseBattery_GUI_SingleInstance"):
-            logger.info("设置窗口实例已存在，本次启动已忽略")
-            sys.exit(0)
-        # GUI 独立进程也开启 watchdog，兼容直接以 GUI 模式运行或未来扩展的自更新路径。
-        start_update_shutdown_watchdog(os.getpid())
-        try:
-            launch_gui_mode()
-        except KeyboardInterrupt:
-            logger.info("GUI 进程收到热更新退出信号，已开始优雅退出")
-        sys.exit(0)
+    # 若带有 GUI 启动参数，则作为独立 GUI 子进程运行（免硬件扫描极速秒开，关闭即销毁释放全部内存）
+    if len(sys.argv) > 1 and sys.argv[1] in ('--flyout', '--settings', '--gui'):
+        mode = 'settings' if sys.argv[1] in ('--settings', '--gui') else 'flyout'
+        from flyout import launch_flyout_process
+        sys.exit(launch_flyout_process(mode=mode))
 
+    # 命名互斥体单实例保护（仅对后台托盘守护主进程生效）
     if not acquire_single_instance("Global\\MouseBattery_Main_SingleInstance"):
         logger.info("主程序实例已存在，本次启动已忽略")
         sys.exit(0)
@@ -303,15 +217,40 @@ if __name__ == '__main__':
     if not check_admin():
         logger.warning("未以管理员身份运行，可能无法访问部分 HID 设备")
 
-    # 初始化配置管理器，再注入设备管理器，确保 tray 与设备层共用同一份配置对象。
+    # 初始化配置管理器与硬件设备管理器
     config_manager = ConfigManager()
     device_manager = DeviceManager(config_manager=config_manager)
 
-    # 以托盘模式启动（阻塞）
+    # GUI 子进程控制只发窗口消息，关闭前由 GUI 等待下载清理。
+    _gui_controller = GuiProcessController({
+        'spawn': subprocess.Popen,
+        'executable': sys.executable,
+        'entry': os.path.abspath(__file__),
+        'frozen': bool(getattr(sys, 'frozen', False)),
+        'host_pid': os.getpid(),
+        'creationflags': subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+    })
+    atexit.register(_gui_controller.shutdown)
     tray = TrayApp(
         device_manager=device_manager,
         config_manager=config_manager,
+        on_open_flyout=lambda anchor: _gui_controller.open('flyout', anchor),
         on_open_settings=open_settings_window,
+        on_exit=_gui_controller.shutdown,
+        capture_window_anchor=capture_tray_anchor,
     )
+
+    # 注册热更新退出看门狗
     start_update_shutdown_watchdog(os.getpid(), on_shutdown=tray.request_exit)
-    tray.start()
+
+    # 主线程运行托盘，WebView 按需在独立子进程启动。
+    try:
+        tray.start(detached=False)
+    except KeyboardInterrupt:
+        logger.info("收到中断信号，程序开始退出")
+    except Exception as e:
+        logger.error(f"托盘运行异常: {e}")
+    finally:
+        _gui_controller.shutdown()
+        tray.stop()
+        logger.info("无线设备电量监控程序已退出")
