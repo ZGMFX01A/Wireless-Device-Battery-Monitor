@@ -203,42 +203,47 @@ def draw_number(draw: ImageDraw.ImageDraw, options: dict):
 
 def draw_circle(draw: ImageDraw.ImageDraw, options: dict):
     """
-    绘制仪表圆环样式：大外径 (116px) + 饱满动态进度圆弧 + 智能自适应表盘内衬与高对比度居中数字。
+    绘制仪表圆环样式：饱满动态进度圆弧 + 紧凑贴合内衬 + 硕大居中数字。
+
+    圆环线宽采用 15px（占画布约 11.7%），外径半径 60px 充分利用画布边缘；
+    内部空间宽裕，数字字号大幅提升至 70px（三位数 54px），兼顾外圈清晰度与核心数字辨识度。
     """
     percentage = options['percentage']
     text = options['text']
     color = options['color']
     dark = options['dark']
-    track_color = options['track_color']
 
     center = 64
-    radius = 58
-    line_width = 11
+    radius = 60
+    line_width = 15
     box = [center - radius, center - radius, center + radius, center + radius]
 
-    # 智能自适应表盘内衬与高对比度文字：根据深浅背景自动反差
+    # 智能自适应表盘内衬与高对比度文字：根据任务栏深浅色自动提供衬底防穿透
     if dark:
         inner_disc = (15, 20, 28, 160)
+        track_arc_color = (255, 255, 255, 60)
         text_color = (255, 255, 255)
         stroke_color = (0, 0, 0, 180)
     else:
         inner_disc = (255, 255, 255, 200)
+        track_arc_color = (0, 0, 0, 45)
         text_color = (15, 23, 42)
         stroke_color = (255, 255, 255, 200)
 
-    # 1. 绘制内部表盘底座 (将数字与外界复杂壁纸/半透明背景隔离开)
-    draw.ellipse([14, 14, 114, 114], fill=inner_disc)
+    # 1. 绘制内部表盘底座：半径紧凑贴合圆环内径 (radius - line_width = 45px)，提供充足字符展示区
+    inner_r = radius - line_width
+    draw.ellipse([center - inner_r, center - inner_r, center + inner_r, center + inner_r], fill=inner_disc)
 
-    # 2. 全圆半透明底槽轨道
-    draw.arc(box, start=0, end=360, fill=track_color, width=line_width)
+    # 2. 全圆底槽轨道：清晰展现完整表盘闭环轮廓
+    draw.arc(box, start=0, end=360, fill=track_arc_color, width=line_width)
 
     # 3. 动态电量进度弧线 (从正上方 12 点钟位置顺时针绘制)
     if percentage > 0:
         sweep = 360 * (min(100, percentage) / 100.0)
         draw.arc(box, start=-90, end=-90 + sweep, fill=color, width=line_width)
 
-    # 4. 核心区域超大居中电量数字 (带高对比度描边保护)
-    font_size = 52 if len(text) >= 3 else 68
+    # 4. 核心区域居中电量数字：两位数采用 70px 饱满大字，三位数（100）采用 54px
+    font_size = 54 if len(text) >= 3 else 70
     draw.text(
         (center, center),
         text,
