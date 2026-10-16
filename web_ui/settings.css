@@ -178,23 +178,28 @@ input:checked + .slider:before {
     flex-shrink: 0;
 }
 
-/* 卡片右上角移除按钮 */
+/* 卡片右上角移除按钮（× 图标） */
 .card-btn-remove {
     background: transparent;
     border: none;
     color: var(--text-dim);
-    padding: 2px 4px;
+    width: 22px;
+    height: 22px;
+    padding: 0;
     border-radius: 4px;
     cursor: pointer;
-    font-size: 11px;
     display: inline-flex;
     align-items: center;
-    gap: 2px;
+    justify-content: center;
     transition: all 0.15s ease;
 }
 .card-btn-remove:hover {
     color: var(--accent-red);
     background: rgba(239, 68, 68, 0.12);
+}
+.card-btn-remove svg {
+    display: block;
+    pointer-events: none;
 }
 
 /* 空状态操作按钮 */

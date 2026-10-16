@@ -87,11 +87,42 @@ function batteryDisplay(device, options) {
     return display;
 }
 
-// 身份通过 dataset 赋值，不让引号或标签改变移除按钮的结构。
+// 构造卡片右上角的极简 X 图标
+function createCloseSvg(size = 13) {
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', String(size));
+    svg.setAttribute('height', String(size));
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+
+    const line1 = document.createElementNS(svgNS, 'line');
+    line1.setAttribute('x1', '18');
+    line1.setAttribute('y1', '6');
+    line1.setAttribute('x2', '6');
+    line1.setAttribute('y2', '18');
+
+    const line2 = document.createElementNS(svgNS, 'line');
+    line2.setAttribute('x1', '6');
+    line2.setAttribute('y1', '6');
+    line2.setAttribute('x2', '18');
+    line2.setAttribute('y2', '18');
+
+    svg.append(line1, line2);
+    return svg;
+}
+
+// 身份通过 dataset 赋值，改用 X 图标呈现，同时通过 title 与 aria-label 保持悬停提示。
 function removeButton(device, t) {
-    const button = node('button', {
-        className: 'card-btn-remove', text: t(device.type === 'keyboard' ? 'device.unbind_btn' : 'device.remove_btn'),
-    });
+    const titleText = t(device.type === 'keyboard' ? 'device.unbind_btn' : 'device.remove_btn');
+    const button = node('button', { className: 'card-btn-remove' });
+    button.title = titleText;
+    button.setAttribute('aria-label', titleText);
+    button.append(createCloseSvg(13));
     Object.assign(button.dataset, { action: 'remove', type: device.type,
         id: device.device_id, name: device.name });
     return button;
