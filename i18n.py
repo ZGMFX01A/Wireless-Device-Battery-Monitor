@@ -774,6 +774,58 @@ _TRANSLATIONS = {
         LANGUAGE_ZH_CN: '设备电量已刷新',
         LANGUAGE_EN_US: 'Battery status refreshed',
     },
+    'status.connected_hfp': {
+        LANGUAGE_ZH_CN: '已连接（HFP 电量）',
+        LANGUAGE_EN_US: 'Connected (HFP)',
+    },
+    'status.no_hfp_battery': {
+        LANGUAGE_ZH_CN: 'Windows 未提供经典蓝牙 HFP 电量',
+        LANGUAGE_EN_US: 'HFP battery not available',
+    },
+    'status.unknown': {
+        LANGUAGE_ZH_CN: '未知',
+        LANGUAGE_EN_US: 'Unknown',
+    },
+    'bluetooth.scan.loading_runtime': {
+        LANGUAGE_ZH_CN: '正在读取 Windows 已配对蓝牙设备...',
+        LANGUAGE_EN_US: 'Reading paired Bluetooth devices...',
+    },
+    'bluetooth.scan.none_runtime': {
+        LANGUAGE_ZH_CN: '未发现 Windows 已配对蓝牙设备',
+        LANGUAGE_EN_US: 'No paired Bluetooth devices found',
+    },
+    'bluetooth.scan.found_runtime': {
+        LANGUAGE_ZH_CN: '已发现 {count} 个 Windows 已配对蓝牙设备',
+        LANGUAGE_EN_US: '{count} paired Bluetooth device(s) found',
+    },
+    'bluetooth.reading_battery_runtime': {
+        LANGUAGE_ZH_CN: '正在读取蓝牙设备电量：{name}',
+        LANGUAGE_EN_US: 'Reading battery level: {name}',
+    },
+    'bluetooth.bound_runtime': {
+        LANGUAGE_ZH_CN: '已添加蓝牙设备：{name}',
+        LANGUAGE_EN_US: 'Bluetooth device added: {name}',
+    },
+    'bluetooth.removed_runtime': {
+        LANGUAGE_ZH_CN: '已移除蓝牙设备',
+        LANGUAGE_EN_US: 'Bluetooth device removed',
+    },
+    'bluetooth.refresh_failed_runtime': {
+        LANGUAGE_ZH_CN: '蓝牙刷新失败：{error}',
+        LANGUAGE_EN_US: 'Bluetooth refresh failed: {error}',
+    },
+    'error.scan_failed_runtime': {
+        LANGUAGE_ZH_CN: '扫描失败：{error}',
+        LANGUAGE_EN_US: 'Scan failed: {error}',
+    },
+    'error.bind_failed_runtime': {
+        LANGUAGE_ZH_CN: '绑定失败：{error}',
+        LANGUAGE_EN_US: 'Binding failed: {error}',
+    },
+    'error.read_failed_runtime': {
+        LANGUAGE_ZH_CN: '读取失败：{error}',
+        LANGUAGE_EN_US: 'Read failed: {error}',
+    },
 }
 
 
@@ -799,6 +851,9 @@ _RUNTIME_TEXT_KEYS = {
     '读取失败': 'keyboard.read_failed',
     'ROG 键盘未连接或处于休眠状态': 'keyboard.rog_not_connected_or_asleep',
     '已连接': 'bluetooth.status.connected',
+    '已连接（HFP 电量）': 'status.connected_hfp',
+    'Windows 未提供经典蓝牙 HFP 电量': 'status.no_hfp_battery',
+    '未知': 'status.unknown',
     '已配对，未连接或休眠': 'bluetooth.state.paired_sleeping',
     '未在 Windows 已配对设备中找到': 'bluetooth.state.not_paired',
     '设备未公开标准 BLE Battery Service（0x180F）。': 'bluetooth.state.no_service',
@@ -809,6 +864,9 @@ _RUNTIME_TEXT_KEYS = {
     '未发现可绑定的键盘候选设备': 'keyboard.scan.none_runtime',
     '绑定失败：未找到对应的键盘设备': 'keyboard.bind.failed_not_found_runtime',
     '已移除当前键盘绑定': 'keyboard.removed_runtime',
+    '正在读取 Windows 已配对蓝牙设备...': 'bluetooth.scan.loading_runtime',
+    '未发现 Windows 已配对蓝牙设备': 'bluetooth.scan.none_runtime',
+    '已移除蓝牙设备': 'bluetooth.removed_runtime',
 }
 
 _RUNTIME_TEXT_PATTERNS = [
@@ -817,6 +875,13 @@ _RUNTIME_TEXT_PATTERNS = [
     (re.compile(r'^已发现 (?P<count>\d+) 个键盘候选设备$'), 'keyboard.scan.found_runtime'),
     (re.compile(r'^已绑定键盘：(?P<name>.+)$'), 'keyboard.bound_runtime'),
     (re.compile(r'^罗技鼠标 \((?P<pid>0x[0-9A-F]+)\)$'), 'device.logitech_mouse_with_pid'),
+    (re.compile(r'^已发现 (?P<count>\d+) 个 Windows 已配对蓝牙设备$'), 'bluetooth.scan.found_runtime'),
+    (re.compile(r'^正在读取蓝牙设备电量：(?P<name>.+)$'), 'bluetooth.reading_battery_runtime'),
+    (re.compile(r'^已添加蓝牙设备：(?P<name>.+)$'), 'bluetooth.bound_runtime'),
+    (re.compile(r'^蓝牙刷新失败：(?P<error>.+)$'), 'bluetooth.refresh_failed_runtime'),
+    (re.compile(r'^扫描失败：(?P<error>.+)$'), 'error.scan_failed_runtime'),
+    (re.compile(r'^绑定失败：(?P<error>.+)$'), 'error.bind_failed_runtime'),
+    (re.compile(r'^读取失败：(?P<error>.+)$'), 'error.read_failed_runtime'),
 ]
 
 
