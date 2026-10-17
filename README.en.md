@@ -171,6 +171,27 @@ Check the following in order:
 3. Logitech users have closed G HUB.
 4. Select **Refresh battery**; if the HID interface is still occupied, try running the app as administrator.
 
+### The tray popup flashes and closes, or reports `BrowserProcessExited`
+
+If RivaTuner Statistics Server (RTSS, often used with MSI Afterburner) is running, its graphics injection may conflict with WebView2. In a diagnosed case, `RTSSHooks64.dll` accessed memory belonging to an unloaded `dxgi.dll`, causing the WebView2 browser process to exit and the battery monitor popup to close. The conflict may also appear some time after the app starts.
+
+Disable injection for **`msedgewebview2.exe`** in RTSS:
+
+1. Open RTSS, select **Add**, and choose the WebView2 Runtime's `msedgewebview2.exe`. A common location is `C:\Program Files (x86)\Microsoft\EdgeWebView\Application\<version>\msedgewebview2.exe`; use the actual installation path on your PC.
+2. Select the new profile and set **Application detection level** to **None**. Turning off **Show On-Screen Display** alone does not disable injection.
+3. Exit and reopen the battery monitor, then repeatedly open and dismiss the popup to verify that it stays open when expected.
+
+Alternatively, exit RTSS first and create `msedgewebview2.exe.cfg` in the `Profiles` folder under its installation directory with the following contents. If the file already exists, update only `EnableHooking` in its existing `[Hooking]` section and preserve the other settings:
+
+```ini
+[Hooking]
+EnableHooking=0
+```
+
+Save the file, then reopen RTSS and the battery monitor. This profile applies to all WebView2 processes named `msedgewebview2.exe`; individual game profiles do not need changes. Because the crash occurs in the WebView2 child process, excluding only `WirelessDeviceBatteryMonitor.exe` may not cover it. Recreate processes that already have the injected DLL before verifying the result.
+
+`BrowserProcessExited` indicates an unexpected WebView2 browser process exit and is not specific to RTSS. If no such error appears and the GUI process remains alive after the popup disappears, the window may have failed to acquire focus and been automatically hidden; a disappearing popup alone does not prove an RTSS crash. If RTSS is not running, or the problem persists after excluding it, include the error message, Windows and app versions, reproduction steps, and any other graphics overlay tools in your Issue. See [Microsoft's WebView2 process failure documentation](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-related-events).
+
 ### The battery shows `N/A` or does not update
 
 The device may be sleeping, newly connected, waiting for its first scan, or temporarily unavailable through HID. Select **Refresh battery** and wait for the next automatic refresh. Unreadable data is not presented as a fake successful value.

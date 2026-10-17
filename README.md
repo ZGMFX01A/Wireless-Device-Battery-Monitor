@@ -162,6 +162,27 @@ Logitech 设备的电量读取可能会与 Logitech G HUB 争用 HID 接口。�
 
 ## 常见问题
 
+### 托盘弹窗闪一下就关闭，或提示 `BrowserProcessExited`？
+
+如果同时运行了 RivaTuner Statistics Server（RTSS，常与 MSI Afterburner 配合使用），可能是 RTSS 的图形注入与 WebView2 冲突。已定位的崩溃案例中，`RTSSHooks64.dll` 访问了已卸载的 `dxgi.dll` 内存，导致 WebView2 浏览器进程退出，随后电量监控弹窗关闭。这类冲突也可能在程序启动一段时间后才出现。
+
+推荐在 RTSS 中为 **`msedgewebview2.exe`** 禁用注入：
+
+1. 打开 RTSS，点击 **Add**，选择 WebView2 Runtime 的 `msedgewebview2.exe`。常见位置为 `C:\Program Files (x86)\Microsoft\EdgeWebView\Application\<版本号>\msedgewebview2.exe`，实际路径以本机安装位置为准。
+2. 选中刚添加的配置，将 **Application detection level** 设置为 **None**。仅关闭 **Show On-Screen Display** 不等于禁用注入。
+3. 退出电量监控程序后重新打开，连续尝试打开、收起弹窗，确认不再闪关。
+
+也可以手动配置：先退出 RTSS，再在其安装目录的 `Profiles` 文件夹内新建 `msedgewebview2.exe.cfg`，写入以下内容；若文件已存在，只修改已有 `[Hooking]` 节中的 `EnableHooking`，保留其他配置：
+
+```ini
+[Hooking]
+EnableHooking=0
+```
+
+保存后重新打开 RTSS 和电量监控程序。该配置针对所有名为 `msedgewebview2.exe` 的 WebView2 进程，游戏的独立配置无需调整。崩溃发生在 WebView2 子进程中，因此只排除 `WirelessDeviceBatteryMonitor.exe` 可能覆盖不到；已经注入的进程需要重新创建后再验证。
+
+`BrowserProcessExited` 表示 WebView2 浏览器进程异常退出，并不专指 RTSS。如果没有该错误、弹窗消失后 GUI 进程仍在运行，也可能是窗口未取得焦点而被自动收起，不能仅凭“闪关”判断为 RTSS 崩溃。未运行 RTSS，或排除后仍出现问题时，请在 Issue 中提供错误提示、Windows 与程序版本、复现步骤，以及是否运行其他图形叠加工具；参见 [微软 WebView2 故障事件说明](https://learn.microsoft.com/zh-cn/microsoft-edge/webview2/concepts/process-related-events)。
+
 ### 检测不到鼠标怎么办？
 
 请依次确认：

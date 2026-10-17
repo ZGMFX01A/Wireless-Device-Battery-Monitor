@@ -19,6 +19,7 @@ from tray import TrayApp
 from config import ConfigManager
 import updater
 from gui_process import GuiProcessController
+from gui_focus import allow_gui_foreground
 from flyout_geometry import initialize_dpi_awareness, capture_tray_anchor
 
 
@@ -229,6 +230,7 @@ if __name__ == '__main__':
         'frozen': bool(getattr(sys, 'frozen', False)),
         'host_pid': os.getpid(),
         'creationflags': subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+        'allow_foreground': allow_gui_foreground,
     })
     atexit.register(_gui_controller.shutdown)
     tray = TrayApp(

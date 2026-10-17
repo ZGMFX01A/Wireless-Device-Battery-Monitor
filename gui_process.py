@@ -133,6 +133,8 @@ class GuiProcessController:
         self._stopping = False
         self._last_anchor = None
         self._watch_exit = options.get('watch_exit', True)
+        # 托盘组合根注入用户输入权限交接；纯 IPC 消费者不请求前台权限。
+        self._allow_foreground = options.get('allow_foreground')
 
     @property
     def process(self):
@@ -146,11 +148,17 @@ class GuiProcessController:
                 return
             if self._process and self._process.poll() is None:
                 self._last_anchor = target
-                send_message(self._channel, 'settings' if mode == 'settings' else 'toggle', target)
+                self._send_window_action('settings' if mode == 'settings' else 'toggle', target)
                 return
             if self._channel is not None:
                 clear_messages(self._channel)
             self._spawn_locked(mode, target)
+
+    def _send_window_action(self, action, anchor=None):
+        """先交接本次点击的激活权限，再让 GUI 控制线程显示窗口。"""
+        if self._allow_foreground is not None:
+            self._allow_foreground(self._process.pid)
+        send_message(self._channel, action, anchor)
 
     def _spawn_locked(self, mode, target):
         """调用方持有控制器锁，每次新 GUI 都使用新会话地址。"""
@@ -202,7 +210,7 @@ class GuiProcessController:
         with self._lock:
             if self._stopping or not self._process or self._process.poll() is not None:
                 return False
-            send_message(self._channel, 'settings')
+            self._send_window_action('settings')
             return True
 
     def shutdown(self):
