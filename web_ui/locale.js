@@ -31,6 +31,7 @@ const I18N = {
             'device.updated_at': '更新于 {time}',
             'device.remove_btn': '移除',
             'device.unbind_btn': '解除绑定',
+            'device.rename_btn': '修改设备名称',
 
             'settings.title': '偏好设置',
             'settings.tray_style.title': '托盘图标样式',
@@ -88,6 +89,8 @@ const I18N = {
             'toast.refresh_completed': '电量刷新完成',
             'toast.bound_success': '设备绑定成功',
             'toast.removed_success': '已移除设备',
+            'toast.rename_success': '设备名称已修改为“{name}”',
+            'toast.rename_cleared': '已恢复设备默认名称',
             'toast.op_failed': '操作失败：{msg}',
 
             'update.modal_title': '发现新版本',
@@ -140,6 +143,7 @@ const I18N = {
             'device.updated_at': 'Updated at {time}',
             'device.remove_btn': 'Remove',
             'device.unbind_btn': 'Unbind',
+            'device.rename_btn': 'Rename device',
 
             'settings.title': 'Settings',
             'settings.tray_style.title': 'Tray Icon Style',
@@ -197,6 +201,8 @@ const I18N = {
             'toast.refresh_completed': 'Battery status refreshed',
             'toast.bound_success': 'Device bound successfully',
             'toast.removed_success': 'Device removed',
+            'toast.rename_success': 'Device renamed to "{name}"',
+            'toast.rename_cleared': 'Device name reset to default',
             'toast.op_failed': 'Operation failed: {msg}',
 
             'update.modal_title': 'New Version Found',

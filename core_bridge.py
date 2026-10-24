@@ -14,6 +14,7 @@ from typing import Literal, Optional
 
 from mouse_battery_core.logitech_hid import (
     BatteryInfo,
+    DEVICE_INDEX_FIRST,
     LogitechReceiver,
     find_logitech_receivers,
 )
@@ -155,6 +156,16 @@ def reopen_mouse_backend(handle: MouseBackendHandle) -> bool:
     return True
 
 
+def read_mouse_device_name(handle: MouseBackendHandle) -> Optional[str]:
+    """读取鼠标真实型号；硬件查询由托盘持有 I/O 锁时调用。"""
+    if handle.brand != 'logitech':
+        return None
+    name = handle.device.get_device_name(DEVICE_INDEX_FIRST)
+    if not name:
+        return None
+    return name.strip() or None
+
+
 def read_mouse_battery(handle: MouseBackendHandle) -> Optional[BatteryInfo | RazerBatteryInfo | AsusBatteryInfo]:
     """统一读取鼠标后端电量。
 
@@ -173,12 +184,12 @@ def read_mouse_battery(handle: MouseBackendHandle) -> Optional[BatteryInfo | Raz
 
 
 def enumerate_keyboard_candidates() -> list[KeyboardCandidate]:
-    """枚举现有 Weikav 键盘与 ROG 2.4G/Omni 键盘候选。"""
+    """枚举通用公版键盘（华奋达/维咖/黑爵/朗图等）与 ROG 2.4G/Omni 键盘候选。"""
     return enumerate_weikav_keyboard_candidates() + enumerate_asus_keyboard_candidates()
 
 
 def read_keyboard_battery(binding: dict) -> KeyboardInfo:
-    """按 VID/PID 将键盘电量读取分派到 Weikav 或 ROG 协议。"""
+    """按 VID/PID 将键盘电量读取分派到公版方案或 ROG 协议。"""
     if int(binding.get("vendor_id", 0) or 0) == 0x0B05:
         return read_asus_keyboard_battery(binding)
     return read_weikav_keyboard_battery(binding)

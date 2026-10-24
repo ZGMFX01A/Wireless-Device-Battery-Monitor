@@ -14,7 +14,7 @@ import subprocess
 import atexit
 import threading
 
-from devices import DeviceManager
+from devices import DeviceManager, cleanup_stale_shared_state_files
 from tray import TrayApp
 from config import ConfigManager
 import updater
@@ -24,13 +24,15 @@ from flyout_geometry import initialize_dpi_awareness, capture_tray_anchor
 
 
 ERROR_ALREADY_EXISTS = 183
+ERROR_ACCESS_DENIED = 5
+MAIN_INSTANCE_MUTEX = r'Local\MouseBattery_Main_SingleInstance'
 _instance_mutex_handle = None
 _shutdown_for_update = False
 _shutdown_skip_gui_pid = None
 
 
-def acquire_single_instance(lock_name: str) -> bool:
-    """基于 Windows 命名互斥体实现单实例。"""
+def acquire_single_instance(lock_name: str = MAIN_INSTANCE_MUTEX) -> bool:
+    """基于当前登录会话的 Windows 命名互斥体实现单实例。"""
     global _instance_mutex_handle
     if os.name != 'nt':
         return True
@@ -43,11 +45,13 @@ def acquire_single_instance(lock_name: str) -> bool:
         kernel32.GetLastError.restype = ctypes.c_uint32
 
         handle = kernel32.CreateMutexW(None, False, lock_name)
+        err = kernel32.GetLastError()
         if not handle:
-            return True
+            logging.getLogger(__name__).warning('创建单实例互斥体失败: name=%s error=%s', lock_name, err)
+            # 对既有互斥体无访问权时不能将失败当作“当前没有实例”。
+            return err != ERROR_ACCESS_DENIED
 
         _instance_mutex_handle = handle
-        err = kernel32.GetLastError()
         if err == ERROR_ALREADY_EXISTS:
             return False
         return True
@@ -207,7 +211,7 @@ if __name__ == '__main__':
         sys.exit(launch_flyout_process(mode=mode))
 
     # 命名互斥体单实例保护（仅对后台托盘守护主进程生效）
-    if not acquire_single_instance("Global\\MouseBattery_Main_SingleInstance"):
+    if not acquire_single_instance():
         logger.info("主程序实例已存在，本次启动已忽略")
         sys.exit(0)
 
@@ -219,6 +223,7 @@ if __name__ == '__main__':
         logger.warning("未以管理员身份运行，可能无法访问部分 HID 设备")
 
     # 初始化配置管理器与硬件设备管理器
+    cleanup_stale_shared_state_files()
     config_manager = ConfigManager()
     device_manager = DeviceManager(config_manager=config_manager)
 

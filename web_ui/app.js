@@ -135,8 +135,20 @@ async function initializeApp() {
         const dialogs = new DeviceDialogs({ t: translator.t, toast, acceptState });
         const settings = new Settings({ t: translator.t, toast, acceptState });
         const updates = new UpdateUi({ t: translator.t, toast });
+        const onRename = async (deviceId, newName) => {
+            try {
+                const nextState = await api('rename_device', deviceId, newName);
+                app.acceptState(nextState);
+                const msg = newName
+                    ? translator.t('toast.rename_success', { name: newName })
+                    : translator.t('toast.rename_cleared');
+                toast(msg);
+            } catch (error) {
+                app.operationError(error);
+            }
+        };
         const app = new BatteryApp({ translator, toast, dialogs, settings, updates,
-            renderDevices: createDeviceRenderer() });
+            renderDevices: createDeviceRenderer({ onRename }) });
         await app.initialize();
     } catch (error) {
         console.error('GUI initialization failed', error);

@@ -94,6 +94,27 @@ body.theme-dark .device-card:hover {
     max-width: 200px;
 }
 
+.device-name-input {
+    font-size: 14px;
+    font-weight: 600;
+    font-family: inherit;
+    color: var(--text-primary);
+    background: var(--bg-control, rgba(255, 255, 255, 0.12));
+    border: 1.5px solid var(--accent-green, #10b981);
+    border-radius: 6px;
+    padding: 2px 6px;
+    margin: -2px 0;
+    outline: none;
+    width: 170px;
+    box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.25);
+    box-sizing: border-box;
+}
+
+body.theme-light .device-name-input {
+    background: #ffffff;
+    box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.2);
+}
+
 .battery-display {
     display: flex;
     align-items: baseline;

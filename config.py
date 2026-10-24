@@ -285,6 +285,7 @@ class ConfigManager:
             "ui_language": LANGUAGE_AUTO, # 界面语言策略：默认跟随系统语言，手动切换后写入显式覆盖值
             "theme_mode": THEME_MODE_AUTO, # 界面外观风格：默认跟随系统，支持 light/dark 显式指定
             "glass_transparency": DEFAULT_GLASS_TRANSPARENCY,
+            "device_custom_names": {}, # 设备自定义重命名映射：device_id -> 自定义显示名称
         }
 
     def _load_unlocked(self):
@@ -683,3 +684,107 @@ class ConfigManager:
             if changed:
                 self._save_unlocked()
             return should_show
+
+    @property
+    def device_custom_names(self) -> dict[str, str]:
+        """
+        返回当前所有设备的自定义显示名称映射字典。
+
+        返回：
+            dict[str, str]: device_id 到自定义别名的映射副本。
+        """
+        self._reload_from_disk()
+        names = self.config.get("device_custom_names", {})
+        return dict(names) if isinstance(names, dict) else {}
+
+    def get_device_custom_name(self, device_id: str) -> str:
+        """
+        查询指定设备 ID 的自定义别名。
+
+        参数：
+            device_id: 设备的唯一标识字符串。
+
+        返回：
+            str: 自定义别名；若未配置则返回空字符串。
+        """
+        clean_id = str(device_id or "").strip()
+        if not clean_id:
+            return ""
+        names = self.device_custom_names
+        # 精确匹配优先
+        if clean_id in names:
+            return str(names[clean_id]).strip()
+        # 兼容大小写匹配
+        lower_id = clean_id.lower()
+        for key, value in names.items():
+            if key.lower() == lower_id:
+                return str(value).strip()
+        return ""
+
+    def set_device_custom_name(self, device_id: str, custom_name: str) -> bool:
+        """
+        设置或清除设备的自定义别名。
+
+        参数：
+            device_id: 设备的唯一标识字符串。
+            custom_name: 新别名；若为空字符串或纯空白字符，则移除该设备的别名。
+
+        返回：
+            bool: 是否操作成功。
+        """
+        clean_id = str(device_id or "").strip()
+        if not clean_id:
+            return False
+        clean_name = str(custom_name or "").strip()
+
+        def apply():
+            names = dict(self.config.get("device_custom_names", {}))
+            if clean_name:
+                names[clean_id] = clean_name
+            else:
+                # 为空则清除别名（同时移除可能存在的大小写变体键）
+                keys_to_remove = [k for k in names if k == clean_id or k.lower() == clean_id.lower()]
+                for k in keys_to_remove:
+                    names.pop(k, None)
+            self.config["device_custom_names"] = names
+            return True
+
+        return self._mutate(apply)
+
+    def migrate_device_custom_names(self, replacements: dict[str, str]) -> None:
+        """将无歧义的旧设备 ID 别名原子迁移，保留已设置的新别名及无关配置。"""
+        if not replacements:
+            return
+        with _config_file_lock(CONFIG_FILE):
+            self._load_unlocked()
+            names = self.config.get('device_custom_names', {})
+            if not isinstance(names, dict):
+                return
+            names = dict(names)
+            changed = False
+            for old_id, new_id in replacements.items():
+                old_keys = [key for key in names if key.casefold() == old_id.casefold()]
+                if not old_keys:
+                    continue
+                if not any(key.casefold() == new_id.casefold() for key in names):
+                    names[new_id] = names[old_keys[0]]
+                for key in old_keys:
+                    names.pop(key)
+                changed = True
+            if changed:
+                self.config['device_custom_names'] = names
+                self._save_unlocked()
+
+    def get_device_display_name(self, device_id: str, default_name: str) -> str:
+        """
+        获取设备的最终对外显示名称。
+
+        参数：
+            device_id: 设备的唯一标识字符串。
+            default_name: 硬件原厂或系统默认扫描到的名称。
+
+        返回：
+            str: 优先返回用户自定义别名，若无则返回默认名称。
+        """
+        custom = self.get_device_custom_name(device_id)
+        return custom if custom else default_name

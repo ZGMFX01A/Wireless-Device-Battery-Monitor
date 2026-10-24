@@ -26,39 +26,55 @@ class TrayPresentation:
             style=self.config_manager.tray_icon_style, is_dark_taskbar=is_windows_taskbar_dark_mode())
         self._tray.title = self._tooltip(mice, keyboard, bluetooth)
         self._tray.menu = self._build_menu()
+        self._check_low_battery_notifications(mice, keyboard, bluetooth)
 
     def _tooltip(self, mice, keyboard, bluetooth):
-        """列出各设备电量并判断原有低电量通知，保留 Windows tooltip 长度限制。"""
+        """只拼接各设备电量文本，保留 Windows tooltip 长度限制。"""
         lines = [self._t('tray.app_name')]
         if not mice and not keyboard and not bluetooth:
             lines.append(self._t('tray.no_device_or_sleep'))
         for device in mice:
             self._append_device_line(lines, device)
-            self._notify_low_battery(device, device.name)
         if keyboard:
             self._append_device_line(lines, keyboard)
         for device in bluetooth:
             self._append_device_line(lines, device)
-            self._notify_low_battery(device, f'Bluetooth|{device.device_id}')
         return "\n".join(lines)[:120]
+
+    def _check_low_battery_notifications(self, mice, keyboard, bluetooth):
+        """按设备身份显式检查通知，覆盖鼠标、绑定键盘和蓝牙设备。"""
+        for device in mice:
+            identity = f'Mouse|{device.device_id}' if device.device_id else device.name
+            self._notify_low_battery(device, identity)
+        if keyboard:
+            self._notify_low_battery(keyboard, f'Keyboard|{keyboard.device_id}')
+        for device in bluetooth:
+            self._notify_low_battery(device, f'Bluetooth|{device.device_id}')
+
+    def _device_display_name(self, device):
+        """获取设备对外展示名，优先使用用户重命名的自定义别名。"""
+        device_id = getattr(device, 'device_id', '')
+        return self.config_manager.get_device_display_name(device_id, device.name)
 
     def _append_device_line(self, lines, device):
         """附加电量和充电标识，未知电量不转换成 0%。"""
         percentage = f'{device.percentage}%' if device.percentage >= 0 else 'N/A'
         charging = ' ⚡' if device.charging else ''
-        lines.append(f'{self._translate_runtime_text(device.name)}: {percentage}{charging}')
+        name = self._device_display_name(device)
+        lines.append(f'{self._translate_runtime_text(name)}: {percentage}{charging}')
 
     def _notify_low_battery(self, device, identity):
         """只对有效且未充电的读数发送低电量通知。"""
-        if device.percentage < 0 or device.charging:
+        if not device.online or not 0 <= device.percentage <= 100 or device.charging:
             return
         raw = getattr(device, 'raw_percentage', None)
         percent = raw if type(raw) is int and 0 <= raw <= 100 else device.percentage
         if not self.config_manager.should_notify(identity, percent):
             return
+        display_name = self._device_display_name(device)
         try:
             self._tray.notify(self._t('tray.notification.low_battery_message',
-                name=self._translate_runtime_text(device.name), percent=percent),
+                name=self._translate_runtime_text(display_name), percent=percent),
                 title=self._t('tray.notification.low_battery_title'))
         except Exception:
             # 系统通知失败需要日志，不能中断后续图标与菜单刷新。

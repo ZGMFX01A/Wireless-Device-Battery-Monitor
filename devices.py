@@ -7,6 +7,7 @@
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -38,6 +39,7 @@ from core_bridge import (
     probe_bluetooth_candidate,
     read_bluetooth_batteries,
     read_mouse_battery,
+    read_mouse_device_name,
 )
 
 from device_command_service import execute_reported_command
@@ -124,6 +126,7 @@ class MouseInfo:
     raw_percentage: Optional[int] = None
     voltage_mv: Optional[int] = None
     battery_source: str = ''
+    device_id: str = ''
 
     @property
     def display_percentage(self) -> str:
@@ -229,6 +232,7 @@ class DeviceManager:
         self._power_lock = threading.Lock()
         self._reconnect_at = {}
         self._rebaseline = set()
+        self._name_query_attempted: set[str] = set()
         self._command_thread: Optional[threading.Thread] = None
         self._command_stop_event = threading.Event()
         self._command_thread_lock = threading.Lock()
@@ -868,8 +872,10 @@ class DeviceManager:
         self._poll_plan.slots.clear()
         self._reconnect_at.clear()
         self._rebaseline.clear()
+        self._name_query_attempted.clear()
 
         self._mouse_backends = enumerate_mouse_backends()
+        identities_by_model: dict[str, list[str]] = {}
         for backend in self._mouse_backends:
             if backend.brand == 'logitech':
                 brand = Brand.LOGITECH
@@ -881,7 +887,12 @@ class DeviceManager:
                 brand = Brand.ROG
                 name = backend.product_name
 
+            model_id = f"mouse:{backend.brand}:{backend.product_id:04x}"
+            path = self._safe_path_text(backend.path).strip().casefold()
+            device_id = f"{model_id}:{path}"
+            identities_by_model.setdefault(model_id, []).append(device_id)
             mouse = MouseInfo(
+                device_id=device_id,
                 name=name,
                 brand=brand,
                 product_id=backend.product_id,
@@ -893,6 +904,11 @@ class DeviceManager:
 
             logger.info(f"已添加{brand.value}设备: {mouse.name}")
 
+        # 旧版只按型号存别名；只有当前型号对应唯一接收器时才迁移。
+        self.config_manager.migrate_device_custom_names({
+            model_id: identities[0] for model_id, identities in identities_by_model.items()
+            if len(identities) == 1
+        })
         total = len(self._mouse_backends)
         logger.info(f"设备扫描完成，共发现 {total} 个设备")
 
@@ -905,7 +921,7 @@ class DeviceManager:
 
     @staticmethod
     def _device_key(mouse: MouseInfo, idx: int) -> str:
-        return f"{mouse.brand.value}|{mouse.name}|0x{mouse.product_id:04X}|{idx}"
+        return mouse.device_id or f"{mouse.brand.value}|0x{mouse.product_id:04X}|{idx}"
 
     def _mark_failure(self, key: str, reason: str, detail: str = ""):
         """记录连续失败次数并输出诊断日志。"""
@@ -1041,10 +1057,24 @@ class DeviceManager:
             mouse.last_update = time.time()
         device_key = self._device_key(mouse, idx)
         self._mark_success(device_key, battery.percentage, battery.charging)
+        self._update_logitech_name(mouse, device_obj, device_key)
         if not prev_online:
             logger.info(
                 f"设备状态恢复在线: {device_key}, pid=0x{mouse.product_id:04X}"
             )
+
+    def _update_logitech_name(self, mouse, backend, identity):
+        """首次有效读电后只尝试一次真实名称；失败保留默认名，不影响电量。"""
+        if backend.brand != 'logitech' or identity in self._name_query_attempted:
+            return
+        self._name_query_attempted.add(identity)
+        try:
+            name = read_mouse_device_name(backend)
+            if name:
+                with self._lock:
+                    mouse.name = name
+        except Exception as error:
+            logger.debug('读取罗技真实设备名失败，保留默认名: %s', error)
 
     def _handle_missing_battery(self, mouse: MouseInfo, brand: Brand, *, idx: int,
                                 device_obj: MouseBackendHandle):
@@ -1301,9 +1331,36 @@ def get_shared_state_path() -> str:
     return os.path.join(base, '.device_state.json')
 
 
+def cleanup_stale_shared_state_files(*, now: Optional[float] = None) -> int:
+    """启动时只清理本程序命名且超过一小时的共享状态临时文件。"""
+    removed = 0
+    cutoff = (time.time() if now is None else now) - 3600
+    try:
+        state_file = get_shared_state_path()
+        pattern = re.compile(rf'{re.escape(os.path.basename(state_file))}\.\d+\.\d+\.\d+\.tmp')
+        with os.scandir(os.path.dirname(state_file)) as entries:
+            for entry in entries:
+                if not pattern.fullmatch(entry.name):
+                    continue
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    if entry.stat(follow_symlinks=False).st_mtime >= cutoff:
+                        continue
+                    os.unlink(entry.path)
+                    removed += 1
+                except OSError as error:
+                    logger.debug('跳过无法清理的状态临时文件 %s: %s', entry.name, error)
+    except OSError as error:
+        logger.debug('扫描陈旧状态临时文件失败: %s', error)
+    return removed
+
+
 def _serialize_mouse_state(mouse: MouseInfo) -> dict:
     """将设备状态序列化为共享 JSON 可写入的数据结构。"""
     return {
+        'device_id': mouse.device_id,
+        'product_id': mouse.product_id,
         'name': mouse.name,
         'brand': mouse.brand.value if hasattr(mouse.brand, 'value') else str(mouse.brand),
         'percentage': mouse.percentage,
@@ -1430,7 +1487,14 @@ def _deserialize_mouse_state(item: dict, index: int) -> Optional[MouseInfo]:
     except (TypeError, ValueError):
         last_update = 0.0
 
+    product_id = int(item.get('product_id', 0) or 0)
+    device_id = str(item.get('device_id', '') or '').strip()
+    if not device_id and product_id:
+        device_id = f"mouse:{brand.name.lower()}:{product_id:04x}"
+
     return MouseInfo(
+        device_id=device_id,
+        product_id=product_id,
         name=str(item.get('name', '未知设备')),
         brand=brand,
         percentage=_coerce_shared_percentage(item.get('percentage', -1)),

@@ -29,7 +29,10 @@ class TrayMenu:
             devices.append(self.device_manager.keyboard)
         if not devices:
             return [MenuItem(self._t('tray.menu.no_device'), None, enabled=False), Menu.SEPARATOR]
-        return [*(MenuItem(f'{self._translate_runtime_text(device.name)}: '
+        def display_name(device):
+            device_id = getattr(device, 'device_id', '')
+            return self.config_manager.get_device_display_name(device_id, device.name)
+        return [*(MenuItem(f'{self._translate_runtime_text(display_name(device))}: '
                            f'{str(device.percentage) + "%" if device.percentage >= 0 else "N/A"}',
                            None, enabled=False) for device in devices), Menu.SEPARATOR]
 

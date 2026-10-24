@@ -86,6 +86,13 @@ class FlyoutApi:
     def unbind_bluetooth(self, device_id):
         return self._device_action('unbind_bluetooth', device_id)
 
+    def rename_device(self, device_id, new_name):
+        """设置或清除设备的自定义显示别名，并通知托盘同步与返回最新状态。"""
+        with self._manager.operation():
+            self._manager.config_manager.set_device_custom_name(device_id, new_name)
+            self._manager.refresh_tray()
+            return self.get_state()
+
     def _device_action(self, action, device_id=None):
         """统一执行绑定和解除动作，只有对应命令成功才返回 success。"""
         with self._manager.operation():

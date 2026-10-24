@@ -22,21 +22,76 @@ function batteryColor(device) {
 
 // 多种设备快照映射为统一卡片，蓝牙保留真实端点 ID。
 function cards(state) {
-    const mice = state.mice.map(item => ({ ...item, type: 'mouse' }));
+    const mice = state.mice.map((item, index) => ({
+        ...item,
+        type: 'mouse',
+        device_id: item.device_id || `mouse:${item.product_id || 0}:${index}`,
+    }));
     const keyboard = state.keyboard ? [{ ...state.keyboard, type: 'keyboard' }] : [];
     const bluetooth = state.bluetooth_devices.map(item => ({ ...item, type: 'bluetooth' }));
     return [...mice, ...keyboard, ...bluetooth];
 }
 
-// 使用安全 DOM 展示外部设备名、状态和读取时间，不解析设备数据为 HTML。
-function card(device, t) {
+// 使用安全 DOM 展示外部设备名、状态和读取时间，支持通过右上角编辑按钮行内重命名。
+function card(device, t, onRename) {
     const online = device.online && device.percentage >= 0;
     const color = batteryColor(device);
     const root = node('div', { className: `device-card${online ? '' : ' offline'}` });
-    const top = cardHeader(device, { online, color, t });
+    root.setAttribute('data-device-id', device.device_id);
     const middle = node('div', { className: 'card-middle' });
     const name = node('div', { className: 'device-name', text: device.name });
     name.title = device.name;
+
+    // 行内编辑设备名称
+    function startEditing() {
+        if (root.classList.contains('editing')) return;
+        root.classList.add('editing');
+
+        // syncNode 保留现有事件监听器，因此从当前 DOM 读取最新名称和身份。
+        const originalName = name.textContent;
+        const deviceId = root.getAttribute('data-device-id');
+        const input = node('input', { className: 'device-name-input' });
+        input.type = 'text';
+        input.value = originalName;
+        input.maxLength = 32;
+
+        input.addEventListener('click', e => e.stopPropagation());
+        input.addEventListener('mousedown', e => e.stopPropagation());
+
+        let finished = false;
+        const commit = (save) => {
+            if (finished) return;
+            finished = true;
+            root.classList.remove('editing');
+            const nextValue = input.value.trim();
+            input.replaceWith(name);
+
+            if (save && nextValue !== originalName && onRename) {
+                onRename(deviceId, nextValue);
+            }
+        };
+
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                commit(true);
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                commit(false);
+            }
+        });
+
+        input.addEventListener('blur', () => {
+            commit(true);
+        });
+
+        name.replaceWith(input);
+        input.focus();
+        input.select();
+    }
+
+    const top = cardHeader(device, { online, color, t }, startEditing);
+
     middle.append(name, batteryDisplay(device, { online, color, t }));
     const track = node('div', { className: 'battery-track' });
     const fill = node('div', { className: 'battery-fill' });
@@ -53,8 +108,8 @@ function card(device, t) {
     return root;
 }
 
-// 保留原卡片左侧品牌与状态组合、右侧移除按钮的层次和间距。
-function cardHeader(device, options) {
+// 保留原卡片左侧品牌与状态组合、右侧编辑和移除按钮的层次和间距。
+function cardHeader(device, options, onStartEdit) {
     const top = node('div', { className: 'card-top' });
     const labels = node('div');
     labels.style.cssText = 'display:flex; align-items:center; gap:6px;';
@@ -69,7 +124,11 @@ function cardHeader(device, options) {
     }));
     labels.append(status);
     top.append(labels);
-    if (device.type !== 'mouse') top.append(removeButton(device, options.t));
+
+    const actions = node('div', { className: 'card-actions' });
+    actions.append(editButton(device, options.t, onStartEdit));
+    if (device.type !== 'mouse') actions.append(removeButton(device, options.t));
+    top.append(actions);
     return top;
 }
 
@@ -116,6 +175,39 @@ function createCloseSvg(size = 13) {
     return svg;
 }
 
+// 构造卡片右上角的极简编辑铅笔图标
+function createEditSvg(size = 13) {
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', String(size));
+    svg.setAttribute('height', String(size));
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+
+    const path = document.createElementNS(svgNS, 'path');
+    path.setAttribute('d', 'M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z');
+    svg.append(path);
+    return svg;
+}
+
+// 构造右上角编辑设备名称按钮
+function editButton(device, t, onStartEdit) {
+    const titleText = t('device.rename_btn');
+    const button = node('button', { className: 'card-btn-edit' });
+    button.title = titleText;
+    button.setAttribute('aria-label', titleText);
+    button.append(createEditSvg(13));
+    button.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (onStartEdit) onStartEdit();
+    });
+    return button;
+}
+
 // 身份通过 dataset 赋值，改用 X 图标呈现，同时通过 title 与 aria-label 保持悬停提示。
 function removeButton(device, t) {
     const titleText = t(device.type === 'keyboard' ? 'device.unbind_btn' : 'device.remove_btn');
@@ -129,18 +221,29 @@ function removeButton(device, t) {
 }
 
 // 每个页面持有自己的卡片缓存；原有结构、配色和动画全部沿用 card 构造器。
-export function createDeviceRenderer() {
+export function createDeviceRenderer(options = {}) {
+    const { onRename } = options;
     let previous = new Map();
     return (state, t) => {
         const devices = cards(state);
         const next = new Map();
         const list = el('deviceList');
         devices.forEach((device, index) => {
-            const key = deviceKey(device, index);
+            const key = deviceKey(device);
             const signature = JSON.stringify([device, state.config.effective_ui_language]);
             const entry = previous.get(key);
-            const element = entry?.element || card(device, t);
-            if (entry && entry.signature !== signature) syncNode(element, card(device, t));
+
+            // 若用户正在该卡片内行内编辑设备名，跳过 syncNode，避免被后台轮询打断输入
+            if (entry?.element?.classList.contains('editing')) {
+                if (list.children[index] !== entry.element) {
+                    list.insertBefore(entry.element, list.children[index] || null);
+                }
+                next.set(key, entry);
+                return;
+            }
+
+            const element = entry?.element || card(device, t, onRename);
+            if (entry && entry.signature !== signature) syncNode(element, card(device, t, onRename));
             if (list.children[index] !== element) list.insertBefore(element, list.children[index] || null);
             next.set(key, { element, signature });
         });
@@ -151,8 +254,7 @@ export function createDeviceRenderer() {
     };
 }
 
-// 鼠标快照没有路径 ID，按产品号与位置复用显示节点；绑定设备使用真实设备 ID。
-function deviceKey(device, index) {
-    return JSON.stringify(device.type === 'mouse' ? [device.type, device.product_id, index]
-        : [device.type, device.device_id]);
+// 设备换序时仍保留各自的节点和编辑状态；旧鼠标快照由 cards 补齐临时 ID。
+function deviceKey(device) {
+    return JSON.stringify([device.type, device.device_id]);
 }
