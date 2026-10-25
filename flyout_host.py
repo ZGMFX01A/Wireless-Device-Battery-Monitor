@@ -72,7 +72,19 @@ class FlyoutHost:
 
     def _on_process_failed(self, sender, args):
         """渲染进程故障进入显式关闭路径，而非保留一扇永久无响应的窗口。"""
-        self._context['error'](f'WebView2 进程故障：{args.ProcessFailedKind}')
+        kind = getattr(args, 'ProcessFailedKind', 'Unknown')
+        details = [f'kind={kind}']
+        reason = getattr(args, 'Reason', None)
+        if reason is not None:
+            details.append(f'reason={reason}')
+        exit_code = getattr(args, 'ExitCode', None)
+        if exit_code is not None:
+            if isinstance(exit_code, int):
+                details.append(f'exit_code=0x{exit_code & 0xFFFFFFFF:08X}')
+            else:
+                details.append(f'exit_code={exit_code}')
+        logger.error('WebView2 进程故障事件: %s', ', '.join(details))
+        self._context['error'](f'WebView2 进程故障: {kind}')
 
     def _on_preferences_changed(self, sender, args):
         """框架会在系统偏好通知时覆盖 DWM 38；排队到通知之后恢复 Acrylic。"""

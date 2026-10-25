@@ -8,12 +8,14 @@ import threading
 from config import ConfigManager
 from device_command_service import DeviceCommandClient
 from devices import SharedStateDeviceManager, request_device_command, DEVICE_COMMAND_REFRESH_TRAY_ICON
-from flyout import FlyoutManager, STATE_REFRESH_SECONDS
+from flyout import FlyoutManager, GuiFrontendError, STATE_REFRESH_SECONDS
 from flyout_geometry import initialize_dpi_awareness, capture_cursor_anchor, validate_anchor
 from flyout_host import FlyoutHost
 from flyout_api import FlyoutApi
 from flyout_update import FlyoutUpdate
-from gui_process import process_alive, GUI_IDLE_EXIT_CODE
+from gui_process import (process_alive, current_gui_channel, write_gui_failure,
+                         GUI_IDLE_EXIT_CODE, GUI_FAILURE_EXIT_CODE)
+from rtss_compat import disable_rtss_hooks, is_rtss_running
 import updater
 import webview
 from webview_prerequisite import (detect_webview2, show_runtime_guidance,
@@ -43,7 +45,11 @@ def require_webview2():
 def run_gui(mode):
     """只读共享状态；启动失败返回非零状态。"""
     shared = None
+    manager = None
     try:
+        # 也覆盖直接运行 --flyout/--settings 的入口，必须早于原生 GUI 初始化。
+        disable_rtss_hooks(os.environ)
+        logger.info('已请求本次 GUI 及 WebView2 子进程禁用 RTSS 图形 API Hook')
         initialize_dpi_awareness()
         require_webview2()
         shared = SharedStateDeviceManager()
@@ -64,7 +70,20 @@ def run_gui(mode):
     except Exception as error:
         # 运行时缺失和资源加载失败必须对用户可见。
         logger.exception('WebView GUI 启动或运行失败')
-        ctypes.windll.user32.MessageBoxW(None, str(error), '无线设备电量监控', ERROR_DIALOG_STYLE)
+        detail = str(error)
+        try:
+            if 'BrowserProcessExited' in detail and is_rtss_running():
+                detail += (
+                    '\n\n检测到系统正在运行 RivaTuner Statistics Server (RTSS)。'
+                    '\nRTSS 图形注入可能与 WebView2 冲突导致其崩溃退出。'
+                    '\n本程序已启用进程级兼容声明；请检查 RTSS 版本及是否强制启用了 Hooking。'
+                )
+        except Exception:
+            pass
+        if isinstance(error, GuiFrontendError) and isinstance(current_gui_channel(), str):
+            write_gui_failure(current_gui_channel(), manager.recovery_request, detail)
+            return GUI_FAILURE_EXIT_CODE
+        ctypes.windll.user32.MessageBoxW(None, detail, '无线设备电量监控', ERROR_DIALOG_STYLE)
         return 1
     finally:
         if shared:

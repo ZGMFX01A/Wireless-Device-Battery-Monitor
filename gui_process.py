@@ -11,6 +11,7 @@ import time
 import uuid
 
 from flyout_geometry import capture_cursor_anchor, validate_anchor
+from rtss_compat import disable_rtss_hooks
 
 logger = logging.getLogger(__name__)
 # 提升窗口响应速度的窗口消息轮询间隔（50ms 确保零延迟瞬时感知）。
@@ -26,6 +27,9 @@ GUI_ACTIONS = frozenset(('settings', 'toggle', 'shutdown'))
 GUI_CHANNEL_ENV = 'MOUSE_BATTERY_GUI_CHANNEL'
 # GUI 主动闲置退出的专用回执；onefile 启动器会传递子进程退出码。
 GUI_IDLE_EXIT_CODE = 75
+# 故障回执由子进程写出；与正常关闭、闲置回收分别处理。
+GUI_FAILURE_EXIT_CODE = 76
+GUI_RECOVERY_LIMIT = 1
 
 
 def current_gui_channel():
@@ -85,11 +89,36 @@ def consume_message(channel):
 def clear_messages(channel):
     """进程退出后清理本会话请求及中断的发布/领取文件，不影响其他 GUI。"""
     directory = message_path(channel)
-    for pattern in ('*.json', '*.tmp', '*.processing'):
+    for pattern in ('*.json', '*.tmp', '*.processing', '*.result'):
         for path in directory.glob(pattern):
             path.unlink(missing_ok=True)
     if directory.exists():
         directory.rmdir()
+
+
+def write_gui_failure(channel, request, error):
+    """在退出前发布故障和已经消费的显示意图，不混入窗口动作队列。"""
+    directory = message_path(channel)
+    directory.mkdir(parents=True, exist_ok=True)
+    temporary = directory / 'failure.tmp'
+    temporary.write_text(json.dumps({'request': request, 'error': str(error)}), encoding='utf-8')
+    os.replace(temporary, directory / 'failure.result')
+
+
+def read_gui_failure(channel):
+    """仅在对应进程已退出后读取并校验故障回执。"""
+    path = message_path(channel) / 'failure.result'
+    if not path.is_file():
+        return {'request': None, 'error': 'GUI failure report missing'}
+    report = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(report, dict) or not isinstance(report.get('error'), str):
+        raise ValueError('非法 GUI 故障回执')
+    request = report.get('request')
+    if request is not None:
+        if not isinstance(request, dict) or request.get('action') not in ('settings', 'toggle'):
+            raise ValueError('非法 GUI 恢复动作')
+        report['request'] = {'action': request['action'], 'anchor': validate_anchor(request.get('anchor'))}
+    return report
 
 
 def process_alive(pid):
@@ -133,6 +162,8 @@ class GuiProcessController:
         self._stopping = False
         self._last_anchor = None
         self._watch_exit = options.get('watch_exit', True)
+        self._recovery_attempts = 0
+        self._on_error = options.get('on_error')
         # 托盘组合根注入用户输入权限交接；纯 IPC 消费者不请求前台权限。
         self._allow_foreground = options.get('allow_foreground')
 
@@ -146,6 +177,8 @@ class GuiProcessController:
         with self._lock:
             if self._stopping:
                 return
+            # 显式用户输入开启新的恢复预算，自动重启不能重置预算。
+            self._recovery_attempts = 0
             if self._process and self._process.poll() is None:
                 self._last_anchor = target
                 self._send_window_action('settings' if mode == 'settings' else 'toggle', target)
@@ -167,6 +200,9 @@ class GuiProcessController:
             args.append(self._entry)
         args.append('--settings' if mode == 'settings' else '--flyout')
         environment = dict(os.environ, MOUSE_BATTERY_HOST_PID=str(self._host_pid))
+        # 在子进程创建前声明，覆盖 onefile 启动器、GUI 和后续 WebView2 子进程。
+        # environment 是副本；托盘和从桌面启动的其他应用不受影响。
+        disable_rtss_hooks(environment)
         environment['MOUSE_BATTERY_WINDOW_ANCHOR'] = json.dumps(target)
         channel = uuid.uuid4().hex
         environment[GUI_CHANNEL_ENV] = channel
@@ -188,28 +224,53 @@ class GuiProcessController:
 
     def _process_exited(self, process, channel, exit_code):
         """回收边界的打开请求必须补送，不能再次出现收回后打不开。"""
+        failure = None
         with self._lock:
             if self._process is not process or self._channel != channel:
                 return
             pending = None
-            if exit_code == GUI_IDLE_EXIT_CODE and not self._stopping:
+            if exit_code == GUI_FAILURE_EXIT_CODE and not self._stopping:
+                try:
+                    failure = read_gui_failure(channel)
+                except (OSError, ValueError):
+                    # 损坏回执不能让退出监听停在清理前，也不能据此猜测显示意图。
+                    logger.exception('GUI 故障回执读取失败：channel=%s', channel)
+                    failure = {'request': None, 'error': 'GUI failure report unreadable'}
+                pending = failure['request']
+            if exit_code in (0, GUI_IDLE_EXIT_CODE, GUI_FAILURE_EXIT_CODE) and not self._stopping:
                 while (message := consume_message(channel)) is not None:
                     if message['action'] == 'shutdown':
                         pending = None
+                        failure = None
                         break
                     # 退出中的旧窗口尚未领取的请求，以最后一次打开意图为准。
                     pending = message
             clear_messages(channel)
             self._process, self._channel = None, None
             if pending is not None:
-                mode = 'settings' if pending['action'] == 'settings' else 'flyout'
-                self._spawn_locked(mode, pending.get('anchor', self._last_anchor))
+                if failure is None or self._recovery_attempts < GUI_RECOVERY_LIMIT:
+                    if failure is not None:
+                        self._recovery_attempts += 1
+                        logger.warning('GUI 故障后自动重建：attempt=%s error=%s',
+                                       self._recovery_attempts, failure['error'])
+                    mode = 'settings' if pending['action'] == 'settings' else 'flyout'
+                    self._spawn_locked(mode, pending.get('anchor', self._last_anchor))
+                    return
+            else:
+                # 闲置隐藏窗口的故障不应主动弹出窗口或通知。
+                failure = None
+        # 先释放进程和锁，再发送非模态通知，后续点击不必等待“确定”。
+        if failure is not None:
+            logger.error('GUI 自动恢复已达上限：%s', failure['error'])
+            if self._on_error is not None:
+                self._on_error(failure['error'])
 
     def activate(self):
         """激活已打开的设置窗口，不新建进程。"""
         with self._lock:
             if self._stopping or not self._process or self._process.poll() is not None:
                 return False
+            self._recovery_attempts = 0
             self._send_window_action('settings')
             return True
 

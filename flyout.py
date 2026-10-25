@@ -21,6 +21,10 @@ STATE_REFRESH_SECONDS = 1
 GUI_IDLE_SECONDS = 30.0
 
 
+class GuiFrontendError(RuntimeError):
+    """允许由托盘在独立进程中有限重试的窗口运行故障。"""
+
+
 class FlyoutManager:
     """串行处理窗口动作，原生操作由注入的宿主派发到窗体线程。"""
 
@@ -36,6 +40,10 @@ class FlyoutManager:
         self.mode = 'window' if options['mode'] == 'settings' else 'flyout'
         self.auto_refresh = True
         self._visible = False
+        self._requested_window = {
+            'action': 'settings' if self.mode == 'window' else 'toggle', 'anchor': self.anchor,
+        }
+        self.recovery_request = None
         self._ready = threading.Event()
         self._actions = Queue()
         self._message_channel = current_gui_channel()
@@ -84,12 +92,15 @@ class FlyoutManager:
         self._actions.put({'action': 'ready'})
 
     def on_frontend_error(self, message):
-        """原生或前端初始化失败均进入实际关闭和原生错误对话框。"""
+        """关闭故障窗口，保留用户显示意图供托盘有限重建。"""
         with self._close_lock:
-            if self.startup_error is None:
-                self.startup_error = RuntimeError(f'GUI 初始化或运行失败：{message}')
+            if self._closing:
+                return
+            self._closing = True
+            self.startup_error = GuiFrontendError(f'GUI 初始化或运行失败：{message}')
+            self.recovery_request = self._requested_window
         logger.error('%s', self.startup_error)
-        self.request_close()
+        threading.Thread(target=self._close, name='gui-fault-close').start()
 
     def start_controls(self):
         """页面加载期间也接收退出请求，避免隐藏窗口阻塞托盘退出。"""
@@ -98,10 +109,17 @@ class FlyoutManager:
 
     def show(self, mode):
         """控制线程先切换内容，再在 UI 线程完成定位、材质和显示。"""
+        with self._close_lock:
+            if self._closing:
+                return
+            # 在任何 WebView 调用之前保存目标，显示失败时请求尚未完成。
+            self.mode = mode
+            self._requested_window = {
+                'action': 'settings' if mode == 'window' else 'toggle', 'anchor': self.anchor,
+            }
         self._idle_since = None
         self._host.set_background_mode(False)
         self.device_manager.sync_shared_state_silently()
-        self.mode = mode
         view = 'settings' if mode == 'window' else 'devices'
         self._host.scripts.evaluate(f'window.__setViewMode({json.dumps(view)});')
         self._host.present({'mode': mode, 'anchor': self.anchor,
@@ -122,6 +140,8 @@ class FlyoutManager:
 
     def _hide_window(self):
         """由控制线程隐藏窗体并停止向不可见页面推送状态。"""
+        with self._close_lock:
+            self._requested_window = None
         if self._visible:
             self._visible = False
             self._host.hide()
@@ -207,12 +227,26 @@ class FlyoutManager:
             logger.exception('GUI 状态推送失败')
 
     def _next_message(self):
-        """优先处理前端动作，再逐条领取托盘消息。"""
-        try:
-            return self._actions.get_nowait()
-        except Empty:
-            # 本轮没有前端动作，继续消费已有的跨进程消息。
-            return consume_message(self._message_channel)
+        """领取与保存意图使用故障处理的同一把锁，消除领取后故障的丢请求窗口。"""
+        with self._close_lock:
+            if self._closing:
+                return None
+            try:
+                message = self._actions.get_nowait()
+            except Empty:
+                message = consume_message(self._message_channel)
+            if message is not None:
+                action = message['action']
+                hide = (action in ('hide', 'shutdown') or
+                        (action == 'toggle' and self._ready.is_set()
+                         and self.mode == 'flyout' and self._visible))
+                if hide:
+                    self._requested_window = None
+                elif action in ('settings', 'toggle'):
+                    self._requested_window = {
+                        'action': action, 'anchor': message.get('anchor', self.anchor),
+                    }
+            return message
 
     def _control_loop(self):
         """串行显隐与模式切换；失焦只在没有窗口动作时检测。"""
@@ -279,6 +313,7 @@ class FlyoutManager:
             if self._closing:
                 return
             self._closing = True
+            self._requested_window = None
         threading.Thread(target=self._close, name='gui-close').start()
 
     def _close(self):

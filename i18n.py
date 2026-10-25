@@ -718,6 +718,10 @@ _TRANSLATIONS = {
         LANGUAGE_ZH_CN: '正在扫描...',
         LANGUAGE_EN_US: 'Scanning...',
     },
+    'tray.gui_recovery_failed': {
+        LANGUAGE_ZH_CN: '窗口自动恢复失败，可再次点击托盘重试。\n{error}',
+        LANGUAGE_EN_US: 'The window could not be restored. Click the tray icon to try again.\n{error}',
+    },
     'tray.no_device_or_sleep': {
         LANGUAGE_ZH_CN: '未发现设备或已休眠',
         LANGUAGE_EN_US: 'No active devices detected',

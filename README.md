@@ -192,9 +192,13 @@ Logitech 设备的电量读取可能会与 Logitech G HUB 争用 HID 接口。�
 
 ### 托盘弹窗闪一下就关闭，或提示 `BrowserProcessExited`？
 
-如果同时运行了 RivaTuner Statistics Server（RTSS，常与 MSI Afterburner 配合使用），可能是 RTSS 的图形注入与 WebView2 冲突。已定位的崩溃案例中，`RTSSHooks64.dll` 访问了已卸载的 `dxgi.dll` 内存，导致 WebView2 浏览器进程退出，随后电量监控弹窗关闭。这类冲突也可能在程序启动一段时间后才出现。
+托盘管理的窗口在启动、唤醒或显示期间遇到 WebView2 故障，会保留打开意图并自动重建一次；连续失败后通过托盘通知提示，可再次点击重试。隐藏闲置时发生故障只回收窗口进程，不主动打开窗口。缺少运行时等安装问题仍会显示相应指引。
 
-推荐在 RTSS 中为 **`msedgewebview2.exe`** 禁用注入：
+程序在创建 GUI 子进程前，为其单独设置进程级兼容声明 `RTSSHooksCompatibility=0`，并传递给它启动的 WebView2 子进程；直接运行 GUI 时也会在初始化前设置。该声明仅限本程序 GUI 的进程树，不改写系统环境变量或 RTSS 配置，不影响从桌面启动的其他应用和游戏。已在 RTSS 7.3.5.28314 上实测；其他版本及强制 Hooking 设置可能影响效果。
+
+如果同时运行了 RivaTuner Statistics Server（RTSS，常与 MSI Afterburner 配合使用），其图形 API Hook 是可排查的冲突来源，但仅凭 `BrowserProcessExited` 或 RTSS 正在运行，无法确认崩溃原因。若兼容声明后仍报错，请检查 RTSS 版本和配置中的 `ForceHooking=1`；不要将看到 `RTSSHooks64.dll` 已加载直接当作声明失效，系统仍可能加载它而不安装图形 API Hook。核查来源和本机验证结果见[开发说明](docs/dev/rtss-compatibility.md)。
+
+若要验证 RTSS 是否相关，可自行在 RTSS 中为 **`msedgewebview2.exe`** 禁用注入（会影响其他使用 WebView2 的应用）：
 
 1. 打开 RTSS，点击 **Add**，选择 WebView2 Runtime 的 `msedgewebview2.exe`。常见位置为 `C:\Program Files (x86)\Microsoft\EdgeWebView\Application\<版本号>\msedgewebview2.exe`，实际路径以本机安装位置为准。
 2. 选中刚添加的配置，将 **Application detection level** 设置为 **None**。仅关闭 **Show On-Screen Display** 不等于禁用注入。

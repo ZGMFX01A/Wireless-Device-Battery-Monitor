@@ -201,9 +201,13 @@ Check the following in order:
 
 ### The tray popup flashes and closes, or reports `BrowserProcessExited`
 
-If RivaTuner Statistics Server (RTSS, often used with MSI Afterburner) is running, its graphics injection may conflict with WebView2. In a diagnosed case, `RTSSHooks64.dll` accessed memory belonging to an unloaded `dxgi.dll`, causing the WebView2 browser process to exit and the battery monitor popup to close. The conflict may also appear some time after the app starts.
+If a tray-managed window encounters a WebView2 failure during startup, reopening, or display, the app preserves the open request and recreates the window once. Repeated failures produce a tray notification; click again to retry. Failures while the window is hidden only release its process. Installation problems, such as a missing runtime, still display their guidance.
 
-Disable injection for **`msedgewebview2.exe`** in RTSS:
+Before creating its GUI child process, the app sets `RTSSHooksCompatibility=0` in that child's environment, which is inherited by its WebView2 children. Direct GUI launches also set it before initialization. This declaration is scoped to the app's GUI process tree; it changes neither system environment variables nor RTSS profiles and does not affect other apps or games launched from the desktop. It was verified with RTSS 7.3.5.28314; behavior may vary with other versions or forced hooking settings.
+
+Graphics API hooking from RivaTuner Statistics Server (RTSS, often used with MSI Afterburner) is one possible conflict to investigate. Neither `BrowserProcessExited` nor the presence of RTSS confirms the cause. If errors persist, check the RTSS version and any `ForceHooking=1` setting. Seeing `RTSSHooks64.dll` loaded does not by itself mean the declaration failed: the system can still load it without installing graphics API hooks. See the [developer notes](docs/dev/rtss-compatibility.md) for sources and local verification.
+
+To check whether RTSS is involved, you can disable injection for **`msedgewebview2.exe`** in RTSS yourself (this also affects other WebView2 apps):
 
 1. Open RTSS, select **Add**, and choose the WebView2 Runtime's `msedgewebview2.exe`. A common location is `C:\Program Files (x86)\Microsoft\EdgeWebView\Application\<version>\msedgewebview2.exe`; use the actual installation path on your PC.
 2. Select the new profile and set **Application detection level** to **None**. Turning off **Show On-Screen Display** alone does not disable injection.

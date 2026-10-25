@@ -236,6 +236,7 @@ if __name__ == '__main__':
         'host_pid': os.getpid(),
         'creationflags': subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
         'allow_foreground': allow_gui_foreground,
+        'on_error': lambda detail: tray.notify_gui_error(detail),
     })
     atexit.register(_gui_controller.shutdown)
     tray = TrayApp(

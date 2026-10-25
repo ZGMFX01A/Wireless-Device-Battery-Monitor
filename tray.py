@@ -164,6 +164,12 @@ class TrayApp(TrayPresentation, TrayMenu):
         if self._tray:
             self._tray.stop()
 
+    def notify_gui_error(self, detail):
+        """恢复失败后用非模态通知报告，GUI 子进程已经释放。"""
+        if self._running and self._tray:
+            self._tray.notify(self._t('tray.gui_recovery_failed', error=detail),
+                              self._t('tray.app_name'))
+
     def stop(self):
         if self._stopping:
             return

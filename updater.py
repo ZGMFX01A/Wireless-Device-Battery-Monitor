@@ -12,6 +12,7 @@ import time
 import uuid
 from urllib.parse import unquote, urlparse
 from i18n import LANGUAGE_EN_US, LANGUAGE_ZH_CN
+from rtss_compat import restore_rtss_environment
 from update_network import (urlopen as _urlopen, read_chunk, close_response,
                             check_budget, UpdateCancelled)
 from update_transaction import (UpdateLease, cleanup_job, job_directory, write_atomic,
@@ -289,9 +290,11 @@ def download_and_install(download_url, on_progress=None, host_pid=None, expected
             script = _build_swap_powershell_script(exe_path, target, str(backup), str(staged), pid, size,
                 expected_sha256=sha256, token=token, semaphore_name=lease.name,
                 target_version=version, target_start_ticks=process_start_ticks(pid))
+            helper_environment = dict(os.environ)
+            restore_rtss_environment(helper_environment)
             child = subprocess.Popen(['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy',
                 'Bypass', '-EncodedCommand', _encode_powershell_command(script)],
-                creationflags=subprocess.CREATE_NO_WINDOW)
+                creationflags=subprocess.CREATE_NO_WINDOW, env=helper_environment)
             _wait_helper_ready(child, directory, token, cancel_event)
             check_budget(deadline, cancel_event)
             _notify_status(on_status, 'applying')
