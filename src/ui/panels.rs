@@ -90,7 +90,7 @@ impl Panel {
                             .font_weight(FontWeight::SEMIBOLD),
                     )
                     .child(
-                        txt(concat!("v", env!("CARGO_PKG_VERSION")), 11., k.dim())
+                        txt(concat!("v", env!("APP_VERSION")), 11., k.dim())
                             .px(px(6.))
                             .py(px(1.))
                             .rounded(px(8.))

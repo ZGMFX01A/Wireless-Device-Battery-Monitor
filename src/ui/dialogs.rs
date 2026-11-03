@@ -412,7 +412,7 @@ impl Panel {
                             Status::Error(e) => self.t("update.check_failed").replace("{msg}", e),
                             Status::Current => self
                                 .t("update.latest")
-                                .replace("{version}", env!("CARGO_PKG_VERSION")),
+                                .replace("{version}", env!("APP_VERSION")),
                             Status::Cancelled => self.t("update.cancelled").into(),
                             _ => self.tr("正在检查更新…", "Checking for updates…").into(),
                         };

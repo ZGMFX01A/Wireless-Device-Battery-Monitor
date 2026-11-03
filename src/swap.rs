@@ -52,9 +52,9 @@ fn signed(p: &Path) -> R<Manifest> {
     let m = validate(
         &e,
         KEY.ok_or("No trusted GPUI release key")?,
-        env!("CARGO_PKG_VERSION"),
+        env!("APP_VERSION"),
     )?;
-    if m.version == env!("CARGO_PKG_VERSION") {
+    if m.version == env!("APP_VERSION") {
         return Err("update must be newer".into());
     }
     Ok(m)

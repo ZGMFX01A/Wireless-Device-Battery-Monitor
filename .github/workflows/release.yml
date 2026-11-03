@@ -31,8 +31,10 @@ jobs:
             $releaseTag = "v0.1.3"
           }
 
+          $cleanVersion = $releaseTag -replace '^[vV]', ''
           "RELEASE_TAG=$releaseTag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "Resolved release tag: $releaseTag"
+          "APP_VERSION=$cleanVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Resolved release tag: $releaseTag (clean version: $cleanVersion)"
 
       # 检出 GUI 应用主仓库至当前 runner 的 mouse-battery 子目录
       - name: Checkout mouse-battery (GUI)
@@ -122,6 +124,8 @@ jobs:
       - name: Run Test Suite
         shell: pwsh
         working-directory: mouse-battery
+        env:
+          APP_VERSION: ${{ env.APP_VERSION }}
         run: |
           cargo test --verbose
 
@@ -129,11 +133,13 @@ jobs:
       - name: Build Release Binary
         shell: pwsh
         working-directory: mouse-battery
+        env:
+          APP_VERSION: ${{ env.APP_VERSION }}
         run: |
           cargo build --release --locked
 
-      # 执行二进制冒烟自检，防止打包损坏产物
-      - name: Smoke Test Release Executable
+      # 执行二进制冒烟自检与版本信息校验，防止打包损坏产物
+      - name: Smoke Test & Verify Release Executable
         shell: pwsh
         working-directory: mouse-battery
         run: |
@@ -144,6 +150,13 @@ jobs:
             throw "Executable smoke test failed with exit code $LASTEXITCODE"
           }
           Write-Host "Smoke test passed successfully."
+
+          # 校验 Windows PE 内部版本属性与 Tag 一致性
+          $info = (Get-Item $exe).VersionInfo
+          Write-Host "PE Version Info -> ProductVersion: $($info.ProductVersion), FileVersion: $($info.FileVersion)"
+          if ($info.ProductVersion -ne $env:APP_VERSION) {
+            Write-Host "::warning::Embedded ProductVersion ($($info.ProductVersion)) differs from APP_VERSION ($($env:APP_VERSION))"
+          }
 
       # 归档重命名二进制并计算 SHA-256 哈希
       - name: Prepare Release Artifacts

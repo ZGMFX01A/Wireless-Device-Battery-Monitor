@@ -204,8 +204,8 @@ impl Updates {
                         return Err("oversized manifest".into());
                     }
                     let env: Envelope = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
-                    let v = validate(&env, key, env!("CARGO_PKG_VERSION"))?;
-                    if v.version == env!("CARGO_PKG_VERSION") {
+                    let v = validate(&env, key, env!("APP_VERSION"))?;
+                    if v.version == env!("APP_VERSION") {
                         return Ok(Status::Current);
                     }
                     {
