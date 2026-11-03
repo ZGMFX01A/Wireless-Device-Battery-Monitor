@@ -1,6 +1,11 @@
 # 无线设备电量监控
 
-[![Rust](https://img.shields.io/badge/Rust-1.85%2B-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)[![GUI Framework](https://img.shields.io/badge/GUI-GPUI%20(Direct3D)-black?logo=windows&logoColor=white)](https://github.com/zed-industries/zed)[![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)](https://www.microsoft.com/windows)[![Latest Release](https://img.shields.io/github/v/release/ZGMFX01A/mouse-battery?display_name=tag&sort=semver)](https://github.com/ZGMFX01A/mouse-battery/releases)[![Downloads](https://img.shields.io/github/downloads/ZGMFX01A/Wireless-Device-Battery-Monitor/total?label=Downloads&logo=github)](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/releases)[![License](https://img.shields.io/badge/License-Non--Commercial-orange)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-1.85%2B-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![GUI Framework](https://img.shields.io/badge/GUI-GPUI%20(Direct3D)-black?logo=windows&logoColor=white)](https://github.com/zed-industries/zed)
+[![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
+[![Latest Release](https://img.shields.io/github/v/release/ZGMFX01A/mouse-battery?display_name=tag&sort=semver)](https://github.com/ZGMFX01A/mouse-battery/releases)
+[![Downloads](https://img.shields.io/github/downloads/ZGMFX01A/Wireless-Device-Battery-Monitor/total?label=Downloads&logo=github)](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/releases)
+[![License](https://img.shields.io/badge/License-Non--Commercial-orange)](LICENSE)
 
 
 **把鼠标、键盘和蓝牙设备的电量，放在任务栏的一角。**

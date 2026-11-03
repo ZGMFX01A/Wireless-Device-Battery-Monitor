@@ -1,6 +1,6 @@
 [package]
 name = "mouse-battery-gpui"
-version = "0.1.3"
+version = "2.9.0"
 edition = "2024"
 [dependencies]
 battery-protocol = {path="../mouse-battery-core"}
