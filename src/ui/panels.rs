@@ -795,18 +795,9 @@ impl Render for Panel {
             .font_family("Segoe UI")
             .text_color(k.text())
             .text_size(px(13.))
+            // Fill the native rounded window. A second rounded, outlined root exposes
+            // the acrylic behind its corners as a separate gray frame.
             .bg(k.window())
-            .border_1()
-            .border_color(if k.dark {
-                rgba(0xffffff29)
-            } else {
-                rgba(0xfffffff2)
-            })
-            .rounded(px(if self.mode == Mode::Settings {
-                12.
-            } else {
-                16.
-            }))
             .overflow_hidden()
             .child(self.header(k, cx))
             .child(
