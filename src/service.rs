@@ -101,7 +101,7 @@ struct Slot {
     row: Row,
     fail: u32,
     due: u64,
-    probes: Vec<u64>,
+    interval_ms: u64,
     rebaseline: bool,
 }
 impl Slot {
@@ -116,8 +116,14 @@ impl Slot {
             },
             fail: 0,
             due: t,
-            probes: vec![t + 1000, t + 3000, t + 5000],
+            interval_ms: DEFAULT_POLL_INTERVAL_SECS * 1000,
             rebaseline: true,
+        }
+    }
+    fn set_interval(&mut self, interval_ms: u64, now: u64) {
+        if self.interval_ms != interval_ms {
+            self.interval_ms = interval_ms;
+            self.due = now;
         }
     }
     fn apply(&mut self, r: Result<Reading, String>, t: u64, manual: bool) {
@@ -153,15 +159,7 @@ impl Slot {
                 self.row.sampled = stamp();
                 self.row.error = None;
                 self.fail = 0;
-                self.probes.clear();
-                self.due = t + if self.row.device.kind == Kind::Mouse
-                    && r.charge == Charge::Charging
-                    && r.raw != 100
-                {
-                    30000
-                } else {
-                    60000
-                }
+                self.due = t + self.interval_ms;
             }
             Err(e) => {
                 self.rebaseline = true;
@@ -176,17 +174,44 @@ impl Slot {
     }
     fn retry(&mut self, t: u64) {
         self.fail = self.fail.saturating_add(1);
-        self.probes.retain(|x| *x > t);
-        self.due = if self.probes.is_empty() {
-            t + (60000u64 << self.fail.saturating_sub(1).min(3)).min(300000)
-        } else {
-            self.probes.remove(0)
-        };
+        // Offline devices stay in the same polling cycle as online devices.
+        self.due = t + self.interval_ms;
     }
 }
 enum Target {
     H(hid::Target, Option<hid::Session>),
     B(bluetooth::BtTarget),
+}
+fn next_poll(slots: &HashMap<String, Slot>, discovery: Option<u64>, now: u64) -> u64 {
+    slots
+        .values()
+        .map(|s| s.due)
+        .chain(discovery)
+        .min()
+        .unwrap_or(now + 3_600_000)
+}
+fn missing_devices<'a>(
+    prefs: &Prefs,
+    devices: impl Iterator<Item = &'a Descriptor> + Clone,
+    bt: bool,
+) -> (bool, bool) {
+    if bt {
+        return (
+            prefs.bluetooth.iter().any(|id| {
+                !devices
+                    .clone()
+                    .any(|d| d.kind == Kind::Bluetooth && d.id == *id)
+            }),
+            false,
+        );
+    }
+    let mouse = !devices.clone().any(|d| d.kind == Kind::Mouse);
+    let keyboard = prefs.keyboard.as_ref().is_some_and(|id| {
+        !devices
+            .clone()
+            .any(|d| d.kind == Kind::Keyboard && d.id == *id)
+    });
+    (mouse, keyboard)
 }
 fn restore_keyboard<T>(
     id: Option<&str>,
@@ -306,6 +331,8 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
     let mut failed_reopens = std::collections::HashSet::new();
     let mut last_fallback = None::<u64>;
     let mut first = true;
+    let mut interval_ms = state.lock().unwrap().prefs.poll_ms();
+    let mut discovery_at = interval_ms;
     loop {
         let mut flags = signal.take(delay);
         if flags & STOP != 0 {
@@ -328,7 +355,6 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 slot.rebaseline = true;
                 slot.fail = 0;
                 slot.due = t + 1000;
-                slot.probes = vec![t + 3000, t + 5000];
                 slot.row.held = false;
                 slot.row.error = Some("等待唤醒后读数 / Resuming".into());
             }
@@ -369,6 +395,15 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             delay = Duration::from_secs(3600);
             continue;
         }
+        let new_interval = state.lock().unwrap().prefs.poll_ms();
+        if interval_ms != new_interval {
+            interval_ms = new_interval;
+            let now = clock();
+            for slot in slots.values_mut() {
+                slot.set_interval(interval_ms, now);
+            }
+            discovery_at = now;
+        }
         if first {
             if !bt || !state.lock().unwrap().prefs.bluetooth.is_empty() {
                 flags |= SCAN
@@ -387,6 +422,20 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
         };
         if job.as_ref().is_some_and(|j| j.bind.is_none()) {
             flags |= SCAN;
+        }
+        let mut recover_keyboard = false;
+        if clock() >= discovery_at {
+            let missing = missing_devices(
+                &state.lock().unwrap().prefs,
+                devices.iter().map(Target::data),
+                bt,
+            );
+            if missing.0 && flags & SCAN == 0 {
+                recover_only = true;
+                flags |= SCAN;
+            }
+            recover_keyboard = missing.1;
+            discovery_at = clock() + interval_ms;
         }
         if flags & SCAN != 0 {
             let mut warnings = Vec::new();
@@ -416,14 +465,10 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                                 }
                             })
                             .collect();
-                        // A transient empty enumeration must not discard the last known
-                        // failed path (otherwise it could never be retried without USB events).
+                        // Recovery enumeration can be incomplete during login. Keep
+                        // existing paths, including healthy devices omitted by this scan.
                         for old_device in old {
-                            if slots
-                                .get(&old_device.data().id)
-                                .is_some_and(|s| s.fail >= 3)
-                                && !devices.iter().any(|d| d.data().id == old_device.data().id)
-                            {
+                            if !devices.iter().any(|d| d.data().id == old_device.data().id) {
                                 devices.push(old_device);
                             }
                         }
@@ -478,6 +523,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                     state.lock().unwrap().note = e;
                 }
             }
+            discovery_at = clock() + interval_ms;
             if let Some(j) = job.as_ref().filter(|j| j.bind.is_none()) {
                 state.lock().unwrap().finish(j, scan_result);
             }
@@ -502,6 +548,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 let slot = slots
                     .entry(id.clone())
                     .or_insert_with(|| Slot::new(t.data().clone(), clock()));
+                slot.set_interval(interval_ms, clock());
                 slot.apply(Ok(sample), clock(), true);
                 Ok(())
             })();
@@ -511,7 +558,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
         let prefs = state.lock().unwrap().prefs.clone();
         recover_only = false;
         let force = flags & REFRESH != 0;
-        if force
+        if (force || recover_keyboard)
             && !bt
             && let Err(e) = restore_keyboard(
                 prefs.keyboard.as_deref(),
@@ -523,7 +570,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             manual_err = Some(e.clone());
             state.lock().unwrap().note = e;
         }
-        let mut changed = flags != 0;
+        let mut changed = flags != 0 || recover_keyboard;
         let due_at = clock();
         let batch = bt.then(|| {
             bluetooth::ReadBatch::prepare(devices.iter().filter_map(|d| match d {
@@ -546,6 +593,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             let slot = slots
                 .entry(d.id.clone())
                 .or_insert_with(|| Slot::new(d, due_at));
+            slot.set_interval(interval_ms, due_at);
             if !force && slot.due > due_at {
                 continue;
             }
@@ -577,8 +625,6 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 recovered.insert(key.clone(), now);
                 if t.reopen_one() {
                     slot.rebaseline = true;
-                    slot.due = now + 1000;
-                    slot.probes = vec![now + 3000, now + 5000];
                     failed_reopens.remove(&key);
                 } else {
                     failed_reopens.insert(key);
@@ -607,11 +653,9 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             drop(st);
             wake();
         }
-        let next = slots
-            .values()
-            .map(|s| s.due)
-            .min()
-            .unwrap_or(clock() + 3600000);
+        let missing = missing_devices(&prefs, devices.iter().map(Target::data), bt);
+        let discovery = (missing.0 || missing.1).then_some(discovery_at);
+        let next = next_poll(&slots, discovery, clock());
         delay = Duration::from_millis(next.saturating_sub(clock()).max(25));
     }
 }
@@ -786,13 +830,117 @@ mod tests {
         )
     }
     #[test]
-    fn retry() {
+    fn offline_retries_keep_the_configured_interval() {
         let mut s = slot();
-        for (t, want) in [(0, 1000), (1000, 3000), (3100, 5000), (6600, 306600)] {
+        for (t, want) in [(0, 30000), (30000, 60000), (60000, 90000), (90000, 120000)] {
             s.apply(Err("offline".into()), t, false);
             assert_eq!(s.due, want);
             assert_eq!(s.row.sampled, 0)
         }
+    }
+    #[test]
+    fn startup_without_targets_retries_discovery_before_hour_long_idle() {
+        assert_eq!(next_poll(&HashMap::new(), Some(15_000), 0), 15_000);
+    }
+    #[test]
+    fn missing_keyboard_discovery_is_not_delayed_by_healthy_mouse() {
+        let mut mouse = slot();
+        mouse.due = 60_000;
+        let slots = HashMap::from([("a".into(), mouse)]);
+        assert_eq!(next_poll(&slots, Some(15_000), 0), 15_000);
+    }
+    #[test]
+    fn offline_target_is_retried_within_thirty_seconds() {
+        let mut mouse = slot();
+        for t in [0, 1000, 3000, 5000, 35_000, 65_000] {
+            mouse.apply(Err("receiver not ready at login".into()), t, false);
+            assert!(
+                mouse.due <= t + 30_000,
+                "retry delayed until {} after failure at {t}",
+                mouse.due
+            );
+        }
+    }
+    #[test]
+    fn every_device_polls_online_and_offline_at_each_supported_interval() {
+        for kind in [Kind::Mouse, Kind::Keyboard, Kind::Bluetooth] {
+            for seconds in POLL_INTERVALS {
+                let mut s = slot();
+                s.row.device.kind = kind;
+                s.set_interval(seconds * 1000, 0);
+                for i in 0..12 {
+                    let now = i * seconds * 1000;
+                    s.apply(Err("offline".into()), now, false);
+                    assert_eq!(s.due, now + seconds * 1000);
+                }
+                let now = s.due;
+                s.apply(
+                    Ok(
+                        Reading::new(73, Charge::Discharging, battery_protocol::Source::Razer)
+                            .unwrap(),
+                    ),
+                    now,
+                    false,
+                );
+                assert_eq!(s.due, now + seconds * 1000);
+                assert!(s.row.error.is_none());
+                assert_eq!(s.row.battery.unwrap().raw, 73);
+            }
+        }
+    }
+    #[test]
+    fn changing_interval_wakes_existing_slots_immediately() {
+        let mut s = slot();
+        s.set_interval(300_000, 0);
+        s.apply(Err("offline".into()), 0, false);
+        assert_eq!(s.due, 300_000);
+        s.set_interval(5000, 1000);
+        assert_eq!(s.due, 1000);
+        s.apply(Err("offline".into()), 1000, false);
+        assert_eq!(s.due, 6000);
+        s.set_interval(5000, 2000);
+        assert_eq!(
+            s.due, 6000,
+            "unrelated preference updates must not trigger extra reads"
+        );
+    }
+    #[test]
+    fn missing_devices_are_retried_without_losing_healthy_peers() {
+        let mut state = State::demo();
+        let mut devices = vec![state.rows[0].device.clone()];
+        assert_eq!(
+            missing_devices(&state.prefs, devices.iter(), false),
+            (false, true)
+        );
+        restore_keyboard(
+            state.prefs.keyboard.as_deref(),
+            &mut devices,
+            |d| d,
+            |_| Ok(Some(state.rows[1].device.clone())),
+        )
+        .unwrap();
+        assert_eq!(
+            missing_devices(&state.prefs, devices.iter(), false),
+            (false, false)
+        );
+        assert_eq!(
+            missing_devices(&state.prefs, std::iter::empty(), false),
+            (true, true)
+        );
+        state.prefs.keyboard = None;
+        assert_eq!(
+            missing_devices(&state.prefs, devices[1..].iter(), false),
+            (false, false)
+        );
+        assert_eq!(
+            missing_devices(&state.prefs, devices.iter(), true),
+            (false, false)
+        );
+        state.prefs.bluetooth.insert("missing-headset".into());
+        assert_eq!(
+            missing_devices(&state.prefs, devices.iter(), true),
+            (true, false)
+        );
     }
     #[test]
     fn refresh_restores_bound_keyboard_absent_from_initial_scan() {
@@ -916,7 +1064,7 @@ mod tests {
             30000,
             false,
         );
-        assert_eq!(s.due, 90000)
+        assert_eq!(s.due, 60000)
     }
     #[test]
     fn demo_never_starts_hardware() {
@@ -980,13 +1128,13 @@ mod audit_power {
         }
     }
     #[test]
-    fn charging_pad_bit_selects_slow_poll_even_at_half_capacity() {
+    fn charging_pad_states_follow_the_configured_interval() {
         let mut state = State::demo();
         let mut s = Slot::new(state.rows.remove(0).device, 0);
         for (flags, t, due) in [
             (0x80, 0, 30_000),
-            (0x81, 30_000, 90_000),
-            (1, 90_000, 150_000),
+            (0x81, 30_000, 60_000),
+            (1, 60_000, 90_000),
         ] {
             s.apply(
                 Ok(battery_protocol::codec::hidpp_reading(0x1001, &[0x0e, 0xe3, flags]).unwrap()),
@@ -1041,7 +1189,7 @@ mod publication_tests {
                 row,
                 fail: 0,
                 due: 60000,
-                probes: vec![],
+                interval_ms: 30_000,
                 rebaseline: false,
             },
         );

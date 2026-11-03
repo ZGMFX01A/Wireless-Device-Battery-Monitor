@@ -684,6 +684,28 @@ impl Panel {
         ] {
             group = group.child(self.group(key, k, false, self.switch(key, on, cmd, k, cx)))
         }
+        group = group.child(
+            self.group(
+                "poll_interval",
+                k,
+                false,
+                self.step(
+                    "poll-interval",
+                    format!("{} {}", p.poll_interval_secs, self.t("settings.seconds")),
+                    POLL_INTERVALS
+                        .into_iter()
+                        .rev()
+                        .find(|v| *v < p.poll_interval_secs)
+                        .map(Command::SetPollInterval),
+                    POLL_INTERVALS
+                        .into_iter()
+                        .find(|v| *v > p.poll_interval_secs)
+                        .map(Command::SetPollInterval),
+                    k,
+                    cx,
+                ),
+            ),
+        );
         let themes = [
             ("auto", Theme::Auto),
             ("light", Theme::Light),

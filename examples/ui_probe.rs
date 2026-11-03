@@ -365,11 +365,19 @@ fn glass(exe: &Path, out: &Path) -> Result<Value> {
 }
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    require(args.len() == 2, "usage: ui_probe EXE EVIDENCE_DIR")?;
+    let controls_only = args.get(2).is_some_and(|v| v == "--controls");
+    require(
+        args.len() == 2 || (args.len() == 3 && controls_only),
+        "usage: ui_probe EXE EVIDENCE_DIR [--controls]",
+    )?;
     let exe = Path::new(&args[0]).canonicalize()?;
     let out = PathBuf::from(&args[1]);
     fs::create_dir_all(&out)?;
     dpi_aware();
+    if controls_only {
+        println!("{}", controls::run(&exe, &out)?);
+        return Ok(());
+    }
     let mut result = json!({"ok":false,"hardware":false});
     let tested = (|| {
         eprintln!("window reuse");

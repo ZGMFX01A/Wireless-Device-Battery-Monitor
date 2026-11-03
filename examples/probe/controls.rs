@@ -19,6 +19,30 @@ pub fn run(exe: &Path, out: &Path) -> Result<Value> {
         a.photo("Priority-dropdown")?;
         a.exact(421., 434., json!({"SetPriority":"Lowest"}))?;
         passed.push("priority dropdown");
+        native::wheel(a.hwnd, -120, 1)?;
+        a.exact(479., 627., json!({"SetPollInterval":60}))?;
+        a.state["prefs"]["poll_interval_secs"] = json!(60);
+        a.update()?;
+        a.exact(416., 627., json!({"SetPollInterval":30}))?;
+        a.state["prefs"]["poll_interval_secs"] = json!(5);
+        a.update()?;
+        a.click(416., 627.)?;
+        require(
+            a.p.lines.try_recv().is_err(),
+            "poll interval decreased below minimum",
+        )?;
+        a.state["prefs"]["poll_interval_secs"] = json!(300);
+        a.update()?;
+        a.click(479., 627.)?;
+        require(
+            a.p.lines.try_recv().is_err(),
+            "poll interval exceeded maximum",
+        )?;
+        a.state["prefs"]["poll_interval_secs"] = json!(30);
+        a.update()?;
+        a.photo("Polling-control")?;
+        passed.push("poll interval buttons and limits");
+        native::wheel(a.hwnd, 360, 9)?;
         a.open("Flyout")?;
         a.click(53., 76.)?;
         let v = a.p.json(|v| v.get("Sync").is_some())?;

@@ -5,6 +5,8 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
 };
+pub const POLL_INTERVALS: [u64; 7] = [5, 10, 15, 30, 60, 120, 300];
+pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 30;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum Priority {
     #[default]
@@ -44,6 +46,7 @@ pub struct Prefs {
     pub glass: u8,
     pub auto_update: bool,
     pub low: u8,
+    pub poll_interval_secs: u64,
     pub keyboard: Option<String>,
     pub bluetooth: BTreeSet<String>,
     pub aliases: BTreeMap<String, String>,
@@ -60,6 +63,7 @@ impl Default for Prefs {
             glass: 25,
             auto_update: false,
             low: 20,
+            poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             keyboard: None,
             bluetooth: Default::default(),
             aliases: Default::default(),
@@ -69,6 +73,13 @@ impl Default for Prefs {
     }
 }
 impl Prefs {
+    pub fn poll_ms(&self) -> u64 {
+        if POLL_INTERVALS.contains(&self.poll_interval_secs) {
+            self.poll_interval_secs * 1000
+        } else {
+            DEFAULT_POLL_INTERVAL_SECS * 1000
+        }
+    }
     pub fn bound(&self, d: &Descriptor) -> bool {
         match d.kind {
             Kind::Mouse => true,
@@ -274,7 +285,10 @@ impl Prefs {
             Ok(b) => {
                 let v: Self =
                     serde_json::from_slice(&b).map_err(|e| format!("Invalid preferences: {e}"))?;
-                if v.glass > 100 || ![0, 10, 20, 30].contains(&v.low) {
+                if v.glass > 100
+                    || ![0, 10, 20, 30].contains(&v.low)
+                    || !POLL_INTERVALS.contains(&v.poll_interval_secs)
+                {
                     return Err("invalid preference range".into());
                 }
                 Ok(v)
@@ -546,6 +560,7 @@ pub enum Command {
     SetTheme(Theme),
     SetPriority(Priority),
     SetLow(u8),
+    SetPollInterval(u64),
     DeviceRequest(DeviceJob),
     ImportAppearance,
     Low,
@@ -577,6 +592,9 @@ impl Prefs {
             Command::SetTheme(v) => self.theme = v.clone(),
             Command::SetPriority(v) => self.priority = v.clone(),
             Command::SetLow(v) if [0, 10, 20, 30].contains(v) => self.low = *v,
+            Command::SetPollInterval(v) if POLL_INTERVALS.contains(v) => {
+                self.poll_interval_secs = *v
+            }
             Command::SetStyle(v) => self.style = v.clone(),
             Command::AutoUpdate => self.auto_update = !self.auto_update,
             Command::Glass(x) => self.glass = (self.glass as i16 + *x as i16).clamp(0, 100) as u8,
@@ -682,6 +700,46 @@ mod tests {
         assert_eq!(Prefs::load(&path).unwrap().glass, 35);
         std::fs::write(&path, "broken").unwrap();
         assert!(Prefs::load(&path).is_err());
+    }
+    #[test]
+    fn legacy_preferences_default_to_thirty_second_polling() {
+        let prefs: Prefs = serde_json::from_str(r#"{"low":20,"glass":25}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(prefs).unwrap()["poll_interval_secs"],
+            30
+        );
+    }
+    #[test]
+    fn polling_interval_is_persisted_and_invalid_values_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        for seconds in [5, 10, 15, 30, 60, 120, 300] {
+            std::fs::write(&path, format!(r#"{{"poll_interval_secs":{seconds}}}"#)).unwrap();
+            let prefs = Prefs::load(&path).unwrap();
+            prefs.save(&path).unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved["poll_interval_secs"], seconds);
+        }
+        for seconds in [0, 1, 301, 3600] {
+            std::fs::write(&path, format!(r#"{{"poll_interval_secs":{seconds}}}"#)).unwrap();
+            assert!(Prefs::load(&path).is_err());
+        }
+    }
+    #[test]
+    fn polling_command_validates_before_changing_preferences() {
+        let mut prefs = Prefs::default();
+        for seconds in POLL_INTERVALS {
+            let command: Command =
+                serde_json::from_value(serde_json::json!({"SetPollInterval":seconds})).unwrap();
+            assert!(prefs.change(&command, &[]));
+            assert_eq!(prefs.poll_ms(), seconds * 1000);
+        }
+        for seconds in [0, 1, 301, u64::MAX] {
+            let old = prefs.clone();
+            assert!(!prefs.change(&Command::SetPollInterval(seconds), &[]));
+            assert_eq!(prefs, old);
+        }
     }
     #[test]
     fn refuse_unknown() {

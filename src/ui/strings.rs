@@ -9,6 +9,12 @@ pub fn label(en: bool, key: &str) -> &'static str {
         "settings.glass.less" => ("降低通透度", "Less transparent"),
         "settings.glass.more" => ("提高通透度", "More transparent"),
         "settings.auto_refresh.title" => ("自动刷新", "Auto Refresh"),
+        "settings.poll_interval.title" => ("电量轮询间隔", "Battery Poll Interval"),
+        "settings.poll_interval.subtitle" => (
+            "在线、离线设备均按此间隔尝试读取",
+            "Check online and offline devices at this interval",
+        ),
+        "settings.seconds" => ("秒", "s"),
         "settings.auto_refresh.subtitle" => (
             "仅控制此窗口的电量状态同步",
             "Synchronize battery status in this window",
