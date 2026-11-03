@@ -167,10 +167,9 @@ impl Slot {
                 self.rebaseline = true;
                 self.row.error = Some(e);
                 self.row.held = false;
-                // Do not publish a cached Bluetooth percentage as a current HFP/GATT value.
-                if self.row.device.kind == Kind::Bluetooth {
-                    self.row.battery = None;
-                }
+                // No fresh device response means offline/unknown, never a
+                // current percentage (or a cached zero) for any transport.
+                self.row.battery = None;
                 self.retry(t);
             }
         }
@@ -188,6 +187,31 @@ impl Slot {
 enum Target {
     H(hid::Target, Option<hid::Session>),
     B(bluetooth::BtTarget),
+}
+fn restore_keyboard<T>(
+    id: Option<&str>,
+    devices: &mut Vec<T>,
+    info: impl Fn(&T) -> &Descriptor,
+    discover: impl FnOnce(&str) -> Result<Option<T>, String>,
+) -> Result<(), String> {
+    let Some(id) = id else {
+        return Ok(());
+    };
+    if devices
+        .iter()
+        .any(|t| info(t).id == id && info(t).kind == Kind::Keyboard)
+    {
+        return Ok(());
+    }
+    let target = discover(id)?
+        .ok_or("键盘休眠或未连接；请唤醒后重试 / Keyboard not responding; wake it and retry")?;
+    if info(&target).id != id || info(&target).kind != Kind::Keyboard {
+        return Err("Keyboard identity changed; refresh did not change the binding".into());
+    }
+    // Scoped discovery has just queried this keyboard. Poll it before other
+    // HID targets as well, rather than waiting behind unrelated mouse reads.
+    devices.insert(0, target);
+    Ok(())
 }
 impl Target {
     fn data(&self) -> &Descriptor {
@@ -487,6 +511,18 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
         let prefs = state.lock().unwrap().prefs.clone();
         recover_only = false;
         let force = flags & REFRESH != 0;
+        if force
+            && !bt
+            && let Err(e) = restore_keyboard(
+                prefs.keyboard.as_deref(),
+                &mut devices,
+                Target::data,
+                |id| hid::rediscover(id).map(|t| t.map(|t| Target::H(t, None))),
+            )
+        {
+            manual_err = Some(e.clone());
+            state.lock().unwrap().note = e;
+        }
         let mut changed = flags != 0;
         let due_at = clock();
         let batch = bt.then(|| {
@@ -757,6 +793,114 @@ mod tests {
             assert_eq!(s.due, want);
             assert_eq!(s.row.sampled, 0)
         }
+    }
+    #[test]
+    fn refresh_restores_bound_keyboard_absent_from_initial_scan() {
+        let state = State::demo();
+        let keyboard = state.rows[1].device.clone();
+        let mut devices = vec![state.rows[0].device.clone()];
+        let mut requested = None;
+        restore_keyboard(
+            state.prefs.keyboard.as_deref(),
+            &mut devices,
+            |d| d,
+            |id| {
+                requested = Some(id.to_owned());
+                Ok(Some(keyboard.clone()))
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            requested.as_deref(),
+            state.prefs.keyboard.as_deref(),
+            "refresh must query the bound keyboard even when it was asleep during discovery"
+        );
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0], keyboard);
+        assert_eq!(devices[1], state.rows[0].device);
+    }
+
+    #[test]
+    fn refresh_does_not_probe_unbound_or_already_known_keyboard() {
+        let state = State::demo();
+        let mut devices = state
+            .rows
+            .iter()
+            .map(|r| r.device.clone())
+            .collect::<Vec<_>>();
+        restore_keyboard(
+            None,
+            &mut devices,
+            |d| d,
+            |_| panic!("no binding to recover"),
+        )
+        .unwrap();
+        restore_keyboard(
+            state.prefs.keyboard.as_deref(),
+            &mut devices,
+            |d| d,
+            |_| panic!("known keyboard is read in the normal forced pass"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn refresh_reports_missing_keyboard_and_rejects_other_identities() {
+        let state = State::demo();
+        let original = vec![state.rows[0].device.clone()];
+        for result in [
+            Ok(None),
+            Err("discovery failed".to_owned()),
+            Ok(Some(state.rows[0].device.clone())),
+        ] {
+            let mut devices = original.clone();
+            assert!(
+                restore_keyboard(
+                    state.prefs.keyboard.as_deref(),
+                    &mut devices,
+                    |d| d,
+                    |_| result
+                )
+                .is_err()
+            );
+            assert_eq!(devices, original);
+        }
+    }
+    #[test]
+    fn sleeping_keyboard_switches_tray_to_remaining_mouse() {
+        let mut state = State::demo();
+        state.prefs.priority = Priority::Lowest;
+        state.rows[0].battery.as_mut().unwrap().raw = 49;
+        state.rows[0].battery.as_mut().unwrap().display = 49;
+        let mut keyboard = Slot::new(state.rows[1].device.clone(), 0);
+        keyboard.apply(
+            Ok(Reading::new(35, Charge::Discharging, battery_protocol::Source::Weikav).unwrap()),
+            0,
+            false,
+        );
+        state.rows[1] = keyboard.row.clone();
+        assert_eq!(state.selected().unwrap().device.kind, Kind::Keyboard);
+        keyboard.apply(Err("no keyboard response".into()), 60_000, false);
+        state.rows[1] = keyboard.row.clone();
+        assert_eq!(state.selected().unwrap().battery.unwrap().display, 49);
+        assert!(state.rows[1].error.is_some());
+        assert!(state.rows[1].battery.is_none());
+        keyboard.apply(
+            Ok(Reading::new(73, Charge::Discharging, battery_protocol::Source::Weikav).unwrap()),
+            61_000,
+            false,
+        );
+        state.rows[1] = keyboard.row;
+        assert!(state.rows[1].error.is_none());
+        state.prefs.priority = Priority::Keyboard;
+        assert_eq!(state.selected().unwrap().battery.unwrap().display, 73);
+        state.rows[1].battery =
+            Reading::new(0, Charge::Discharging, battery_protocol::Source::Weikav);
+        assert_eq!(
+            state.selected().unwrap().battery.unwrap().display,
+            0,
+            "a genuine online 0% is still valid"
+        );
     }
     #[test]
     fn stable() {
