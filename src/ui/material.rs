@@ -70,10 +70,11 @@ pub fn apply(w: HWND, dark: bool) -> i32 {
     }
     let _ = set(w, 33, 2);
     let _ = set(w, 20, i32::from(dark));
-    // The panel paints its own rounded outline. Suppress the second, outer DWM border:
-    // DWMWA_BORDER_COLOR = 34, DWMWA_COLOR_NONE = 0xfffffffe.
+    // The root fills the client area without its own outline or corner mask. Keep one
+    // native hairline to finish the window edge, including the system-rounded corners.
+    // DWMWA_BORDER_COLOR = 34, DWMWA_COLOR_DEFAULT = 0xffffffff.
     // Older Windows may reject this attribute without affecting the acrylic fallback.
-    let _ = set(w, 34, 0xffff_fffe_u32 as i32);
+    let _ = set(w, 34, 0xffff_ffff_u32 as i32);
     let r = set(w, 38, 3);
     if r >= 0 {
         if clear_legacy_accent(w) {
