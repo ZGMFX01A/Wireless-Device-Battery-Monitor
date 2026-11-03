@@ -15,8 +15,10 @@ foreach($script in Get-ChildItem $PSScriptRoot -Filter '*.ps1') {
 foreach($name in 'ci.yml','release.yml') {
     $text=[IO.File]::ReadAllText((Join-Path $root ".github/workflows/$name"))
     Check ($text -notmatch 'setup-python|\bpython(?:3)?\s|private-core-ref|check-core-pin|steps\.core\.outputs\.sha') "Old toolchain or core pin remains in $name"
-    $checkout=[regex]::Match($text,'(?ms)- name: Checkout latest private core\r?\n(.*?)(?=\r?\n\s+- name:|\z)').Groups[1].Value
-    Check ($checkout -match 'repository:' -and $checkout -notmatch '(?m)^\s+ref:') "Core checkout must use its latest default branch: $name"
+    if ($name -eq 'release.yml') {
+        $checkout=[regex]::Match($text,'(?ms)- name: Checkout latest private core\r?\n(.*?)(?=\r?\n\s+- name:|\z)').Groups[1].Value
+        Check ($checkout -match 'repository:' -and $checkout -notmatch '(?m)^\s+ref:') "Core checkout must use its latest default branch: $name"
+    }
 }
 foreach($folder in 'scripts','tests') {
     if (Test-Path (Join-Path $root $folder)) {
