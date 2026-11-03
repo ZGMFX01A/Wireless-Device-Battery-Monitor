@@ -23,9 +23,7 @@
 
 ---
 
-## 产品实机截图与效果对照
-
-### 1. 原生 GPUI 设备浮窗与设置中心
+## 实机截图
 
 | 深色模式（原生 GPUI 浮窗 380×540） | 浅色模式（原生 GPUI 浮窗 380×540） |
 | :---: | :---: |
@@ -34,12 +32,6 @@
 | 深色模式设置与多设备管理（540×680） | 浅色模式设置与设备发现（540×680） |
 | :---: | :---: |
 | ![深色设置页](assets/preview-dark-settings.png) | ![浅色设置页](assets/preview-light-settings.png) |
-
-### 2. 原版 Web 前端 vs GPUI 原生窗口 1:1 对照
-
-> 下图采集自实机测试套件（`验收对照.html`）：左侧为基于 HTML/CSS/WebView2 的原版界面，右侧为重构后纯 Rust GPUI 原生窗口。不仅 100% 严谨还原了排版间距与视觉规范，更带来了 Direct3D 硬件加速与毫秒级即时动画。
-
-![原版与 GPUI 对照图](assets/compare-dark-flyout.png)
 
 ---
 
@@ -105,54 +97,6 @@
 - **自定义别名与多设备管理**：点击卡片铅笔按钮可自定义设备名称，别名将自动同步至托盘菜单、提示文案与低电量提醒。
 - **分级低电量桌面通知**：支持 10%、20%、30% 多档阈值提醒，智能过滤初始化 0% 虚假读数，杜绝骚扰。
 - **开机自启与免安装便携**：基于 Windows 注册表原生自启机制，单文件绿色免安装，解压即用。
-
----
-
-## 仓库架构与协同开发指南
-
-本项目采用 **双仓协同与 Workspace 分离架构**：
-- **`mouse-battery`**（当前仓库）：负责 Windows 原生 GUI 渲染、系统托盘管理、IPC 管道通讯与发布流水线。
-- **`mouse-battery-core`**（私有协议核心库）：负责底层 HID 原始报文通信、WinRT 蓝牙驱动栈抽象与各品牌解密/CRC 算法实现。
-
-```text
-mouse-project-root/
-├── mouse-battery/          # [当前仓库] GPUI 原生托盘主程序
-│   ├── Cargo.toml
-│   ├── src/                # GPUI 视图、托盘宿主、Win32 状态机
-│   ├── assets/             # 矢量图标、实机截图与 Win32 原生资源清单
-│   └── private-core-ref.json # 私有核心库引用与 CI 检出配置
-├── mouse-battery-core/     # [核心仓库] 底层通信协议解析库 (battery-protocol)
-│   ├── Cargo.toml
-│   └── src/                # HID++、Razer、ROG、Weikav、BLE 解码器
-├── Cargo.toml              # 根目录 Cargo Workspace (方便联合构建)
-└── Cargo.lock              # 依赖精确锁定文件
-```
-
-### 1. 本地从源码构建
-
-开发建议将两个仓库克隆至**同级目录**，通过根目录 Cargo Workspace 统一构建：
-
-```powershell
-# 1. 递归克隆或分别克隆至平级目录
-git clone https://github.com/ZGMFX01A/mouse-battery.git
-git clone https://github.com/ZGMFX01A/mouse-battery-core.git
-
-# 2. 进入主应用目录运行单元与回归测试 (60 项测试)
-cd mouse-battery
-cargo test
-
-# 3. 编译高度优化的单文件 Release 版本
-cargo build --release --locked
-
-# 4. 执行二进制冒烟验证
-.\target\release\mouse-battery-gpui.exe --smoke-test
-```
-
-### 2. GitHub Actions 远程自动打包流水线
-
-项目已内置完整的 CI/CD 自动化打包工作流（`.github/workflows/release.yml`）：
-- **多仓鉴权机制**：在主仓库设置 `PRIVATE_CORE_REPOSITORY` 和 `PRIVATE_CORE_ACCESS_TOKEN`（Personal Access Token），CI 构建机将自动并行拉取私有协议库。
-- **自动化发版流程**：只需向仓库推送以 `v` 开头的标签（例如 `v0.1.3`），GitHub Actions 将全自动运行测试套件、构建 Release PE 文件、验证冒烟退出码、生成 SHA-256 校验和并自动发布至 GitHub Releases。
 
 ---
 
