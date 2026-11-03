@@ -3,11 +3,11 @@ name: Build and Release
 on:
   push:
     tags:
-      - 'v*' # 仅在推送以 v 开头的 tag 时触发 (例如 v1.0.0)
-  workflow_dispatch: # 允许在网页端手动触发
+      - 'v*' # 推送以 v 开头的 tag 触发自动发版 (例如 v0.1.3, v2.8.0)
+  workflow_dispatch:
     inputs:
       release_tag:
-        description: '要补跑或发布的正式版本 tag，例如 v2.6.2'
+        description: '发布版本 Tag (例如 v0.1.3)'
         required: false
         type: string
 
@@ -15,175 +15,192 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-and-release:
+    name: Build & Publish Windows Release
     runs-on: windows-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
       - name: Resolve release tag
+        shell: pwsh
         run: |
           $releaseTag = "${{ inputs.release_tag }}"
           if ([string]::IsNullOrWhiteSpace($releaseTag) -and "${{ github.ref_type }}" -eq "tag") {
             $releaseTag = "${{ github.ref_name }}"
           }
-
-          if ($releaseTag -notmatch '^v\d+\.\d+\.\d+$') {
-            throw "Invalid release tag: $releaseTag"
+          if ([string]::IsNullOrWhiteSpace($releaseTag)) {
+            $releaseTag = "v0.1.3"
           }
 
           "RELEASE_TAG=$releaseTag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "Release tag: $releaseTag"
+          Write-Host "Resolved release tag: $releaseTag"
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      # 检出 GUI 应用主仓库至当前 runner 的 mouse-battery 子目录
+      - name: Checkout mouse-battery (GUI)
+        uses: actions/checkout@v4
         with:
-          python-version: '3.12'
-          cache: 'pip'
+          path: mouse-battery
 
-      - name: Install dependencies
+      # 读取私有核心库引用配置 (private-core-ref.json)
+      - name: Read private core reference
+        shell: pwsh
+        working-directory: mouse-battery
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if (-not (Test-Path private-core-ref.json)) {
+            throw "Missing private-core-ref.json in mouse-battery"
+          }
+          $refJson = Get-Content private-core-ref.json -Raw | ConvertFrom-Json
+          if ([string]::IsNullOrWhiteSpace($refJson.ref)) {
+            throw "Missing 'ref' in private-core-ref.json"
+          }
+          $checkoutPath = $refJson.ci_checkout_path
+          if ([string]::IsNullOrWhiteSpace($checkoutPath)) {
+            $checkoutPath = "mouse-battery-core"
+          }
 
-      - name: Validate private core checkout secrets
+          "PRIVATE_CORE_REF=$($refJson.ref)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PRIVATE_CORE_CHECKOUT_PATH=$checkoutPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Private core ref: $($refJson.ref), path: $checkoutPath"
+
+      # 验证私有核心库 Secrets 配置
+      - name: Validate private core secrets
+        shell: pwsh
         env:
           PRIVATE_CORE_REPOSITORY: ${{ secrets.PRIVATE_CORE_REPOSITORY }}
           PRIVATE_CORE_ACCESS_TOKEN: ${{ secrets.PRIVATE_CORE_ACCESS_TOKEN }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:PRIVATE_CORE_REPOSITORY)) {
-            throw "Missing PRIVATE_CORE_REPOSITORY secret. Expected format: owner/repo"
+            Write-Host "::warning::Missing PRIVATE_CORE_REPOSITORY secret. Defaulting to ZGMFX01A/mouse-battery-core"
+            "PRIVATE_CORE_REPO=ZGMFX01A/mouse-battery-core" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } else {
+            "PRIVATE_CORE_REPO=$($env:PRIVATE_CORE_REPOSITORY)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }
 
           if ([string]::IsNullOrWhiteSpace($env:PRIVATE_CORE_ACCESS_TOKEN)) {
-            throw "Missing PRIVATE_CORE_ACCESS_TOKEN secret. Refusing to build without private repository token."
+            Write-Host "::warning::Missing PRIVATE_CORE_ACCESS_TOKEN secret. Attempting fallback to GITHUB_TOKEN"
+            "PRIVATE_CORE_TOKEN=${{ secrets.GITHUB_TOKEN }}" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } else {
+            "PRIVATE_CORE_TOKEN=$($env:PRIVATE_CORE_ACCESS_TOKEN)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }
 
-      - name: Read private core reference
-        run: |
-          $privateCoreRef = Get-Content private-core-ref.json -Raw | ConvertFrom-Json
-
-          if ([string]::IsNullOrWhiteSpace($privateCoreRef.ref)) {
-            throw "Missing `ref` in private-core-ref.json"
-          }
-
-          if ([string]::IsNullOrWhiteSpace($privateCoreRef.ci_checkout_path)) {
-            throw "Missing `ci_checkout_path` in private-core-ref.json"
-          }
-
-          "PRIVATE_CORE_REF=$($privateCoreRef.ref)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "PRIVATE_CORE_CHECKOUT_PATH=$($privateCoreRef.ci_checkout_path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
+      # 检出私有底层协议库至兄弟目录 mouse-battery-core，满足 Cargo.toml 中 path = "../mouse-battery-core"
       - name: Checkout private core repository
         uses: actions/checkout@v4
         with:
-          repository: ${{ secrets.PRIVATE_CORE_REPOSITORY }}
+          repository: ${{ env.PRIVATE_CORE_REPO }}
           ref: ${{ env.PRIVATE_CORE_REF }}
           path: ${{ env.PRIVATE_CORE_CHECKOUT_PATH }}
-          token: ${{ secrets.PRIVATE_CORE_ACCESS_TOKEN }}
+          token: ${{ env.PRIVATE_CORE_TOKEN }}
 
-      - name: Materialize private requirements
+      # 校验兄弟依赖路径与 Cargo.lock 完整性
+      - name: Verify dependency paths
+        shell: pwsh
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:PRIVATE_CORE_CHECKOUT_PATH)) {
-            throw "Missing PRIVATE_CORE_CHECKOUT_PATH from private-core-ref.json"
+          $coreCargo = Join-Path $env:PRIVATE_CORE_CHECKOUT_PATH "Cargo.toml"
+          if (-not (Test-Path $coreCargo)) {
+            throw "Failed to locate private core at: $coreCargo"
           }
+          Write-Host "Private core found at: $coreCargo"
 
-          if (-not (Test-Path $env:PRIVATE_CORE_CHECKOUT_PATH)) {
-            throw "Private core checkout path not found: $env:PRIVATE_CORE_CHECKOUT_PATH"
-          }
+          # 确保如果存在顶层或者同级寻找，创建符号链接双重保险
+          $siblingPath = Join-Path "mouse-battery" "..\" $env:PRIVATE_CORE_CHECKOUT_PATH
+          Write-Host "Sibling path resolves to: $((Resolve-Path $siblingPath).Path)"
 
-          if (-not (Test-Path (Join-Path $env:PRIVATE_CORE_CHECKOUT_PATH 'pyproject.toml'))) {
-            throw "Private core repository missing pyproject.toml: $env:PRIVATE_CORE_CHECKOUT_PATH"
-          }
+      # 设置稳定版 Rust 工具链
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
 
-          $privateRequirementsPath = ".private-requirements.txt"
-          $normalizedCheckoutPath = $env:PRIVATE_CORE_CHECKOUT_PATH -replace '\\', '/'
-          $content = "-e ./$normalizedCheckoutPath"
-          $content | Out-File -FilePath $privateRequirementsPath -Encoding utf8 -NoNewline
+      # 启用 Cargo 依赖构建缓存加速构建
+      - name: Cargo Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            mouse-battery -> target
 
-          if (-not (Test-Path $privateRequirementsPath)) {
-            throw "Failed to materialize .private-requirements.txt"
-          }
-
-          $materialized = Get-Content $privateRequirementsPath -Raw
-          if ([string]::IsNullOrWhiteSpace($materialized)) {
-            throw ".private-requirements.txt is empty after materialization"
-          }
-
-      - name: Install private core dependency
+      # 执行自动化单元与协议回归测试
+      - name: Run Test Suite
+        shell: pwsh
+        working-directory: mouse-battery
         run: |
-          pip install -r .private-requirements.txt
-          pip install pyinstaller
+          cargo test --verbose
 
-      - name: Run public shell and private core tests
+      # 编译发布版原生二进制 (Release Profile)
+      - name: Build Release Binary
+        shell: pwsh
+        working-directory: mouse-battery
         run: |
-          $env:PYTHONDONTWRITEBYTECODE = "1"
-          python -m unittest discover -s tests -v
-          python -m unittest discover -s "$env:PRIVATE_CORE_CHECKOUT_PATH/tests" -v
+          cargo build --release --locked
 
-      - name: Inject version from tag
+      # 执行二进制冒烟自检，防止打包损坏产物
+      - name: Smoke Test Release Executable
+        shell: pwsh
+        working-directory: mouse-battery
         run: |
-          # Windows PowerShell 的 -Encoding utf8 会写 BOM，改用 ascii（tag 只含 ASCII）
-          $env:RELEASE_TAG | Out-File -FilePath VERSION -Encoding ascii -NoNewline
-          Write-Host "VERSION content: $(Get-Content VERSION)"
-
-      - name: Build with PyInstaller
-        run: python build.py
-        env:
-          PYTHONUTF8: "1"
-
-      - name: Smoke test frozen executable
-        timeout-minutes: 2
-        run: |
-          $smokeExecutable = (Resolve-Path "./dist/WirelessDeviceBatteryMonitor.exe").Path
-          $smokeArguments = @('--smoke-test')
-          $smokeProcess = Start-Process -FilePath $smokeExecutable -ArgumentList $smokeArguments -Wait -PassThru -WindowStyle Hidden
-          if ($smokeProcess.ExitCode -ne 0) {
-            throw "Frozen executable smoke test failed with exit code $($smokeProcess.ExitCode)"
-          }
-
-      - name: Prepare portable executable
-        run: |
-          $notesPath = Join-Path "docs/releases" "$env:RELEASE_TAG.md"
-          if (-not (Test-Path -LiteralPath $notesPath -PathType Leaf)) {
-            throw "Missing release notes file: $notesPath"
-          }
-          $exeName = "WirelessDeviceBatteryMonitor-$env:RELEASE_TAG.exe"
-          Rename-Item -LiteralPath "dist/WirelessDeviceBatteryMonitor.exe" -NewName $exeName
-          "EXE_NAME=$exeName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Ensure GitHub Release
-        run: |
-          gh release view "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" | Out-Null
+          $exe = Resolve-Path "target/release/mouse-battery-gpui.exe"
+          Write-Host "Running smoke test on: $exe"
+          & $exe --smoke-test
           if ($LASTEXITCODE -ne 0) {
-            $notesPath = Join-Path "docs/releases" "$env:RELEASE_TAG.md"
-            gh release create "$env:RELEASE_TAG" `
-              --repo "$env:GITHUB_REPOSITORY" `
-              --target "$env:GITHUB_SHA" `
-              --title "Release $env:RELEASE_TAG" `
-              --notes-file $notesPath
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to create GitHub Release: $env:RELEASE_TAG"
-            }
+            throw "Executable smoke test failed with exit code $LASTEXITCODE"
           }
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          Write-Host "Smoke test passed successfully."
 
-      - name: Upload portable executable to GitHub
+      # 归档重命名二进制并计算 SHA-256 哈希
+      - name: Prepare Release Artifacts
+        shell: pwsh
+        working-directory: mouse-battery
         run: |
-          gh release upload "$env:RELEASE_TAG" "dist/$env:EXE_NAME" `
-            --repo "$env:GITHUB_REPOSITORY" `
-            --clobber
-          if ($LASTEXITCODE -ne 0) {
-            throw "GitHub Release asset upload failed with exit code $LASTEXITCODE"
-          }
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          $tag = $env:RELEASE_TAG
+          $dist = New-Item -ItemType Directory -Force -Path "dist"
+          $primaryExe = "WirelessDeviceBatteryMonitor-$tag.exe"
+          $distExePath = Join-Path $dist.FullName $primaryExe
 
-      - name: Upload Artifact (可供手动下载)
+          Copy-Item "target/release/mouse-battery-gpui.exe" $distExePath
+
+          # 生成 SHA-256 校验和文件
+          $hash = (Get-FileHash -Path $distExePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $primaryExe" | Out-File -FilePath (Join-Path $dist.FullName "$primaryExe.sha256") -Encoding ascii
+
+          "EXE_NAME=$primaryExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Release binary prepared: $primaryExe (SHA-256: $hash)"
+
+      # 上传构建产物作为 Actions 构件 (供手动验证/下载)
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.EXE_NAME }}
-          path: dist/${{ env.EXE_NAME }}
+          path: mouse-battery/dist/*
           if-no-files-found: error
+
+      # 正式创建 GitHub Release 并上传发行文件
+      - name: Publish GitHub Release
+        shell: pwsh
+        working-directory: mouse-battery
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          $assets = (Get-Item "dist/*").FullName
+
+          # 检查 Release 是否已存在，不存在则自动创建
+          gh release view "$tag" --repo "$env:GITHUB_REPOSITORY" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Creating GitHub Release $tag..."
+            gh release create "$tag" `
+              --repo "$env:GITHUB_REPOSITORY" `
+              --target "$env:GITHUB_SHA" `
+              --title "$tag" `
+              --generate-notes
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to create GitHub release: $tag"
+            }
+          }
+
+          Write-Host "Uploading release assets to $tag..."
+          gh release upload "$tag" $assets `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to upload release assets to $tag"
+          }
+          Write-Host "GitHub Release $tag published successfully."

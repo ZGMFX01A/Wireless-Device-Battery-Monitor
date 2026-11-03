@@ -1,0 +1,25 @@
+{
+  "source_sha256": "d96dde8b35797930a24097afd5f198ada3a12df97c1fa6895d3d348f78c89062",
+  "file_sha256": "62c6ae21803540bc4adcbe816cb671d0b6ff0813271348ed4af6b0f26b983bd5",
+  "entries": 13056,
+  "sizes": [
+    32,
+    40,
+    48,
+    56,
+    64,
+    80,
+    96,
+    128
+  ],
+  "styles": [
+    "capsule",
+    "vertical",
+    "number",
+    "circle"
+  ],
+  "unique": 11424,
+  "page_count": 896,
+  "page_sha256": "eea1f5559fe11123b18f3ada98211eddbf54de8ece23f95ba761b53fd9decd34",
+  "verified_entries": 13056
+}
