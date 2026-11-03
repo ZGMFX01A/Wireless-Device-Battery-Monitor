@@ -1,4 +1,4 @@
-//! Update HKCU startup only on an explicit preference change, migrating legacy startup on enable.
+//! One fixed HKCU startup value: explicit enable replaces its path; disable removes it.
 use windows_sys::Win32::{Foundation::*, System::Registry::*};
 const NAME: &str = "WirelessDeviceBatteryMonitor-GPUI";
 const LEGACY_NAME: &str = "MouseBatteryMonitor";
@@ -51,9 +51,6 @@ fn set_with_writer(
     mut write: impl FnMut(&str, Option<&str>) -> Result<(), String>,
 ) -> Result<(), String> {
     let existing = value_at(run, NAME)?;
-    if existing.as_deref().is_some_and(|v| v != cmd) {
-        return Err("Another GPUI installation owns this startup entry".into());
-    }
     if !on && existing.is_none() {
         return Ok(());
     }
@@ -148,6 +145,7 @@ mod tests {
     }
 
     const CMD: &str = r#""C:\新版 程序\battery.exe""#;
+    const OLD_CMD: &str = r#""D:\旧路径\WirelessDeviceBatteryMonitor-v2.9.0.exe""#;
 
     #[test]
     fn deleted_legacy_executable_does_not_block_startup() {
@@ -173,13 +171,28 @@ mod tests {
     }
 
     #[test]
-    fn another_installation_is_preserved() {
+    fn enabling_from_a_new_path_overwrites_the_same_startup_entry() {
         let run = TestRun::new();
-        run.put(NAME, "another.exe");
+        run.put(NAME, OLD_CMD);
         run.put(LEGACY_NAME, "legacy.exe");
-        assert!(set_at(&run.0, CMD, true).is_err());
-        assert_eq!(run.get(NAME).as_deref(), Some("another.exe"));
-        assert_eq!(run.get(LEGACY_NAME).as_deref(), Some("legacy.exe"));
+        run.put("UnrelatedApp", "keep.exe");
+        set_at(&run.0, CMD, true).unwrap();
+        set_at(&run.0, OLD_CMD, true).unwrap();
+        set_at(&run.0, CMD, true).unwrap();
+        assert_eq!(run.get(NAME).as_deref(), Some(CMD));
+        assert_eq!(run.get(LEGACY_NAME), None);
+        assert_eq!(run.get("UnrelatedApp").as_deref(), Some("keep.exe"));
+    }
+
+    #[test]
+    fn disable_removes_the_startup_entry_even_if_its_path_changed() {
+        let run = TestRun::new();
+        run.put(NAME, OLD_CMD);
+        run.put("UnrelatedApp", "keep.exe");
+        set_at(&run.0, CMD, false).unwrap();
+        set_at(&run.0, CMD, false).unwrap();
+        assert_eq!(run.get(NAME), None);
+        assert_eq!(run.get("UnrelatedApp").as_deref(), Some("keep.exe"));
     }
 
     #[test]
@@ -194,7 +207,7 @@ mod tests {
 
     #[test]
     fn migration_failure_restores_previous_startup() {
-        for previous in [None, Some(CMD)] {
+        for previous in [None, Some(CMD), Some(OLD_CMD)] {
             let run = TestRun::new();
             if let Some(previous) = previous {
                 run.put(NAME, previous);
