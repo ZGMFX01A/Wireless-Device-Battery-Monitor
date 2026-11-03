@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ inputs.release_tag || github.ref }}
+  group: release-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -129,37 +129,27 @@ jobs:
           retention-days: 14
 
   publish:
-    name: Publish the verified draft atomically
+    name: Replace the release executable
     needs: build
     runs-on: windows-2022
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
+      - name: Checkout the tagged publishing script
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: refs/tags/${{ needs.build.outputs.tag }}
+          persist-credentials: false
       - name: Download the verified artifact set
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: windows-release
           path: dist
-      - name: Check transfer integrity and publish without overwriting a release
+      - name: Verify and replace the executable on the existing release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.build.outputs.tag }}
-          APP_VERSION: ${{ needs.build.outputs.version }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          $tag = $env:RELEASE_TAG
-          $name = "WirelessDeviceBatteryMonitor-v$($env:APP_VERSION).exe"
-          $exe = Join-Path dist $name
-          $record = Get-Content dist/build-info.json -Raw | ConvertFrom-Json
-          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($record.tag -cne $tag -or $record.artifact.sha256 -cne $hash) { throw 'Artifact identity mismatch' }
-          $signed = Get-Content dist/gpui-windows.json -Raw | ConvertFrom-Json
-          $manifest = $signed.manifest | ConvertFrom-Json
-          if ($manifest.version -cne $env:APP_VERSION -or $manifest.sha256 -cne $hash -or $manifest.size -ne (Get-Item $exe).Length) { throw 'Signed manifest does not describe this executable' }
-          $assets = @($exe, "$exe.sha256", 'dist/gpui-windows.json', 'dist/build-info.json')
-          gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --verify-tag --draft --title $tag --generate-notes
-          if ($LASTEXITCODE -ne 0) { throw 'Draft creation failed; an existing release is never overwritten' }
-          gh release edit $tag --repo $env:GITHUB_REPOSITORY --draft=false --latest
-          if ($LASTEXITCODE -ne 0) { throw 'Publishing failed; verified assets remain in the draft' }
+          ./scripts/Publish-Release.ps1 -Tag $env:RELEASE_TAG -Repository $env:GITHUB_REPOSITORY -Dist dist

@@ -16,6 +16,8 @@ use std::{
     time::Duration,
 };
 const ROOT: &str = "https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/releases";
+const LATEST: &str =
+    "https://api.github.com/repos/ZGMFX01A/Wireless-Device-Battery-Monitor/releases/latest";
 pub(crate) const KEY: Option<&str> = option_env!("GPUI_UPDATE_PUBLIC_KEY");
 fn asset_url(version: &str) -> String {
     format!("{ROOT}/download/v{version}/WirelessDeviceBatteryMonitor-v{version}.exe")
@@ -38,6 +40,24 @@ pub enum Status {
 pub struct Envelope {
     pub manifest: String,
     pub signature: String,
+}
+fn release_envelope(data: &[u8]) -> Result<Vec<u8>, String> {
+    #[derive(Deserialize)]
+    struct Release {
+        body: String,
+    }
+    let release: Release = serde_json::from_slice(data).map_err(|e| e.to_string())?;
+    let (_, content) = release
+        .body
+        .split_once("<!-- gpui-update-manifest\n")
+        .ok_or("release has no signed update metadata")?;
+    let (envelope, _) = content
+        .split_once("\n-->")
+        .ok_or("incomplete signed update metadata")?;
+    if envelope.len() > 65536 {
+        return Err("oversized manifest".into());
+    }
+    Ok(envelope.as_bytes().to_vec())
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Manifest {
@@ -200,18 +220,19 @@ impl Updates {
                 let client = client()?;
                 if !download {
                     post(Status::Checking);
-                    let mut data = Vec::new();
+                    let mut release = Vec::new();
                     client
-                        .get(format!("{ROOT}/latest/download/gpui-windows.json"))
+                        .get(LATEST)
                         .send()
                         .and_then(|r| r.error_for_status())
                         .map_err(|e| e.to_string())?
-                        .take(65537)
-                        .read_to_end(&mut data)
+                        .take(1048577)
+                        .read_to_end(&mut release)
                         .map_err(|e| e.to_string())?;
-                    if data.len() > 65536 {
-                        return Err("oversized manifest".into());
+                    if release.len() > 1048576 {
+                        return Err("oversized release response".into());
                     }
+                    let data = release_envelope(&release)?;
                     let env: Envelope = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
                     let v = validate(&env, key, env!("APP_VERSION"))?;
                     if v.version == env!("APP_VERSION") {
@@ -373,6 +394,34 @@ mod tests {
         assert!(validate(&e, &k, "2.0.0").is_err());
         e.manifest.push(' ');
         assert!(validate(&e, &k, "0.1.0").is_err());
+    }
+    #[test]
+    fn release_body_preserves_the_signed_envelope() {
+        let (envelope, key, expected) = signed();
+        let body = format!(
+            "User release notes\n\n<!-- gpui-update-manifest\n{}\n-->\n",
+            serde_json::to_string(&envelope).unwrap()
+        );
+        let response = serde_json::to_vec(&serde_json::json!({ "body": body })).unwrap();
+        let data = release_envelope(&response).unwrap();
+        let mut decoded: Envelope = serde_json::from_slice(&data).unwrap();
+        assert_eq!(
+            validate(&decoded, &key, "0.1.0").unwrap().version,
+            expected.version
+        );
+        decoded.manifest.push(' ');
+        assert!(validate(&decoded, &key, "0.1.0").is_err());
+    }
+    #[test]
+    fn release_body_requires_complete_bounded_metadata() {
+        for body in [
+            "Release notes only".to_string(),
+            "<!-- gpui-update-manifest\n{}".to_string(),
+            format!("<!-- gpui-update-manifest\n{}\n-->", "x".repeat(65537)),
+        ] {
+            let response = serde_json::to_vec(&serde_json::json!({ "body": body })).unwrap();
+            assert!(release_envelope(&response).is_err());
+        }
     }
     #[test]
     fn transfers() {
