@@ -26,3 +26,6 @@ image = {version="0.25", default-features=false, features=["webp"]}
 
 [build-dependencies]
 embed-resource = "=3.0.12"
+
+[dev-dependencies]
+image = {version="0.25", default-features=false, features=["png"]}

@@ -320,7 +320,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
         let mut manual_err = None;
         if let Some((_, scan)) = sync {
             flags |= REFRESH;
-            if scan && !bt {
+            if scan {
                 flags |= SCAN
             }
         }
@@ -563,10 +563,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
         }
         if changed {
             let mut st = state.lock().unwrap();
-            st.rows.retain(|r| (r.device.kind == Kind::Bluetooth) != bt);
-            st.rows.extend(slots.values().map(|s| s.row.clone()));
-            let current = st.prefs.clone();
-            current.preserve_missing(&mut st.rows, bt);
+            publish_rows(&mut st, &slots, bt);
             if let Some((id, _)) = sync {
                 st.manual.finish(id, bt, manual_err);
             }
@@ -581,6 +578,13 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             .unwrap_or(clock() + 3600000);
         delay = Duration::from_millis(next.saturating_sub(clock()).max(25));
     }
+}
+fn publish_rows(st: &mut State, slots: &HashMap<String, Slot>, bt: bool) {
+    st.rows.retain(|r| (r.device.kind == Kind::Bluetooth) != bt);
+    st.rows.extend(slots.values().map(|s| s.row.clone()));
+    let current = st.prefs.clone();
+    current.preserve_missing(&mut st.rows, bt);
+    st.prune_unbound();
 }
 impl Service {
     pub fn start(p: Prefs, demo: bool, wake: impl Fn() + Send + Sync + 'static) -> Self {
@@ -664,13 +668,25 @@ impl Service {
                     .ok_or("invalid profile path")?
                     .join("WirelessDeviceBatteryMonitor")
                     .join("config.json");
-                let mut prefs = self.state.lock().unwrap().prefs.clone();
-                prefs.import_appearance(&old)?;
-                let list = self.state.lock().unwrap().candidates.clone();
-                let pending = prefs.import_devices(&old, &list)?;
-                prefs.save(&target)?;
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                std::fs::File::open(&old)
+                    .map_err(|e| e.to_string())?
+                    .take(4 * 1024 * 1024 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| e.to_string())?;
+                if bytes.len() > 4 * 1024 * 1024 {
+                    return Err("legacy preferences too large".into());
+                }
+                let snapshot: serde_json::Value =
+                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
                 let mut st = self.state.lock().unwrap();
+                let mut prefs = st.prefs.clone();
+                prefs.import_appearance_value(&snapshot)?;
+                let pending = prefs.import_devices_value(&snapshot, &st.candidates)?;
+                prefs.save(&target)?;
                 st.prefs = prefs;
+                st.prune_unbound();
                 st.note = format!(
                     "已导入偏好与匹配的设备；待匹配 {pending} 项 / Import complete; {pending} pending"
                 );
@@ -685,6 +701,10 @@ impl Service {
                 }
                 st.autostart = !st.autostart;
             }
+            // A raw Bind has no successful I/O receipt. Only DeviceRequest may commit a binding.
+            Command::Bind(_) => {
+                return Err("Device binding requires a successful battery read".into());
+            }
             Command::Refresh => self.signals.both(REFRESH),
             Command::Scan => self.signals.hid.send(SCAN),
             Command::DiscoverBt => self.signals.bt.send(SCAN),
@@ -698,6 +718,7 @@ impl Service {
                     p.save(&Prefs::path()?)?
                 }
                 s.prefs = p;
+                s.prune_unbound();
                 s.demo_reconcile();
                 drop(s);
                 self.signals.both(PREFS)
@@ -847,5 +868,52 @@ mod audit_power {
         assert!(s.row.battery.is_none());
         assert_eq!(s.row.sampled, accepted);
         assert!(s.row.error.is_some());
+    }
+}
+
+#[cfg(test)]
+mod formal_review_tests {
+    use super::*;
+    #[test]
+    fn bare_bind_cannot_bypass_a_successful_device_read() {
+        let svc = Service::start(Prefs::default(), true, || {});
+        let id = "demo:Bluetooth Headset".to_owned();
+        assert!(svc.command(Command::Bind(id.clone())).is_err());
+        assert!(!svc.state.lock().unwrap().prefs.bluetooth.contains(&id));
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    #[test]
+    fn late_worker_result_cannot_resurrect_unbound_keyboard() {
+        let mut st = State::demo();
+        let row = st.rows[1].clone();
+        let mut slots = HashMap::new();
+        slots.insert(
+            row.device.id.clone(),
+            Slot {
+                row,
+                fail: 0,
+                due: 60000,
+                probes: vec![],
+                rebaseline: false,
+            },
+        );
+        st.prefs.keyboard = None;
+        publish_rows(&mut st, &slots, false);
+        assert!(!st.rows.iter().any(|r| r.device.kind == Kind::Keyboard));
+    }
+    #[test]
+    fn publishing_hid_does_not_drop_bound_bluetooth() {
+        let mut st = State::demo();
+        st.demo_request(&DeviceJob {
+            id: 1,
+            kind: Kind::Bluetooth,
+            bind: Some("demo:Bluetooth Headset".into()),
+        });
+        publish_rows(&mut st, &HashMap::new(), false);
+        assert!(st.rows.iter().any(|r| r.device.kind == Kind::Bluetooth));
     }
 }

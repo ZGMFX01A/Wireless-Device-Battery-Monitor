@@ -20,6 +20,7 @@ use windows_sys::Win32::{
         QueryFullProcessImageNameW, WaitForSingleObject,
     },
 };
+#[cfg(test)]
 const APP: &str = "mouse-battery-gpui.exe";
 const HELPER: &str = "gpui-swap-helper.exe";
 const PREFIX: &str = ".gpui-update-";
@@ -89,9 +90,6 @@ pub fn prepare(src: &Path, m: &Manifest) -> R<ChildStdin> {
         .map_err(err)?
         .canonicalize()
         .map_err(err)?;
-    if old.file_name().and_then(|n| n.to_str()) != Some(APP) {
-        return Err("Install is only permitted for the GPUI portable executable".into());
-    }
     let dir = old.parent().ok_or("missing installation directory")?;
     let meta = src.with_file_name("signed.json");
     let validated = signed(&meta)?;
@@ -133,7 +131,7 @@ impl Drop for Handle {
         }
     }
 }
-fn parent(path: &Path) -> R<Handle> {
+fn parent() -> R<(Handle, PathBuf)> {
     let id = std::env::var("GPUI_UPDATE_PARENT")
         .map_err(err)?
         .parse::<u32>()
@@ -157,10 +155,30 @@ fn parent(path: &Path) -> R<Handle> {
     let actual = PathBuf::from(std::ffi::OsString::from_wide(&b[..n as usize]))
         .canonicalize()
         .map_err(err)?;
-    if actual != path {
-        return Err("parent image mismatch".into());
+    Ok((h, actual))
+}
+fn validate_target(job: &Path, target: &Path, helper: &Path) -> R<()> {
+    let installation = job
+        .parent()
+        .ok_or("missing installation directory")?
+        .canonicalize()
+        .map_err(err)?;
+    let parent = target
+        .parent()
+        .ok_or("missing parent image directory")?
+        .canonicalize()
+        .map_err(err)?;
+    if parent != installation
+        || target
+            .extension()
+            .is_none_or(|e| !e.eq_ignore_ascii_case("exe"))
+    {
+        return Err("parent image is outside this installation".into());
     }
-    Ok(h)
+    if sha(target)? != sha(helper)? {
+        return Err("previous executable mismatch".into());
+    }
+    Ok(())
 }
 fn swap(target: &Path, source: &Path, backup: &Path) -> R<()> {
     if backup.exists() {
@@ -243,17 +261,9 @@ pub fn helper() -> R<()> {
     {
         return Err("not a GPUI update transaction".into());
     }
-    let target = job
-        .parent()
-        .ok_or("missing target directory")?
-        .join(APP)
-        .canonicalize()
-        .map_err(err)?;
+    let (h, target) = parent()?;
+    validate_target(job, &target, &me)?;
     let old = sha(&me)?;
-    if sha(&target)? != old {
-        return Err("previous executable mismatch".into());
-    }
-    let h = parent(&target)?;
     let man = signed(&job.join("signed.json"))?;
     verified(&job.join("candidate.exe"), &man)?;
     println!("GPUI-ARMED/1");
@@ -329,5 +339,33 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(t).unwrap(), "concurrent change");
         assert_eq!(sha(&j.join("previous.exe")).unwrap(), a);
+    }
+}
+
+#[cfg(test)]
+mod portable_name_tests {
+    use super::*;
+    #[test]
+    fn release_name_and_user_rename_are_safe_with_exact_parent_identity() {
+        let d = tempfile::tempdir().unwrap();
+        let job = d.path().join(".gpui-update-test");
+        fs::create_dir(&job).unwrap();
+        let helper = job.join(HELPER);
+        fs::write(&helper, b"same executable").unwrap();
+        for name in [
+            "WirelessDeviceBatteryMonitor-v2.8.1.exe",
+            "我的电量工具.exe",
+            "mouse-battery-gpui.exe",
+        ] {
+            let target = d.path().join(name);
+            fs::write(&target, b"same executable").unwrap();
+            assert!(validate_target(&job, &target, &helper).is_ok());
+            fs::write(&target, b"different executable").unwrap();
+            assert!(validate_target(&job, &target, &helper).is_err());
+        }
+        let foreign = tempfile::tempdir().unwrap();
+        let outside = foreign.path().join("app.exe");
+        fs::write(&outside, b"same executable").unwrap();
+        assert!(validate_target(&job, &outside, &helper).is_err());
     }
 }

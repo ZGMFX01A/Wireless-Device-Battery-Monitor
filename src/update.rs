@@ -17,6 +17,10 @@ use std::{
 };
 const ROOT: &str = "https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/releases";
 pub(crate) const KEY: Option<&str> = option_env!("GPUI_UPDATE_PUBLIC_KEY");
+fn asset_url(version: &str) -> String {
+    format!("{ROOT}/download/v{version}/WirelessDeviceBatteryMonitor-v{version}.exe")
+}
+
 const MAX: u64 = 96 * 1024 * 1024;
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Status {
@@ -162,13 +166,18 @@ impl Updates {
         }
     }
     pub fn cancel(&self) {
-        self.cancel.store(true, Ordering::Release)
+        self.cancel.store(true, Ordering::Release);
+        self.staged.lock().unwrap().take();
     }
     pub fn run(&mut self, download: bool) {
         if self.busy.swap(true, Ordering::AcqRel) {
             return;
         }
         self.cancel.store(false, Ordering::Release);
+        self.staged.lock().unwrap().take();
+        if !download {
+            self.manifest.lock().unwrap().take();
+        }
         let (st, busy, c, m, ready, w, demo) = (
             self.state.clone(),
             self.busy.clone(),
@@ -187,7 +196,7 @@ impl Updates {
                 if demo {
                     return Err("预览模式不访问更新服务 / Preview is offline".into());
                 }
-                let key=KEY.ok_or("此开发版未配置 GPUI 发布公钥，不会安装旧版更新。 / No GPUI release key configured.")?;
+                let key=KEY.ok_or("此版本未启用自动更新，请从软件发布页下载。 / Automatic updates are unavailable; download from the releases page.")?;
                 let client = client()?;
                 if !download {
                     post(Status::Checking);
@@ -231,14 +240,25 @@ impl Updates {
                 let dir = base()?.join(&man.version);
                 fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
                 let exe = dir.join("mouse-battery-gpui.exe");
+                if exe.exists() && verified(&exe, &man).is_err() {
+                    // Retain a corrupt cache for diagnosis, but do not let it poison every retry.
+                    let quarantine = tempfile::Builder::new()
+                        .prefix("rejected-")
+                        .tempdir_in(&dir)
+                        .map_err(|e| e.to_string())?;
+                    fs::rename(&exe, quarantine.path().join("candidate.bin"))
+                        .map_err(|e| e.to_string())?;
+                    let _ = quarantine.keep();
+                }
+                if c.load(Ordering::Acquire) {
+                    return Err("cancelled".into());
+                }
+                post(Status::Downloading(0, man.size));
                 if !exe.exists() {
                     let mut temp =
                         tempfile::NamedTempFile::new_in(&dir).map_err(|e| e.to_string())?;
                     let response = client
-                        .get(format!(
-                            "{ROOT}/download/gpui-v{}/mouse-battery-gpui.exe",
-                            man.version
-                        ))
+                        .get(asset_url(&man.version))
                         .send()
                         .and_then(|r| r.error_for_status())
                         .map_err(|e| e.to_string())?;
@@ -272,13 +292,23 @@ impl Updates {
             } else {
                 result.unwrap_or_else(Status::Error)
             };
-            busy.store(false, Ordering::Release);
-            post(final_status);
+            {
+                let mut state = st.lock().unwrap();
+                state.update = final_status;
+                // Publish the final state before permitting another worker to start.
+                busy.store(false, Ordering::Release);
+            }
+            w();
         }));
     }
     /// User can inspect/start the verified side-by-side candidate after exiting. Never run an arbitrary URL or overwrite an executable.
     pub fn install_input(&self) -> Result<(PathBuf, Manifest), String> {
-        if self.demo || KEY.is_none() || self.busy.load(Ordering::Acquire) {
+        if self.demo
+            || KEY.is_none()
+            || self.busy.load(Ordering::Acquire)
+            || self.cancel.load(Ordering::Acquire)
+            || !matches!(self.state.lock().unwrap().update, Status::Ready(_))
+        {
             return Err("No installable signed build".into());
         }
         self.staged
@@ -368,5 +398,36 @@ mod tests {
             )
             .is_err()
         )
+    }
+}
+
+#[cfg(test)]
+mod formal_release_tests {
+    use super::*;
+    #[test]
+    fn asset_contract_matches_the_public_release_filename() {
+        assert_eq!(
+            asset_url("2.8.1"),
+            format!("{ROOT}/download/v2.8.1/WirelessDeviceBatteryMonitor-v2.8.1.exe")
+        );
+    }
+    #[test]
+    fn cancel_clears_previous_installable_candidate() {
+        let state = Arc::new(Mutex::new(State::demo()));
+        let u = Updates::new(state, true, || {});
+        *u.staged.lock().unwrap() = Some((
+            PathBuf::from("not-run.exe"),
+            Manifest {
+                version: "1.0.0".into(),
+                size: 1,
+                sha256: "00".repeat(32),
+                target: "x86_64-pc-windows-msvc".into(),
+                notes: String::new(),
+                notes_en: String::new(),
+            },
+        ));
+        u.cancel();
+        assert!(u.staged.lock().unwrap().is_none());
+        assert!(u.install_input().is_err());
     }
 }

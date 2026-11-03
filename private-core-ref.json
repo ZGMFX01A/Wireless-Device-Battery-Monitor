@@ -1,7 +1,0 @@
-{
-  "distribution_name": "mouse-battery-core",
-  "crate_name": "battery-protocol",
-  "ref": "main",
-  "ci_checkout_path": "mouse-battery-core",
-  "local_editable_path": "../mouse-battery-core"
-}

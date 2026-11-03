@@ -1,16 +1,23 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+mod version_format;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=APP_VERSION");
+    println!("cargo:rerun-if-env-changed=GPUI_UPDATE_PUBLIC_KEY");
+    println!("cargo:rerun-if-changed=version_format.rs");
     println!("cargo:rerun-if-changed=assets/app.ico");
 
     let raw_version = env::var("APP_VERSION")
         .unwrap_or_else(|_| env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.3".to_string()));
-    let version = raw_version
-        .trim()
-        .trim_start_matches(|c| c == 'v' || c == 'V');
+    let version = version_format::normalize(&raw_version).expect("invalid APP_VERSION");
+    if let Ok(key) = env::var("GPUI_UPDATE_PUBLIC_KEY") {
+        assert!(
+            key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid update public key"
+        );
+    }
     println!("cargo:rustc-env=APP_VERSION={version}");
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
@@ -42,7 +49,7 @@ BEGIN
  BEGIN
  BLOCK "040904B0"
  BEGIN
- VALUE "FileDescription", "Wireless Device Battery Monitor (GPUI)\0"
+ VALUE "FileDescription", "Wireless Device Battery Monitor\0"
  VALUE "FileVersion", "{maj}.{min}.{pat}.0\0"
  VALUE "ProductName", "Wireless Device Battery Monitor\0"
  VALUE "ProductVersion", "{version}\0"

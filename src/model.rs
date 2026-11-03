@@ -2,7 +2,7 @@ use battery_protocol::{Charge, Descriptor, Kind, Reading};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -121,12 +121,16 @@ impl Prefs {
             .ok_or("APPDATA unavailable".into())
     }
     /// Read-only import: do not map bindings by name, and never touch the legacy Run entry.
+    #[cfg(test)]
     pub fn import_appearance(&mut self, path: &Path) -> Result<(), String> {
         let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
         if file.metadata().map_err(|e| e.to_string())?.len() > 4 * 1024 * 1024 {
             return Err("configuration is too large".into());
         }
         let d: serde_json::Value = serde_json::from_reader(file).map_err(|e| e.to_string())?;
+        self.import_appearance_value(&d)
+    }
+    pub fn import_appearance_value(&mut self, d: &serde_json::Value) -> Result<(), String> {
         let o = d.as_object().ok_or("invalid legacy settings")?;
         let text = |k: &str| o.get(k).and_then(|v| v.as_str());
         if let Some(x) = o
@@ -171,13 +175,24 @@ impl Prefs {
         Ok(())
     }
     /// Opt-in exact-identity import. Preserve unmatched entries for devices currently asleep.
+    #[cfg(test)]
     pub fn import_devices(&mut self, path: &Path, list: &[Descriptor]) -> Result<usize, String> {
         let b = std::fs::File::open(path).map_err(|e| e.to_string())?;
         if b.metadata().map_err(|e| e.to_string())?.len() > 4 * 1024 * 1024 {
             return Err("preferences too large".into());
         }
         let v: serde_json::Value = serde_json::from_reader(b).map_err(|e| e.to_string())?;
-        self.migration = LegacyDevices::parse(&v);
+        self.import_devices_value(&v, list)
+    }
+    pub fn import_devices_value(
+        &mut self,
+        v: &serde_json::Value,
+        list: &[Descriptor],
+    ) -> Result<usize, String> {
+        if !v.is_object() {
+            return Err("invalid legacy settings".into());
+        }
+        self.migration = LegacyDevices::parse(v);
         self.resolve(list);
         Ok(self.migration.remaining())
     }
@@ -242,7 +257,20 @@ impl Prefs {
         changed
     }
     pub fn load(p: &Path) -> Result<Self, String> {
-        match std::fs::read(p) {
+        let read = || -> std::io::Result<Vec<u8>> {
+            let mut bytes = Vec::new();
+            std::fs::File::open(p)?
+                .take(4 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 4 * 1024 * 1024 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "preferences too large",
+                ));
+            }
+            Ok(bytes)
+        };
+        match read() {
             Ok(b) => {
                 let v: Self =
                     serde_json::from_slice(&b).map_err(|e| format!("Invalid preferences: {e}"))?;
@@ -336,6 +364,10 @@ pub struct State {
     pub update: crate::update::Status,
 }
 impl State {
+    /// Reconcile against the latest preferences, not a worker's pre-I/O snapshot.
+    pub fn prune_unbound(&mut self) {
+        self.rows.retain(|r| self.prefs.bound(&r.device));
+    }
     /// Suppress only *painting* an invisible timestamp. Destructure exhaustively:
     /// adding a receipt or a new visible field must not silently drop it.
     pub fn same_except_sample_time(&self, o: &Self) -> bool {
@@ -434,7 +466,7 @@ impl State {
     pub fn selected(&self) -> Option<&Row> {
         self.rows
             .iter()
-            .filter(|r| r.battery.is_some() && r.error.is_none())
+            .filter(|r| self.prefs.bound(&r.device) && r.battery.is_some() && r.error.is_none())
             .min_by_key(|r| {
                 let rank = match self.prefs.priority {
                     Priority::Lowest => 0,
@@ -877,5 +909,25 @@ mod audit_identity {
         assert_eq!(p.keyboard.as_deref(), Some("a"));
         assert_eq!(p.aliases["a"], "Mine");
         assert!(!p.resolve(&[mk("a")]));
+    }
+}
+
+#[cfg(test)]
+mod formal_review_tests {
+    use super::*;
+    #[test]
+    fn unbound_rows_cannot_take_over_the_tray() {
+        let mut s = State::demo();
+        s.prefs.priority = Priority::Lowest;
+        s.prefs.keyboard = None;
+        assert_eq!(s.selected().unwrap().device.kind, Kind::Mouse);
+    }
+    #[test]
+    fn oversized_preferences_are_rejected_before_deserialization() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("preferences-v2.json");
+        let bytes = format!(r#"{{"future_field":"{}"}}"#, "a".repeat(4 * 1024 * 1024));
+        std::fs::write(&file, bytes).unwrap();
+        assert!(Prefs::load(&file).is_err());
     }
 }

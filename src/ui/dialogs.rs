@@ -106,9 +106,15 @@ impl Panel {
         if let Some(Dialog::Pick {
             kind,
             chosen: Some(key),
-            binding: false,
+            id: previous,
             ..
         }) = self.modal.clone()
+            && self.state.reply(kind).is_some_and(|r| r.id == previous)
+            && self
+                .state
+                .candidates
+                .iter()
+                .any(|d| d.kind == kind && d.id == key && !self.state.prefs.bound(d))
         {
             let id = token();
             self.modal = Some(Dialog::Pick {
@@ -172,7 +178,15 @@ impl Panel {
                     .reply(kind)
                     .filter(|r| r.id == id)
                     .map(|r| &r.result);
-                let can = !binding && matches!(result, Some(Ok(()))) && chosen.is_some();
+                let retry = matches!(result, Some(Err(_)));
+                let can = result.is_some()
+                    && chosen.as_ref().is_some_and(|key| {
+                        self.state
+                            .candidates
+                            .iter()
+                            .any(|d| d.kind == kind && d.id == *key && !self.state.prefs.bound(d))
+                    });
+                let retry_scan = retry && !can;
                 match result {
                     None => {
                         body = body.child(
@@ -258,16 +272,22 @@ impl Panel {
                 footer = footer.child(close(self.t("dialog.cancel")));
                 let confirm = footbtn(
                     "dialog-confirm",
-                    self.t(if kind == Kind::Keyboard {
-                        "dialog.connect"
+                    if retry {
+                        self.tr("重试", "Retry")
                     } else {
-                        "dialog.add"
-                    }),
+                        self.t(if kind == Kind::Keyboard {
+                            "dialog.connect"
+                        } else {
+                            "dialog.add"
+                        })
+                    },
                     true,
                     k,
                 );
                 footer = footer.child(if can {
                     confirm.on_click(cx.listener(|s, _, _, cx| s.begin_bind(cx)))
+                } else if retry_scan {
+                    confirm.on_click(cx.listener(move |s, _, _, cx| s.pick(kind, cx)))
                 } else {
                     confirm.opacity(0.45)
                 })

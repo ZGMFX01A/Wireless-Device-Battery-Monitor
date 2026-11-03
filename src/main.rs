@@ -7,10 +7,17 @@ mod service;
 mod startup;
 mod swap;
 mod update;
+#[cfg(test)]
+#[path = "../version_format.rs"]
+mod version_format;
 mod view;
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let res = match args.as_slice() {
+        [s] if s == "--version" => {
+            println!("{}", env!("APP_VERSION"));
+            Ok(())
+        }
         [s] if s == "--gpui-update-worker" => swap::helper(),
         [s] if s == "--gpui-health-start" => host::run(false),
         [s] if s == "--gui-child" => {

@@ -1,124 +1,101 @@
-# 无线设备电量监控｜Windows 原生外设电量监控与管理工具
+# 无线设备电量监控
 
-[![Rust](https://img.shields.io/badge/Rust-1.85%2B-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![GUI Framework](https://img.shields.io/badge/GUI-GPUI%20(Direct3D)-black?logo=windows&logoColor=white)](https://github.com/zed-industries/zed)
-[![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
-[![Latest Release](https://img.shields.io/github/v/release/ZGMFX01A/mouse-battery?display_name=tag&sort=semver)](https://github.com/ZGMFX01A/mouse-battery/releases)
-[![Downloads](https://img.shields.io/github/downloads/ZGMFX01A/Wireless-Device-Battery-Monitor/total?label=Downloads&logo=github)](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/releases)
-[![License](https://img.shields.io/badge/License-Non--Commercial-orange)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-1.85%2B-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)[![GUI Framework](https://img.shields.io/badge/GUI-GPUI%20(Direct3D)-black?logo=windows&logoColor=white)](https://github.com/zed-industries/zed)[![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)](https://www.microsoft.com/windows)[![Latest Release](https://img.shields.io/github/v/release/ZGMFX01A/mouse-battery?display_name=tag&sort=semver)](https://github.com/ZGMFX01A/mouse-battery/releases)[![Downloads](https://img.shields.io/github/downloads/ZGMFX01A/Wireless-Device-Battery-Monitor/total?label=Downloads&logo=github)](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/releases)[![License](https://img.shields.io/badge/License-Non--Commercial-orange)](LICENSE)
 
-**无线设备电量监控（Wireless Device Battery Monitor）** 是一款专为 Windows 设计的超轻量级、高性能无线外设电量管理工具。它常驻于 Windows 系统任务栏托盘，实时监控 Logitech、Razer、ASUS ROG 鼠标与机械键盘、华奋达方案键盘以及标准蓝牙外设的电量百分比、充电阶段与在线状态，并提供贴心的低电量桌面弹窗提醒。
 
-> **重大架构演变说明**：本项目已完成从原 Python + WebView2 架构向 **100% 纯 Rust + GPUI 原生驱动级架构** 的全面重构升级。彻底摒弃了 Chromium / Python 庞大运行时，常驻内存缩减至 15MB~25MB 级别，启动与交互延迟达到微秒级。  
-> 原 Python 实现已完整归档于 Git Tag `legacy-python-v2.8.0` 及分支 `archive/legacy-python`。
+**把鼠标、键盘和蓝牙设备的电量，放在任务栏的一角。**
 
----
+不必分别打开几个设备管理软件，也不必等到外设突然断电才想起充电。无线设备电量监控常驻 Windows 托盘，帮你查看受支持设备的剩余电量、充电状态与连接情况，并在电量偏低时提醒你。
 
-## 立即下载
+[下载 Windows 版](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/releases) · [查看更新](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/releases) · [反馈问题](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues)
 
-- **[下载最新 Windows 发行版（GitHub Releases）](https://github.com/ZGMFX01A/mouse-battery/releases)**
-- **[查看全部版本更新日志与产物校验和](https://github.com/ZGMFX01A/mouse-battery/releases)**
+适用于 Windows 10 / 11 的 64 位电脑。下载发布页中的 `WirelessDeviceBatteryMonitor-v版本号.exe`，放到常用位置后直接运行。
 
-> **便携绿色运行**：下载 `WirelessDeviceBatteryMonitor-<version>.exe` 后直接双击运行，无需任何安装器或环境配置，不依赖任何外部 Web 运行时，启动后即自动最小化常驻至 Windows 系统任务栏托盘。
+## 少一点打扰，多一点心里有数
 
----
+### 电量抬眼可见，托盘只占一个位置
 
-## 实机截图
+托盘提供**胶囊、竖条、数字、圆环**四种样式。你可以优先显示鼠标、优先显示键盘，也可以选择**低电量优先**，让最需要留意的电量出现在眼前。
 
-| 深色模式（原生 GPUI 浮窗 380×540） | 浅色模式（原生 GPUI 浮窗 380×540） |
+鼠标悬停可查看设备电量汇总；单击打开设备面板，右键进入设置、立即刷新或退出。不需要为每台设备挤进一个难以分辨的图标。
+
+### 设备集中查看，名字由你来定
+
+设备面板集中展示电量、状态和上次更新时间。鼠标通过受支持的接收器自动识别；键盘与蓝牙设备可以从各自的添加入口选择。
+
+点一下卡片上的铅笔，就能把设备改成“办公鼠标”“随身耳机”等熟悉的名字。别名也会出现在托盘提示、菜单和低电量提醒中。目前可绑定一把接收器键盘，并添加多台蓝牙设备。
+
+### 该充电时提醒，不反复催促
+
+低电量提醒可设为 **10%、20% 或 30%**，也可以关闭。相同电量不会反复提醒；继续下降时，再按电量变化提醒。设备明确报告正在充电或已经充满时，不发送低电量提醒。
+
+电量来自设备或 Windows 提供的读数。设备未连接、暂时读不到电量时，会说明状态，而不是把“未知”写成 0%；0% 本身仍可以是有效的设备读数。
+
+### 界面合眼，后台安静
+
+支持浅色、深色和跟随系统，可调节磨砂通透度，也可切换中英文。设备卡片保留清晰的大号电量，让查看这件事足够简单。
+
+关闭面板后，后台监控继续运行；界面连续闲置约 30 秒后会释放资源，下次点击托盘再打开。不必一直开着窗口，也能保持后台监控。
+
+## 界面预览
+
+| 浅色设备面板 | 深色设备面板 |
 | :---: | :---: |
-| ![深色模式浮窗](assets/preview-dark-flyout.png) | ![浅色模式浮窗](assets/preview-light-flyout.png) |
+| ![浅色设备面板](assets/preview-light-flyout.png) | ![深色设备面板](assets/preview-dark-flyout.png) |
 
-| 深色模式设置与多设备管理（540×680） | 浅色模式设置与设备发现（540×680） |
+<details>
+<summary>查看设置界面</summary>
+
+| 浅色设置 | 深色设置 |
 | :---: | :---: |
-| ![深色设置页](assets/preview-dark-settings.png) | ![浅色设置页](assets/preview-light-settings.png) |
+| ![浅色设置](assets/preview-light-settings.png) | ![深色设置](assets/preview-dark-settings.png) |
 
----
+</details>
 
-## 核心技术架构与工程亮点
+## 哪些设备可以使用？
 
-### 1. 极致轻量与闲置资源回收（30s Resource Harvesting）
-- **无 Web 前端开销**：基于 GPU 加速的 Rust GPUI 框架构建原生 Direct3D 窗口，杜绝 WebView2 带来的数百兆内存驻留与多进程臃肿。
-- **30 秒闲置自动休眠**：浮窗和设置窗口关闭 30 秒后，应用将自动销毁底层 HWND 句柄、释放 Direct3D 渲染上下文与显存缓存，仅由极简 Win32 托盘宿主常驻监听。再次唤出浮窗仅需数百毫秒，真正做到“用时即开、闲时无感”。
+| 设备类型 | 支持范围与连接方式 |
+| --- | --- |
+| 罗技无线鼠标 | 部分 LIGHTSPEED、Unifying、Bolt 等接收器与兼容鼠标，包含 G502 X、G903、PRO X SUPERLIGHT 等系列的适配。 |
+| 雷蛇无线鼠标 | 部分 HyperSpeed 无线鼠标，包含 Basilisk、Viper、DeathAdder 等系列中的受支持型号。 |
+| 华硕 ROG 无线外设 | 部分无线鼠标、键盘及 Omni 接收器组合。 |
+| Weikav / NUT75 等机械键盘 | 采用兼容方案的部分键盘，使用 2.4G 接收器连接。 |
+| 蓝牙鼠标、键盘、耳机等 | 已在 Windows 配对并连接，且向系统提供可读取电量的设备。 |
 
-### 2. 双通道非阻塞采样与防卡死架构
-- **硬件 I/O 线程彻底解耦**：独立的 `HID Worker` 与 `Bluetooth Worker` 后台线程专职处理 USB 报文读写与 WinRT GATT 异步通信，与 UI 渲染主线程通过无锁并发消息通道连接。
-- **超时与错误熔断**：外设关闭电源、休眠或超出无线信号范围时，后台轮询自动熔断并进入指数退避重连，界面绝不卡顿白屏。
+**同一品牌不代表所有型号都支持；同一设备切换连接方式，能否读取电量也可能不同。** 例如，键盘的 2.4G 模式与蓝牙模式需要分别确认兼容性。充电状态和电量精度取决于设备提供的信息，部分设备只报告电量，不报告是否正在充电。
 
-### 3. Windows 现代电源管理与快速恢复（Modern Standby）
-- **全链路电源广播监听**：全面捕获 Windows `WM_POWERBROADCAST` 状态转移（挂起事件 4、用户按键/移动唤醒事件 7、系统自动唤醒事件 18），支持合并去重防抖。
-- **晃动即连**：电脑从睡眠（S3/S4/现代待机）唤醒后，仅需晃动鼠标即可瞬时触发底层重新握手与电量采集，彻底解决旧版“唤醒后必须手动刷新”的问题。
+## 第一次使用
 
-### 4. 驱动级滤波与 Win32 托盘投影去重
-- **异常跳变拦截（Held State）**：外设在低电压或无线瞬态干扰下若产生跳变毛刺，状态机会自动保留上一次可信电量与在线状态，界面显式标注“沿用上次读数”并推迟重试，杜绝设备在托盘频繁闪烁或被误踢下线。
-- **GDI 句柄颠簸根绝**：托盘状态解耦为 `icon_key`、`tip_text` 与 `menu_items` 独立投影，只有视觉键变更时才调用 Win32 GDI 绘制，消除高频时间戳刷新带来的系统资源浪费。
+1. **运行后找托盘。** 程序启动后驻留在任务栏通知区域；没有看到图标时，检查右侧的折叠区域，并按需要将图标拖到常显区域。
+2. **打开面板、添加设备。** 连接鼠标接收器后查看自动识别结果；键盘使用“添加键盘”，蓝牙设备先在 Windows 中完成配对与连接，再使用“添加蓝牙设备”。
+3. **按习惯设置。** 选择托盘样式、显示优先级和提醒阈值。需要随 Windows 启动时，在设置中开启“开机启动”，随后保持程序所在位置不变。
 
----
+从旧版升级时，请先在旧版托盘菜单中退出，再运行新版。设置中的“导入旧版设置”可读取旧版偏好；设备绑定与别名仅在身份能够明确匹配时恢复，未匹配的设备可重新添加。启用新版开机启动前，请先关闭旧版的开机启动，避免两个版本同时运行。
 
-## 支持设备与协议矩阵
+## 常见问题
 
-> 注：下列“协议支持”表示代码已完成协议级解析与形式化测试，实际使用效果取决于具体设备固件与无线接收器工作模式。明确标记“已验证”的型号已在物理机实测通过。
+**为什么启动后没有看到窗口？**
 
-### 1. Logitech 无线鼠标与接收器（HID++ 协议栈）
-* **支持连接**：LIGHTSPEED 2.4G 无线接收器、Bolt 接收器、Unifying 接收器。
-* **协议机制**：HID++ 1.0 / 2.0 / 4.5 寻址；支持 Feature `0x1000` (Battery Level)、`0x1004` (Voltage Curve 13 点滤波曲线) 与 `0x1001` (Battery Unified)。
-* **充电管理**：精准识别充饱状态（`Charge::Full`），充饱时智能回退至 60 秒低频心跳，避免高频唤醒外设。首次读电成功后自动探测并读取设备真实出厂型号名称。
-* **典型型号**：
-  - G502 X LIGHTSPEED（✅ 已验证）
-  - G903 LIGHTSPEED（✅ 已支持）
-  - PRO X SUPERLIGHT / SUPERLIGHT 2（🔧 协议兼容）
-  - G703 / G Pro Wireless（🔧 协议兼容）
+这是托盘工具的正常启动方式。单击任务栏中的电量图标即可打开面板；关闭面板不会退出后台监控，要停止程序请在托盘右键菜单中选择“退出”。
 
-### 2. Razer 无线鼠标（2.4G HyperSpeed）
-* **协议机制**：标准 90 字节 Feature Report 结构校验，内置独有动态 CRC 算法，支持干电池与锂电池差异化轮询。
-* **典型型号**：
-  - Basilisk V3 Pro（巴塞利斯蛇 V3 Pro，✅ 已验证）
-  - Viper V2 Pro / DeathAdder V3 Pro（🔧 协议支持）
-  - Viper Ultimate / Basilisk Ultimate / DeathAdder V2 Pro（🔧 协议支持）
+**找不到设备，或者电量没有变化怎么办？**
 
-### 3. ASUS ROG 无线外设
-* **协议机制**：支持 ROG Omni 接收器多设备报文关联与直连无线报文解析。
-* **典型型号**：ROG Azoth / ROG Gladius 系列无线键鼠（🔧 协议兼容）。
+先确认设备有电、处于正确的连接模式，并尝试唤醒设备，再点击“重新扫描”或刷新。电量是定期读取的，不是每秒变化；有些设备也只按较大的档位上报电量。仍无法读取时，可能是型号、固件或连接方式尚不兼容。
 
-### 4. 机械键盘（华奋达方案）
-* **协议机制**：支持 `VID 0x0C45` 自定义握手协议。自动识别 Windows 驱动接口，优先绑定 `UsagePage 0xFF60` / `Interface 3` 私有控制端点，杜绝主键输入接口冲突。
-* **典型型号**：Weikav 机械键盘、NUT75 机械键盘（✅ 已验证）。
+**为什么蓝牙设备已经连接，却没有电量？**
 
-### 5. 蓝牙外设（BLE GATT & 经典蓝牙）
-* **BLE 外设**：读取标准 GATT Battery Service（`0x180F` / `0x2A19`），通过 WinRT API 实现安全的作用域 RAII 释放。
-* **经典蓝牙**：通过 Windows Hands-Free Profile（HFP）端点与 SetupAPI 批量安全枚举耳机与音箱电量。
+连接成功不等于设备提供了可读取的电量。部分外设使用厂商专有方式上报，或者没有把电量交给 Windows；这类设备可能无法显示百分比。
 
----
+**“沿用上次读数”是什么意思？**
 
-## 软件功能概览
+程序发现本次读数与近期电量差异异常，暂时保留上次可信值和原更新时间，等待后续读取。它不表示刚刚取得了一笔新电量。
 
-- **直观视觉呈现**：任务栏托盘支持电量百分比、胶囊图标、双击即开、鼠标悬停详细 Tooltip 气泡展示。
-- **现代化原生界面**：支持 Windows 浅色（Light）与深色（Dark）模式自动切换，支持 0% / 25% / 100% 磨砂亚克力玻璃材质调节。
-- **自定义别名与多设备管理**：点击卡片铅笔按钮可自定义设备名称，别名将自动同步至托盘菜单、提示文案与低电量提醒。
-- **分级低电量桌面通知**：支持 10%、20%、30% 多档阈值提醒，智能过滤初始化 0% 虚假读数，杜绝骚扰。
-- **开机自启与免安装便携**：基于 Windows 注册表原生自启机制，单文件绿色免安装，解压即用。
+**为什么我的磨砂效果和截图不同？**
 
----
+壁纸、Windows 版本、系统透明效果设置、显示缩放和显卡环境都会影响观感。可在设置中调节通透度；文字与电量数字不会随背景一起变透明。
 
-## 常见问题（FAQ）
+## 反馈与授权
 
-### Q1：为什么提示“读取设备失败”或找不到罗技鼠标？
-- 部分罗技设备可能被官方 Logitech G HUB 独占占用 HID 通道。若初次探测失败，请尝试完全退出 G HUB 进程，随后在软件中点击“刷新”。
-- 确保无线接收器已牢固插入 USB 接口（非只充电的线缆）。
+遇到问题时，请在 [Issues](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues) 中说明软件版本、Windows 版本、设备完整型号、连接方式和复现步骤。附上截图会更容易定位；公开截图前请遮盖个人信息。
 
-### Q2：华奋达方案键盘在扫描中无法识别？
-- 请确认键盘已拨至 2.4G 模式且接收器已插入电脑。
-- 程序会对 `VID 0x0C45` 的所有接口进行智能优先级探测，若有第三方灯控驱动独占了控制端点，可能需要先关闭驱动软件后再次扫描。
-
-### Q3：为什么蓝牙设备搜不到？
-- 设备必须首先在 Windows 系统“蓝牙和其他设备”中完成配对与连接。
-- 设备需公开标准的 BLE Battery Service（`0x180F`）或支持免提通话（HFP）协议。部分厂商完全私有的蓝牙协议不支持通用抓取。
-
-### Q4：程序常驻时的实际资源占用是多少？
-- 在窗口关闭（闲置超 30 秒）状态下，Direct3D 渲染器与窗口完全释放，仅托盘进程监听底层事件，物理内存占用仅在 **15MB ~ 25MB** 之间，后台 CPU 占用几乎为 **0.0%**。
-
----
-
-## 许可证说明
-
-本项目遵循开源规范与非商业个人使用授权。详细条款请参阅仓库内 [LICENSE](LICENSE) 文件。
+本项目供个人学习和非商业使用，商业用途需事先获得授权。完整条款见 [LICENSE](LICENSE)。

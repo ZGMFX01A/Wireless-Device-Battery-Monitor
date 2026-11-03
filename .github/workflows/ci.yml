@@ -1,0 +1,61 @@
+name: Application checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: application-checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  public-checks:
+    name: Public source and release-contract checks
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Validate scripts without private sources or credentials
+        shell: pwsh
+        run: |
+          ./scripts/Test-Tools.ps1
+  trusted-build:
+    name: Complete application and protocol regression
+    # Unreviewed PR code never receives the private core or its credentials.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: public-checks
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: mouse-battery
+          persist-credentials: false
+      - name: Validate private checkout prerequisites
+        shell: pwsh
+        working-directory: mouse-battery
+        env:
+          PRIVATE_CORE_ACCESS_TOKEN: ${{ secrets.PRIVATE_CORE_ACCESS_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PRIVATE_CORE_ACCESS_TOKEN)) { throw 'PRIVATE_CORE_ACCESS_TOKEN is required' }
+      - name: Checkout latest private core
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ secrets.PRIVATE_CORE_REPOSITORY || 'ZGMFX01A/mouse-battery-core' }}
+          # No ref: fetch the current default branch of the core repository.
+          path: mouse-battery-core
+          token: ${{ secrets.PRIVATE_CORE_ACCESS_TOKEN }}
+          persist-credentials: false
+      - name: Install pinned toolchain and verify both packages
+        shell: pwsh
+        working-directory: mouse-battery
+        run: |
+          $toolchain = (Select-String -Path rust-toolchain.toml -Pattern '^channel = "([0-9.]+)"$').Matches.Groups[1].Value
+          if ([string]::IsNullOrEmpty($toolchain)) { throw 'Missing pinned toolchain' }
+          rustup toolchain install $toolchain --profile minimal --component rustfmt --component clippy --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Toolchain setup failed' }
+          ./scripts/Verify.ps1 -OutDir out/ci
