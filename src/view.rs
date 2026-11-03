@@ -279,7 +279,7 @@ mod material;
 #[path = "ui/panels.rs"]
 mod panels;
 #[path = "ui/skin.rs"]
-mod skin;
+pub(crate) mod skin;
 #[path = "ui/strings.rs"]
 mod strings;
 #[derive(Clone)]

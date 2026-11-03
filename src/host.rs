@@ -280,7 +280,7 @@ struct MenuKey {
 #[derive(Debug, PartialEq, Eq)]
 struct TrayView {
     icon: (Option<u8>, bool, Style, icon::Appearance),
-    tip: String,
+    tip: crate::tooltip::Content,
     menu: MenuKey,
 }
 impl TrayView {
@@ -306,7 +306,7 @@ impl TrayView {
                 s.prefs.style.clone(),
                 appearance,
             ),
-            tip: text(s),
+            tip: crate::tooltip::Content::of(s, appearance.dark),
             menu: MenuKey {
                 en: english(&s.prefs),
                 labels,
@@ -326,7 +326,6 @@ fn menu(key: &MenuKey) -> Menu {
     for (id, zh, e) in [
         ("refresh", "立即刷新", "Refresh"),
         ("settings", "设置", "Settings"),
-        ("quit", "退出", "Quit"),
     ] {
         rows.push(MenuItem::with_id(id, if en { e } else { zh }, true, None))
     }
@@ -343,6 +342,13 @@ fn menu(key: &MenuKey) -> Menu {
         let _ = styles.append(&MenuItem::with_id(id, if en { e } else { zh }, true, None));
     }
     let _ = m.append(&styles);
+    let _ = m.append(&tray_icon::menu::PredefinedMenuItem::separator());
+    let _ = m.append(&MenuItem::with_id(
+        "quit",
+        if en { "Quit" } else { "退出" },
+        true,
+        None,
+    ));
     m
 }
 fn notify_level(old: Option<u8>, value: u8, threshold: u8) -> (Option<u8>, bool) {
@@ -398,33 +404,6 @@ fn save_alerts(levels: &BTreeMap<String, u8>) -> Result<(), String> {
     t.persist(dir.join("notifications-v2.json"))
         .map_err(|e| e.error.to_string())?;
     Ok(())
-}
-fn text(s: &State) -> String {
-    let mut t = String::from("Wireless Device Battery");
-    for r in &s.rows {
-        t.push_str(&format!(
-            "\n{}: {}{}",
-            s.prefs.name(&r.device),
-            r.battery
-                .map(|b| format!(
-                    "{}%{}",
-                    b.display,
-                    if b.charge == Charge::Charging {
-                        " ⚡"
-                    } else {
-                        ""
-                    }
-                ))
-                .unwrap_or_else(|| "—".into()),
-            if r.error.is_some() { " (offline)" } else { "" }
-        ));
-    }
-    t.chars()
-        .scan(0, |n, c| {
-            *n += c.len_utf16();
-            (*n <= 120).then_some(c)
-        })
-        .collect()
 }
 fn balloon(tray: &tray_icon::TrayIcon, title: &str, text: &str) {
     let mut n = NOTIFYICONDATAW::default();
@@ -492,8 +471,8 @@ pub fn run(demo: bool) -> Result<(), String> {
     let _power = (!demo).then(|| Power::new(svc.signals.clone()));
     let s = svc.state.lock().unwrap().clone();
     let initial = TrayView::of(&s, icon::appearance());
+    let mut tooltip = crate::tooltip::Tooltip::new(initial.tip.clone())?;
     let tray = TrayIconBuilder::new()
-        .with_tooltip(&initial.tip)
         .with_icon(icon::draw(
             initial.icon.0,
             initial.icon.1,
@@ -505,7 +484,9 @@ pub fn run(demo: bool) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
     let b = bus.clone();
+    let tip_target = tooltip.target();
     TrayIconEvent::set_event_handler(Some(move |e| {
+        tip_target.event(&e);
         if let TrayIconEvent::Click {
             button: MouseButton::Left,
             button_state: MouseButtonState::Up,
@@ -574,6 +555,7 @@ pub fn run(demo: bool) -> Result<(), String> {
             break;
         }
         if msg.message == WM_TIMER
+            && msg.hwnd.is_null()
             && gui.as_ref().is_some_and(|g| {
                 (!g.ready || g.closing) && g.ready_timer != 0 && g.ready_timer == msg.wParam
             })
@@ -596,7 +578,7 @@ pub fn run(demo: bool) -> Result<(), String> {
                 bus.post(Msg::Open(mode, a));
             }
         }
-        if msg.message == WM_TIMER && timer != 0 && msg.wParam == timer {
+        if msg.message == WM_TIMER && msg.hwnd.is_null() && timer != 0 && msg.wParam == timer {
             unsafe {
                 KillTimer(std::ptr::null_mut(), timer);
             }
@@ -626,7 +608,7 @@ pub fn run(demo: bool) -> Result<(), String> {
                             .map_err(|e| e.to_string())?;
                     }
                     if next.tip != tray_view.tip {
-                        let _ = tray.set_tooltip(Some(&next.tip));
+                        tooltip.update(next.tip.clone());
                     }
                     if next.menu != tray_view.menu {
                         tray.set_menu(Some(Box::new(menu(&next.menu))));
@@ -870,6 +852,17 @@ mod alert_tests {
 #[cfg(test)]
 mod audit_tray {
     use super::*;
+
+    #[test]
+    fn quit_is_the_last_menu_item_in_both_languages() {
+        for en in [false, true] {
+            let m = menu(&MenuKey {
+                en,
+                labels: vec!["Mouse: 69%".into()],
+            });
+            assert_eq!(m.items().last().unwrap().id().0, "quit");
+        }
+    }
 
     #[test]
     fn tray_keys_do_not_swallow_receipts_or_rebuild_for_timestamp() {

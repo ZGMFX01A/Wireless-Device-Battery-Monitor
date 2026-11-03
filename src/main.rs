@@ -6,6 +6,7 @@ mod model;
 mod service;
 mod startup;
 mod swap;
+mod tooltip;
 mod update;
 #[cfg(test)]
 #[path = "../version_format.rs"]
