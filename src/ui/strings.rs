@@ -67,6 +67,7 @@ pub fn label(en: bool, key: &str) -> &'static str {
         "device.unbind_btn" => ("解除绑定", "Unbind"),
         "device.rename_btn" => ("修改设备名称", "Rename device"),
         "settings.title" => ("偏好设置", "Settings"),
+        "about.homepage" => ("项目主页 ↗", "Project Homepage ↗"),
         "settings.tray_style.title" => ("托盘图标样式", "Tray Icon Style"),
         "settings.tray_style.subtitle" => (
             "选择胶囊电池、极简纯数字或圆环",

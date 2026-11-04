@@ -1,6 +1,7 @@
 //! Native layout mirrors web_ui/{theme-layout,devices,settings}.css in logical pixels.
 use super::{skin::*, *};
 use battery_protocol::Source;
+const PROJECT_HOME_URL: &str = "https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor";
 fn time_text(sec: u64) -> Option<String> {
     if sec == 0 {
         return None;
@@ -783,6 +784,21 @@ impl Panel {
             .items_center()
             .child(group)
             .child(row().mt(px(14.)).gap(px(8.)).child(check).child(import))
+            .child(self.author_footer(k))
+    }
+    fn author_footer(&self, k: Skin) -> Stateful<Div> {
+        action("project-home")
+            .mt(px(10.))
+            .h(px(30.))
+            .px(px(12.))
+            .gap(px(4.))
+            .rounded_full()
+            .hover(move |d| d.bg(k.grad(false)))
+            .child(txt("Built by", 11., k.dim()))
+            .child(txt("ZGMFX01A", 11., rgb(GREEN).into()).font_weight(FontWeight::MEDIUM))
+            .child(txt("·", 11., k.dim()))
+            .child(txt(self.t("about.homepage"), 11., k.dim()))
+            .on_click(|_, _, cx| cx.open_url(PROJECT_HOME_URL))
     }
 }
 impl Render for Panel {
