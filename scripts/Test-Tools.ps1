@@ -38,4 +38,5 @@ try {
     $record.ok=$false; Reject { Get-VerifiedArtifact $temp $record '1.2.3' }; $record.ok=$true
     [IO.File]::AppendAllText($exe,'changed'); Reject { Get-VerifiedArtifact $temp $record '1.2.3' }
 } finally { if(Test-Path $temp) { Remove-Item -LiteralPath $temp -Recurse -Force } }
+& "$PSScriptRoot/Test-Publish.ps1"
 Write-Host "$count PowerShell checks passed"

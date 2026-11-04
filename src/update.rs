@@ -1,6 +1,9 @@
-//! An isolated, signed side-by-side update channel. Never installs Python release assets.
+//! Signed portable-EXE updates. Transport, scheduling and file replacement are separate.
+mod network;
+pub mod schedule;
 use crate::model::State;
 use ed25519_dalek::{Signature, VerifyingKey};
+pub use network::DEFAULT_MIRROR;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,7 +16,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
 };
 const ROOT: &str = "https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/releases";
 const LATEST: &str =
@@ -47,8 +49,8 @@ fn release_envelope(data: &[u8]) -> Result<Vec<u8>, String> {
         body: String,
     }
     let release: Release = serde_json::from_slice(data).map_err(|e| e.to_string())?;
-    let (_, content) = release
-        .body
+    let body = release.body.replace("\r\n", "\n");
+    let (_, content) = body
         .split_once("<!-- gpui-update-manifest\n")
         .ok_or("release has no signed update metadata")?;
     let (envelope, _) = content
@@ -129,15 +131,6 @@ fn verify_bytes(
     }
     Ok(())
 }
-fn client() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
-        .https_only(true)
-        .user_agent("mouse-battery-gpui")
-        .connect_timeout(Duration::from_secs(8))
-        .timeout(Duration::from_secs(90))
-        .build()
-        .map_err(|e| e.to_string())
-}
 fn base() -> Result<PathBuf, String> {
     std::env::var_os("LOCALAPPDATA")
         .map(|p| {
@@ -157,7 +150,31 @@ pub(crate) fn verified(p: &Path, m: &Manifest) -> Result<(), String> {
     )
 }
 /// Verified decoded metadata together with the signed bytes used by the independent swap helper.
-type SignedManifestCache = Arc<Mutex<Option<(Manifest, Vec<u8>)>>>;
+type SignedManifestCache = Arc<Mutex<Option<(Manifest, Vec<u8>, usize)>>>;
+
+fn signed_release(data: &[u8], key: &str, current: &str) -> Result<(Manifest, Vec<u8>), String> {
+    let envelope = release_envelope(data)?;
+    let e: Envelope = serde_json::from_slice(&envelope).map_err(|e| e.to_string())?;
+    let manifest = validate(&e, key, current)?;
+    let release: serde_json::Value = serde_json::from_slice(data).map_err(|e| e.to_string())?;
+    if release["tag_name"].as_str() != Some(&format!("v{}", manifest.version))
+        || release["draft"].as_bool() == Some(true)
+        || release["prerelease"].as_bool() == Some(true)
+    {
+        return Err("Release identity does not match its signed metadata".into());
+    }
+    Ok((manifest, envelope))
+}
+
+pub(crate) fn record_failed(man: &Manifest) -> Result<(), String> {
+    let dir = base()?.join(&man.version);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fs::write(
+        dir.join(format!("failed-{}", man.sha256.to_ascii_lowercase())),
+        b"Launch/replace failed; manual retry allowed",
+    )
+    .map_err(|e| e.to_string())
+}
 pub struct Updates {
     state: Arc<Mutex<State>>,
     busy: Arc<AtomicBool>,
@@ -185,11 +202,22 @@ impl Updates {
             worker: None,
         }
     }
+    pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::Acquire)
+    }
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);
         self.staged.lock().unwrap().take();
+        self.state.lock().unwrap().update = Status::Cancelled;
+        (self.wake)();
     }
     pub fn run(&mut self, download: bool) {
+        self.start(download, false);
+    }
+    pub fn automatic_check(&mut self) {
+        self.start(false, true);
+    }
+    fn start(&mut self, download: bool, automatic: bool) {
         if self.busy.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -198,6 +226,21 @@ impl Updates {
         if !download {
             self.manifest.lock().unwrap().take();
         }
+        let mirrors = {
+            let mut state = self.state.lock().unwrap();
+            state.bytes_per_sec = 0;
+            state.update = if download {
+                Status::Downloading(0, state.release_size)
+            } else {
+                Status::Checking
+            };
+            if !download {
+                state.release_notes.clear();
+                state.release_size = 0;
+            }
+            state.prefs.update_mirrors.clone()
+        };
+        (self.wake)();
         let (st, busy, c, m, ready, w, demo) = (
             self.state.clone(),
             self.busy.clone(),
@@ -208,115 +251,126 @@ impl Updates {
             self.demo,
         );
         self.worker = Some(thread::spawn(move || {
-            let post = |s| {
-                st.lock().unwrap().update = s;
-                w()
-            };
-            let result = (|| {
+            let result = (|| -> Result<Status, String> {
                 if demo {
-                    return Err("预览模式不访问更新服务 / Preview is offline".into());
+                    return Err("Preview is offline".into());
                 }
-                let key=KEY.ok_or("此版本未启用自动更新，请从软件发布页下载。 / Automatic updates are unavailable; download from the releases page.")?;
-                let client = client()?;
-                if !download {
-                    post(Status::Checking);
-                    let mut release = Vec::new();
-                    client
-                        .get(LATEST)
-                        .send()
-                        .and_then(|r| r.error_for_status())
-                        .map_err(|e| e.to_string())?
-                        .take(1048577)
-                        .read_to_end(&mut release)
-                        .map_err(|e| e.to_string())?;
-                    if release.len() > 1048576 {
-                        return Err("oversized release response".into());
-                    }
-                    let data = release_envelope(&release)?;
-                    let env: Envelope = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
-                    let v = validate(&env, key, env!("APP_VERSION"))?;
-                    if v.version == env!("APP_VERSION") {
-                        return Ok(Status::Current);
-                    }
-                    {
-                        let mut state = st.lock().unwrap();
-                        state.release_size = v.size;
-                        state.release_notes =
-                            if crate::view::english(&state.prefs) && !v.notes_en.is_empty() {
-                                v.notes_en.clone()
-                            } else {
-                                v.notes.clone()
-                            };
-                        state.bytes_per_sec = 0;
-                    }
-                    let version = v.version.clone();
-                    *m.lock().unwrap() = Some((v, data));
-                    return Ok(Status::Available(version));
-                }
-                let (man, envelope) = m
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .ok_or("check for a signed release first")?;
-                let dir = base()?.join(&man.version);
-                fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-                let exe = dir.join("mouse-battery-gpui.exe");
-                if exe.exists() && verified(&exe, &man).is_err() {
-                    // Retain a corrupt cache for diagnosis, but do not let it poison every retry.
-                    let quarantine = tempfile::Builder::new()
-                        .prefix("rejected-")
-                        .tempdir_in(&dir)
-                        .map_err(|e| e.to_string())?;
-                    fs::rename(&exe, quarantine.path().join("candidate.bin"))
-                        .map_err(|e| e.to_string())?;
-                    let _ = quarantine.keep();
-                }
-                if c.load(Ordering::Acquire) {
-                    return Err("cancelled".into());
-                }
-                post(Status::Downloading(0, man.size));
-                if !exe.exists() {
-                    let mut temp =
-                        tempfile::NamedTempFile::new_in(&dir).map_err(|e| e.to_string())?;
-                    let response = client
-                        .get(asset_url(&man.version))
-                        .send()
-                        .and_then(|r| r.error_for_status())
-                        .map_err(|e| e.to_string())?;
-                    let last = std::cell::Cell::new(0);
-                    let started = std::time::Instant::now();
-                    verify_bytes(response, &mut temp, &man, &c, |n| {
-                        if n - last.get() >= 262144 || n == man.size {
-                            st.lock().unwrap().bytes_per_sec =
-                                (n as f64 / started.elapsed().as_secs_f64().max(0.001)) as u64;
-                            post(Status::Downloading(n, man.size));
-                            last.set(n);
+                let key = KEY.ok_or("Automatic updates are unavailable in this build; download from the releases page")?;
+                let transport = network::Transport::new(&mirrors)?;
+                network::run(async {
+                    if !download {
+                        let ((man, envelope), route) = transport
+                            .metadata(LATEST, &c, |data| {
+                                signed_release(data, key, env!("APP_VERSION"))
+                            })
+                            .await?;
+                        if man.version == env!("APP_VERSION") {
+                            return Ok(Status::Current);
                         }
-                    })?;
-                    temp.as_file().sync_all().map_err(|e| e.to_string())?;
-                    temp.persist_noclobber(&exe)
+                        if automatic
+                            && base()?
+                                .join(&man.version)
+                                .join(format!("failed-{}", man.sha256.to_ascii_lowercase()))
+                                .is_file()
+                        {
+                            return Err("This update previously failed to start; automatic installation paused. Manual retry is available.".into());
+                        }
+                        {
+                            let mut state = st.lock().unwrap();
+                            state.release_size = man.size;
+                            state.release_notes =
+                                if crate::view::english(&state.prefs) && !man.notes_en.is_empty() {
+                                    man.notes_en.clone()
+                                } else {
+                                    man.notes.clone()
+                                };
+                        }
+                        let version = man.version.clone();
+                        *m.lock().unwrap() = Some((man, envelope, route));
+                        return Ok(Status::Available(version));
+                    }
+                    let (man, envelope, preferred) = m
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .ok_or("check for a signed release first")?;
+                    let dir = base()?.join(&man.version);
+                    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                    let exe = dir.join("mouse-battery-gpui.exe");
+                    if exe.exists() && verified(&exe, &man).is_err() {
+                        let quarantine = tempfile::Builder::new()
+                            .prefix("rejected-")
+                            .tempdir_in(&dir)
+                            .map_err(|e| e.to_string())?;
+                        fs::rename(&exe, quarantine.path().join("candidate.bin"))
+                            .map_err(|e| e.to_string())?;
+                        let _ = quarantine.keep();
+                    }
+                    if c.load(Ordering::Acquire) {
+                        return Err("cancelled".into());
+                    }
+                    if !exe.exists() {
+                        let part = dir.join(format!("{}.part", man.sha256.to_ascii_lowercase()));
+                        let previous = std::cell::Cell::new(part.metadata().map_or(0, |m| m.len()));
+                        let received = std::cell::Cell::new(0u64);
+                        let started = std::time::Instant::now();
+                        transport
+                            .download(
+                                &asset_url(&man.version),
+                                preferred,
+                                &part,
+                                network::Expected {
+                                    size: man.size,
+                                    sha256: &man.sha256,
+                                },
+                                &c,
+                                |n| {
+                                    received.set(
+                                        received
+                                            .get()
+                                            .saturating_add(n.saturating_sub(previous.replace(n))),
+                                    );
+                                    let mut state = st.lock().unwrap();
+                                    state.bytes_per_sec = (received.get() as f64
+                                        / started.elapsed().as_secs_f64().max(0.001))
+                                        as u64;
+                                    if !c.load(Ordering::Acquire) {
+                                        state.update = Status::Downloading(n, man.size);
+                                    }
+                                    drop(state);
+                                    w();
+                                },
+                            )
+                            .await?;
+                        if c.load(Ordering::Acquire) {
+                            return Err("cancelled".into());
+                        }
+                        verified(&part, &man)?;
+                        fs::rename(&part, &exe).map_err(|e| e.to_string())?;
+                    }
+                    verified(&exe, &man)?;
+                    let mut tmp =
+                        tempfile::NamedTempFile::new_in(&dir).map_err(|e| e.to_string())?;
+                    tmp.write_all(&envelope)
+                        .and_then(|_| tmp.as_file().sync_all())
+                        .map_err(|e| e.to_string())?;
+                    tmp.persist(dir.join("signed.json"))
                         .map_err(|e| e.error.to_string())?;
-                }
-                verified(&exe, &man)?;
-                let mut tmp = tempfile::NamedTempFile::new_in(&dir).map_err(|e| e.to_string())?;
-                tmp.write_all(&envelope)
-                    .and_then(|_| tmp.as_file().sync_all())
-                    .map_err(|e| e.to_string())?;
-                tmp.persist(dir.join("signed.json"))
-                    .map_err(|e| e.error.to_string())?;
-                let v = man.version.clone();
-                *ready.lock().unwrap() = Some((exe, man));
-                Ok(Status::Ready(v))
+                    let version = man.version.clone();
+                    *ready.lock().unwrap() = Some((exe, man));
+                    Ok(Status::Ready(version))
+                })
             })();
-            let final_status = if c.load(Ordering::Acquire) {
-                Status::Cancelled
-            } else {
-                result.unwrap_or_else(Status::Error)
-            };
             {
                 let mut state = st.lock().unwrap();
-                state.update = final_status;
-                // Publish the final state before permitting another worker to start.
+                state.update = if c.load(Ordering::Acquire) {
+                    Status::Cancelled
+                } else {
+                    result.unwrap_or_else(Status::Error)
+                };
+                if !matches!(state.update, Status::Ready(_)) {
+                    ready.lock().unwrap().take();
+                }
                 busy.store(false, Ordering::Release);
             }
             w();
@@ -422,6 +476,22 @@ mod tests {
             let response = serde_json::to_vec(&serde_json::json!({ "body": body })).unwrap();
             assert!(release_envelope(&response).is_err());
         }
+    }
+    #[test]
+    fn release_tag_and_signature_must_describe_the_same_stable_release() {
+        let (envelope, key, _) = signed();
+        let body = format!(
+            "Notes\r\n<!-- gpui-update-manifest\r\n{}\r\n-->\r\n",
+            serde_json::to_string(&envelope).unwrap()
+        );
+        let mut release =
+            serde_json::json!({"body":body,"tag_name":"v1.2.3","draft":false,"prerelease":false});
+        assert!(signed_release(&serde_json::to_vec(&release).unwrap(), &key, "1.0.0").is_ok());
+        release["tag_name"] = "v1.2.4".into();
+        assert!(signed_release(&serde_json::to_vec(&release).unwrap(), &key, "1.0.0").is_err());
+        release["tag_name"] = "v1.2.3".into();
+        release["prerelease"] = true.into();
+        assert!(signed_release(&serde_json::to_vec(&release).unwrap(), &key, "1.0.0").is_err());
     }
     #[test]
     fn transfers() {

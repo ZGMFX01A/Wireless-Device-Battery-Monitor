@@ -45,6 +45,8 @@ pub struct Prefs {
     pub lang: Language,
     pub glass: u8,
     pub auto_update: bool,
+    /// Empty means GitHub/system proxy only; defaults provide an automatic fallback.
+    pub update_mirrors: Vec<String>,
     pub low: u8,
     pub poll_interval_secs: u64,
     pub keyboard: Option<String>,
@@ -62,6 +64,7 @@ impl Default for Prefs {
             lang: Default::default(),
             glass: 25,
             auto_update: false,
+            update_mirrors: vec![crate::update::DEFAULT_MIRROR.into()],
             low: 20,
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             keyboard: None,

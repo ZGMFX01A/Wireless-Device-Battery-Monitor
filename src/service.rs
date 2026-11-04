@@ -190,6 +190,11 @@ fn next_poll(slots: &HashMap<String, Slot>, discovery: Option<u64>, now: u64) ->
         .min()
         .unwrap_or(now + 3_600_000)
 }
+fn stale_bluetooth(slots: &HashMap<String, Slot>, prefs: &Prefs) -> bool {
+    slots
+        .values()
+        .any(|s| s.row.device.kind == Kind::Bluetooth && prefs.bound(&s.row.device) && s.fail >= 3)
+}
 fn missing_devices<'a>(
     prefs: &Prefs,
     devices: impl Iterator<Item = &'a Descriptor> + Clone,
@@ -425,14 +430,22 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
         }
         let mut recover_keyboard = false;
         if clock() >= discovery_at {
+            // An existing descriptor can contain obsolete Windows endpoint IDs.
+            // Repeatedly querying that descriptor is not discovery/recovery.
+            let stale_bt = bt
+                && stale_bluetooth(&slots, &state.lock().unwrap().prefs)
+                && last_fallback.is_none_or(|last| clock().saturating_sub(last) >= 60_000);
             let missing = missing_devices(
                 &state.lock().unwrap().prefs,
                 devices.iter().map(Target::data),
                 bt,
             );
-            if missing.0 && flags & SCAN == 0 {
+            if (missing.0 || stale_bt) && flags & SCAN == 0 {
                 recover_only = true;
                 flags |= SCAN;
+                if stale_bt {
+                    last_fallback = Some(clock());
+                }
             }
             recover_keyboard = missing.1;
             discovery_at = clock() + interval_ms;
@@ -654,7 +667,8 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             wake();
         }
         let missing = missing_devices(&prefs, devices.iter().map(Target::data), bt);
-        let discovery = (missing.0 || missing.1).then_some(discovery_at);
+        let discovery = (missing.0 || missing.1 || (bt && stale_bluetooth(&slots, &prefs)))
+            .then_some(discovery_at);
         let next = next_poll(&slots, discovery, clock());
         delay = Duration::from_millis(next.saturating_sub(clock()).max(25));
     }
@@ -841,6 +855,23 @@ mod tests {
     #[test]
     fn startup_without_targets_retries_discovery_before_hour_long_idle() {
         assert_eq!(next_poll(&HashMap::new(), Some(15_000), 0), 15_000);
+    }
+    #[test]
+    fn stale_bluetooth_descriptor_is_rediscovered_even_when_its_id_is_present() {
+        let mut state = State::demo();
+        let mut s = slot();
+        s.row.device.kind = Kind::Bluetooth;
+        state.prefs.bluetooth.insert(s.row.device.id.clone());
+        let id = s.row.device.id.clone();
+        s.fail = 3;
+        let slots = HashMap::from([(id.clone(), s)]);
+        assert_eq!(
+            missing_devices(&state.prefs, slots.values().map(|s| &s.row.device), true),
+            (false, false)
+        );
+        assert!(stale_bluetooth(&slots, &state.prefs));
+        state.prefs.bluetooth.remove(&id);
+        assert!(!stale_bluetooth(&slots, &state.prefs));
     }
     #[test]
     fn missing_keyboard_discovery_is_not_delayed_by_healthy_mouse() {

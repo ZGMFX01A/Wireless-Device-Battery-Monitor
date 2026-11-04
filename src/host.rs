@@ -28,6 +28,16 @@ use windows_sys::Win32::{
 };
 const WAKE: u32 = WM_APP + 73;
 const REAP: usize = 73;
+struct UpdateTimer(usize);
+impl Drop for UpdateTimer {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            unsafe {
+                KillTimer(std::ptr::null_mut(), self.0);
+            }
+        }
+    }
+}
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
 }
@@ -118,6 +128,7 @@ enum Msg {
     Gone(u64),
     Action(Command),
     UpdateHandoff(Result<std::process::ChildStdin, String>),
+    Install(bool),
     Quit,
 }
 #[derive(Clone)]
@@ -464,10 +475,18 @@ pub fn run(demo: bool) -> Result<(), String> {
     let wb = bus.clone();
     let mut updater =
         crate::update::Updates::new(svc.state.clone(), demo, move || wb.post(Msg::Data));
-    let mut auto_run = !demo && svc.state.lock().unwrap().prefs.auto_update;
-    if auto_run {
-        updater.run(false);
-    }
+    let recovering = std::env::args().any(|s| s == "--gpui-health-start")
+        || std::env::var_os("WDBM_UPDATE_ROLLED_BACK").is_some();
+    let mut update_schedule = crate::update::schedule::Schedule::new(
+        !demo && svc.state.lock().unwrap().prefs.auto_update,
+        recovering,
+        Instant::now(),
+    );
+    let update_timer = UpdateTimer(if demo {
+        0
+    } else {
+        unsafe { SetTimer(std::ptr::null_mut(), 0, 60_000, None) }
+    });
     let _power = (!demo).then(|| Power::new(svc.signals.clone()));
     let s = svc.state.lock().unwrap().clone();
     let initial = TrayView::of(&s, icon::appearance());
@@ -549,10 +568,14 @@ pub fn run(demo: bool) -> Result<(), String> {
     }
     let probe_mode = demo && std::env::args().any(|s| s == "--exercise-tray");
     let mut handing_off = false;
+    let mut automatic_handoff = false;
     'pump: loop {
         let rc = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
         if rc <= 0 {
             break;
+        }
+        if msg.message == WM_TIMER && update_timer.0 != 0 && msg.wParam == update_timer.0 {
+            bus.post(Msg::Data);
         }
         if msg.message == WM_TIMER
             && msg.hwnd.is_null()
@@ -614,27 +637,21 @@ pub fn run(demo: bool) -> Result<(), String> {
                         tray.set_menu(Some(Box::new(menu(&next.menu))));
                     }
                     tray_view = next;
+                    use crate::update::schedule::Action;
+                    match update_schedule.tick(
+                        !demo && s.prefs.auto_update,
+                        updater.is_busy(),
+                        &s.update,
+                        Instant::now(),
+                    ) {
+                        Some(Action::Check) => updater.automatic_check(),
+                        Some(Action::Download) => updater.run(true),
+                        Some(Action::Install) => bus.post(Msg::Install(true)),
+                        Some(Action::Cancel) => updater.cancel(),
+                        None => (),
+                    }
                     if last.as_ref() == Some(&s) {
                         continue;
-                    }
-                    if auto_run {
-                        if !s.prefs.auto_update {
-                            auto_run = false;
-                        } else {
-                            match &s.update {
-                                crate::update::Status::Available(_) => {
-                                    bus.post(Msg::Action(Command::DownloadUpdate))
-                                }
-                                crate::update::Status::Ready(_) => {
-                                    auto_run = false;
-                                    bus.post(Msg::Action(Command::InstallUpdate))
-                                }
-                                crate::update::Status::Current
-                                | crate::update::Status::Cancelled
-                                | crate::update::Status::Error(_) => auto_run = false,
-                                _ => (),
-                            }
-                        }
                     }
                     let mut changed = migrate_alerts(&mut alert, &s.candidates);
                     for r in &s.rows {
@@ -779,22 +796,39 @@ pub fn run(demo: bool) -> Result<(), String> {
                         c => bus.post(Msg::Action(c)),
                     }
                 }
-                Msg::Action(Command::InstallUpdate) if !handing_off => {
+                Msg::Action(Command::InstallUpdate) => {
+                    update_schedule.manual(Instant::now());
+                    bus.post(Msg::Install(false));
+                }
+                Msg::Install(automatic)
+                    if !handing_off
+                        && (!automatic || svc.state.lock().unwrap().prefs.auto_update) =>
+                {
                     match updater.install_input() {
                         Ok((path, man)) => {
                             handing_off = true;
+                            automatic_handoff = automatic;
                             let b = bus.clone();
                             thread::spawn(move || {
                                 b.post(Msg::UpdateHandoff(crate::swap::prepare(&path, &man)))
                             });
                         }
                         Err(e) => {
-                            svc.state.lock().unwrap().note = e;
+                            let mut state = svc.state.lock().unwrap();
+                            state.note = e.clone();
+                            state.update = crate::update::Status::Error(e);
                             bus.post(Msg::Data);
                         }
                     }
                 }
                 Msg::UpdateHandoff(Ok(mut pipe)) => {
+                    if updater.install_input().is_err()
+                        || (automatic_handoff && !svc.state.lock().unwrap().prefs.auto_update)
+                    {
+                        // Closing the pipe sends EOF, so an armed helper cannot commit.
+                        handing_off = false;
+                        continue;
+                    }
                     if writeln!(pipe, "GPUI-DEPART/1")
                         .and_then(|_| pipe.flush())
                         .is_ok()
@@ -807,12 +841,24 @@ pub fn run(demo: bool) -> Result<(), String> {
                 }
                 Msg::UpdateHandoff(Err(e)) => {
                     handing_off = false;
-                    svc.state.lock().unwrap().note = e;
+                    let mut state = svc.state.lock().unwrap();
+                    state.note = e.clone();
+                    state.update = crate::update::Status::Error(e);
                     bus.post(Msg::Data);
                 }
-                Msg::Action(Command::CheckUpdate) => updater.run(false),
-                Msg::Action(Command::DownloadUpdate) => updater.run(true),
-                Msg::Action(Command::CancelUpdate) => updater.cancel(),
+                Msg::Install(_) => (),
+                Msg::Action(Command::CheckUpdate) => {
+                    update_schedule.manual(Instant::now());
+                    updater.run(false);
+                }
+                Msg::Action(Command::DownloadUpdate) => {
+                    update_schedule.manual(Instant::now());
+                    updater.run(true);
+                }
+                Msg::Action(Command::CancelUpdate) => {
+                    update_schedule.manual(Instant::now());
+                    updater.cancel();
+                }
                 Msg::Action(Command::OpenUpdate) => {
                     if let Err(e) = updater.open_dir() {
                         svc.state.lock().unwrap().note = e;

@@ -14,7 +14,7 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0},
-    Storage::FileSystem::ReplaceFileW,
+    Storage::FileSystem::{CopyFileW, ReplaceFileW},
     System::Threading::{
         OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
         QueryFullProcessImageNameW, WaitForSingleObject,
@@ -97,6 +97,8 @@ pub fn prepare(src: &Path, m: &Manifest) -> R<ChildStdin> {
         return Err("signed candidate changed".into());
     }
     verified(src, &validated)?;
+    // Check the verified image before asking the old application to shut down.
+    preflight(src, &validated.version)?;
     let job = tempfile::Builder::new()
         .prefix(PREFIX)
         .tempdir_in(dir)
@@ -106,7 +108,7 @@ pub fn prepare(src: &Path, m: &Manifest) -> R<ChildStdin> {
     fs::copy(src, job.path().join("candidate.exe")).map_err(err)?;
     fs::copy(meta, job.path().join("signed.json")).map_err(err)?;
     verified(&job.path().join("candidate.exe"), &validated)?;
-    let path = job.keep();
+    let path = job.path().to_path_buf();
     let mut child = Command::new(&helper)
         .arg("--gpui-update-worker")
         .env("GPUI_UPDATE_PARENT", std::process::id().to_string())
@@ -121,7 +123,55 @@ pub fn prepare(src: &Path, m: &Manifest) -> R<ChildStdin> {
         let _ = child.wait();
         return Err(e);
     }
+    let _ = job.keep();
     child.stdin.take().ok_or("missing transfer channel".into())
+}
+
+fn preflight(path: &Path, version: &str) -> R<()> {
+    for (arg, expected) in [("--version", Some(version)), ("--smoke-test", None)] {
+        let mut child = Command::new(path)
+            .arg(arg)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(err)?;
+        let stdout = child.stdout.take().ok_or("missing preflight pipe")?;
+        let (tx, rx) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let mut output = String::new();
+            let result = stdout
+                .take(1024)
+                .read_to_string(&mut output)
+                .map(|_| output);
+            let _ = tx.send(result);
+        });
+        let result: R<()> = (|| {
+            let output = rx
+                .recv_timeout(Duration::from_secs(10))
+                .map_err(|_| "candidate preflight timed out")?
+                .map_err(err)?;
+            let end = Instant::now() + Duration::from_secs(2);
+            loop {
+                if let Some(code) = child.try_wait().map_err(err)? {
+                    if !code.success() || expected.is_some_and(|v| output.trim() != v) {
+                        return Err("candidate version/smoke preflight failed".into());
+                    }
+                    return Ok(());
+                }
+                if Instant::now() >= end {
+                    return Err("candidate preflight did not exit".into());
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        })();
+        if result.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        result?;
+    }
+    Ok(())
 }
 struct Handle(HANDLE);
 impl Drop for Handle {
@@ -207,20 +257,57 @@ fn transition(
     new_hash: &str,
     launch: impl FnOnce(&Path) -> R<()>,
 ) -> R<()> {
+    transition_using(job, target, old_hash, new_hash, swap, launch)
+}
+
+// ReplaceFile can fail AFTER moving the target aside (ERROR 1177). Restore a
+// missing path with fail-if-exists semantics; never overwrite a concurrent file.
+fn restore_missing(target: &Path, backup: &Path, old_hash: &str) -> R<()> {
+    if target.exists() {
+        return Ok(());
+    }
+    if sha(backup)? != old_hash {
+        return Err("recovery backup hash mismatch".into());
+    }
+    if unsafe { CopyFileW(wide(backup).as_ptr(), wide(target).as_ptr(), 1) } == 0 {
+        return Err(err(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+fn transition_using(
+    job: &Path,
+    target: &Path,
+    old_hash: &str,
+    new_hash: &str,
+    mut replace: impl FnMut(&Path, &Path, &Path) -> R<()>,
+    launch: impl FnOnce(&Path) -> R<()>,
+) -> R<()> {
     let candidate = job.join("candidate.exe");
     let backup = job.join("previous.exe");
     if sha(target)? != old_hash || sha(&candidate)? != new_hash {
         return Err("image changed before transaction".into());
     }
     fs::write(job.join("stage.txt"), "prepared").map_err(err)?;
-    swap(target, &candidate, &backup)?;
+    if let Err(e) = replace(target, &candidate, &backup) {
+        if !target.exists() && backup.exists() {
+            restore_missing(target, &backup, old_hash)?;
+            fs::write(job.join("stage.txt"), "rolled-back").map_err(err)?;
+        }
+        return Err(e);
+    }
     if let Err(e) = launch(target) {
         if sha(target)? != new_hash || sha(&backup)? != old_hash {
             return Err(format!(
                 "{e}; concurrent change; refusing rollback, backup retained"
             ));
         }
-        swap(target, &backup, &job.join("rejected.exe"))?;
+        if let Err(rollback) = replace(target, &backup, &job.join("rejected.exe")) {
+            restore_missing(target, &backup, old_hash)?;
+            if sha(target)? != old_hash {
+                return Err(format!("{e}; rollback: {rollback}"));
+            }
+        }
         fs::write(job.join("stage.txt"), "rolled-back").map_err(err)?;
         return Err(e);
     }
@@ -272,6 +359,11 @@ pub fn helper() -> R<()> {
     BufReader::new(std::io::stdin().take(64))
         .read_line(&mut ans)
         .map_err(err)?;
+    if ans.is_empty() {
+        // The parent cancelled while preparation was running. EOF is a normal
+        // abort, not an error dialog in an otherwise invisible helper process.
+        return Ok(());
+    }
     if ans.trim() != "GPUI-DEPART/1" {
         return Err("handoff not authorized".into());
     }
@@ -279,16 +371,18 @@ pub fn helper() -> R<()> {
         return Err("previous process is still active; installation unchanged".into());
     }
     let res = transition(job, &target, &old, &man.sha256.to_ascii_lowercase(), launch);
-    if res.is_err()
-        && fs::read_to_string(job.join("stage.txt")).ok().as_deref() == Some("rolled-back")
-        && sha(&target)? == old
-    {
-        Command::new(&target)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(err)?;
+    if res.is_err() {
+        let _ = crate::update::record_failed(&man);
+        // Also restart after a failed FIRST replacement, not only health rollback.
+        if sha(&target).ok().as_deref() == Some(&old) {
+            Command::new(&target)
+                .env("WDBM_UPDATE_ROLLED_BACK", "1")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(err)?;
+        }
     }
     res
 }
@@ -339,6 +433,33 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(t).unwrap(), "concurrent change");
         assert_eq!(sha(&j.join("previous.exe")).unwrap(), a);
+    }
+    #[test]
+    fn partial_replace_failure_restores_missing_executable() {
+        let (_d, t, j, a, b) = setup();
+        let result = transition_using(
+            &j,
+            &t,
+            &a,
+            &b,
+            |target, _, backup| {
+                fs::rename(target, backup).unwrap();
+                Err("simulated ERROR_UNABLE_TO_MOVE_REPLACEMENT_2".into())
+            },
+            |_| panic!("failed replacement must not launch candidate"),
+        );
+        assert!(result.is_err());
+        assert_eq!(sha(&t).unwrap(), a);
+        assert_eq!(sha(&j.join("previous.exe")).unwrap(), a);
+    }
+    #[test]
+    fn restore_does_not_overwrite_a_concurrent_target() {
+        let (_d, t, j, a, _) = setup();
+        let backup = j.join("previous.exe");
+        fs::write(&backup, b"old GPUI").unwrap();
+        fs::write(&t, b"concurrent file").unwrap();
+        restore_missing(&t, &backup, &a).unwrap();
+        assert_eq!(fs::read(t).unwrap(), b"concurrent file");
     }
 }
 

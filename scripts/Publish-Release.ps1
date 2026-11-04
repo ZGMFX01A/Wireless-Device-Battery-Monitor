@@ -37,17 +37,38 @@ if (!$release) {
     $release=JsonApi 'POST' "repos/$Repository/releases" @{tag_name=$Tag;target_commitish=$commit.sha;name=$Tag;body=$notes.body;draft=$true}
 }
 $endpoint="repos/$Repository/releases/$($release.id)"
-# Address the release by ID: same-tag drafts must never receive the public upload.
-foreach($asset in $release.assets) {
-    if ($asset.name -ceq $name) { Api @("repos/$Repository/releases/assets/$($asset.id)",'--method','DELETE') | Out-Null }
-}
-$upload=Api @("https://uploads.github.com/repos/$Repository/releases/$($release.id)/assets?name=$name",'--method','POST','--header','Content-Type: application/octet-stream','--input',$exe)
-if ($upload.name -cne $name -or $upload.state -cne 'uploaded' -or $upload.size -ne $size -or $upload.digest -cne "sha256:$hash") { throw 'Uploaded executable hash or size mismatch' }
+# Upload first. A failed upload must not remove the working public executable.
+# The temporary asset and previous asset are removed only after publication.
+$suffix=[guid]::NewGuid().ToString('N')
+$stagedName="$name.upload-$suffix"
+$upload=Api @("https://uploads.github.com/repos/$Repository/releases/$($release.id)/assets?name=$stagedName",'--method','POST','--header','Content-Type: application/octet-stream','--input',$exe)
+if ($upload.name -cne $stagedName -or $upload.state -cne 'uploaded' -or $upload.size -ne $size -or $upload.digest -cne "sha256:$hash") { throw 'Uploaded executable hash or size mismatch; previous download preserved' }
 $marker='(?s)\s*<!-- gpui-update-manifest\s*\r?\n.*?\r?\n-->\s*'
 $body=[regex]::Replace([string]$release.body,$marker,'').TrimEnd()
 $envelope=$signed | ConvertTo-Json -Compress
 $body+="`n`n<!-- gpui-update-manifest`n$envelope`n-->`n"
-JsonApi 'PATCH' $endpoint @{target_commitish=$commit.sha;body=$body;draft=$false;make_latest='true'} | Out-Null
+$previous=@($release.assets | Where-Object { $_.name -ceq $name })
+$renamed=@()
+$promoted=$false
+try {
+    foreach($asset in $previous) {
+        JsonApi 'PATCH' "repos/$Repository/releases/assets/$($asset.id)" @{name="$name.previous-$suffix"} | Out-Null
+        $renamed+=$asset
+    }
+    JsonApi 'PATCH' "repos/$Repository/releases/assets/$($upload.id)" @{name=$name} | Out-Null
+    $promoted=$true
+    JsonApi 'PATCH' $endpoint @{target_commitish=$commit.sha;body=$body;draft=$false;make_latest='true'} | Out-Null
+} catch {
+    $failure=$_
+    # Rename rollback is best effort; GitHub does not offer an atomic asset/body
+    # transaction. Keep all bytes if the server is unavailable during rollback.
+    try {
+        if ($promoted) { JsonApi 'PATCH' "repos/$Repository/releases/assets/$($upload.id)" @{name=$stagedName} | Out-Null }
+        foreach($asset in $renamed) { JsonApi 'PATCH' "repos/$Repository/releases/assets/$($asset.id)" @{name=$name} | Out-Null }
+        JsonApi 'PATCH' $endpoint @{target_commitish=$release.target_commitish;body=[string]$release.body;draft=[bool]$release.draft} | Out-Null
+    } catch { Write-Warning "Publication rollback needs a retry; retained assets were not deleted: $_" }
+    throw $failure
+}
 # Metadata stays in the CI artifact and signed release body; downloads contain only EXE.
 $current=Api @($endpoint)
 foreach($asset in $current.assets) {
