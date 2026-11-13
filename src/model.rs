@@ -37,6 +37,12 @@ pub enum Language {
     En,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeyboardConnection {
+    pub endpoint_id: String,
+    #[serde(default)]
+    pub serial: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Prefs {
     pub priority: Priority,
@@ -50,6 +56,8 @@ pub struct Prefs {
     pub low: u8,
     pub poll_interval_secs: u64,
     pub keyboard: Option<String>,
+    /// `keyboard` remains the logical key for names and settings; this is its current transport.
+    pub keyboard_connection: Option<KeyboardConnection>,
     pub bluetooth: BTreeSet<String>,
     pub aliases: BTreeMap<String, String>,
     pub bound_names: BTreeMap<String, String>,
@@ -68,6 +76,7 @@ impl Default for Prefs {
             low: 20,
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             keyboard: None,
+            keyboard_connection: None,
             bluetooth: Default::default(),
             aliases: Default::default(),
             bound_names: Default::default(),
@@ -76,6 +85,19 @@ impl Default for Prefs {
     }
 }
 impl Prefs {
+    pub fn keyboard_endpoint(&self) -> Option<&str> {
+        self.keyboard.as_deref().map(|id| {
+            self.keyboard_connection
+                .as_ref()
+                .map_or(id, |c| c.endpoint_id.as_str())
+        })
+    }
+    pub fn keyboard_row(&self, mut d: Descriptor) -> Descriptor {
+        if d.kind == Kind::Keyboard && self.keyboard_endpoint() == Some(d.id.as_str()) {
+            d.id = self.keyboard.clone().unwrap();
+        }
+        d
+    }
     pub fn poll_ms(&self) -> u64 {
         if POLL_INTERVALS.contains(&self.poll_interval_secs) {
             self.poll_interval_secs * 1000
@@ -86,7 +108,10 @@ impl Prefs {
     pub fn bound(&self, d: &Descriptor) -> bool {
         match d.kind {
             Kind::Mouse => true,
-            Kind::Keyboard => self.keyboard.as_ref() == Some(&d.id),
+            Kind::Keyboard => {
+                self.keyboard.as_ref() == Some(&d.id)
+                    || self.keyboard_endpoint() == Some(d.id.as_str())
+            }
             Kind::Bluetooth => self.bluetooth.contains(&d.id),
         }
     }
@@ -215,6 +240,7 @@ impl Prefs {
         // owns that old key. A model name is not physical identity.
         let mut remapped = false;
         if let Some(old) = self.keyboard.clone()
+            && self.keyboard_connection.is_none()
             && let Some(d) = exact(list, std::slice::from_ref(&old), Some(Kind::Keyboard))
             && d.id != old
         {
@@ -228,6 +254,7 @@ impl Prefs {
         }
         for (old, alias) in self.aliases.clone() {
             if old.starts_with("hid:")
+                && !(self.keyboard_connection.is_some() && self.keyboard.as_ref() == Some(&old))
                 && let Some(d) = exact(list, std::slice::from_ref(&old), None)
                 && d.id != old
             {
@@ -652,13 +679,15 @@ impl Prefs {
                         list.iter().find(|d| d.id == *id).unwrap().name.clone(),
                     );
                     self.keyboard = Some(id.clone());
+                    self.keyboard_connection = None;
                     self.migration.keyboard = None;
                 }
                 _ => return false,
             },
             Command::Unbind(id) => {
                 if self.keyboard.as_ref() == Some(id) {
-                    self.keyboard = None
+                    self.keyboard = None;
+                    self.keyboard_connection = None;
                 }
                 self.bluetooth.remove(id);
                 self.bound_names.remove(id);
@@ -681,6 +710,35 @@ impl Prefs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn keyboard_rebind_and_unbind_clear_transport_but_bluetooth_bind_does_not() {
+        let mut state = State::demo();
+        let id = state.prefs.keyboard.clone().unwrap();
+        let connection = KeyboardConnection {
+            endpoint_id: "new endpoint".into(),
+            serial: Some("unique".into()),
+        };
+        state.prefs.keyboard_connection = Some(connection.clone());
+        let bt = Descriptor {
+            id: "headset".into(),
+            name: "Headset".into(),
+            kind: Kind::Bluetooth,
+            legacy_ids: vec![],
+        };
+        assert!(state.prefs.change(&Command::Bind(bt.id.clone()), &[bt]));
+        assert_eq!(state.prefs.keyboard_connection, Some(connection.clone()));
+        assert!(state.prefs.change(&Command::Unbind(id.clone()), &[]));
+        assert!(state.prefs.keyboard_connection.is_none());
+        let keyboard = state.rows[1].device.clone();
+        state.prefs.keyboard_connection = Some(connection);
+        assert!(
+            state
+                .prefs
+                .change(&Command::Bind(keyboard.id.clone()), &[keyboard])
+        );
+        assert!(state.prefs.keyboard_connection.is_none());
+        assert_eq!(state.prefs.keyboard.as_deref(), Some(id.as_str()));
+    }
     #[test]
     fn select() {
         let mut s = State::demo();

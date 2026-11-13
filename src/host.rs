@@ -22,6 +22,7 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
 };
 use windows_sys::Win32::{
+    Devices::DeviceAndDriverInstallation::*,
     Foundation::*,
     System::{Power::*, Threading::*},
     UI::{Shell::*, WindowsAndMessaging::*},
@@ -123,6 +124,7 @@ impl Drop for Power {
 }
 enum Msg {
     Data,
+    DeviceChanged,
     Open(Mode, Option<[i32; 2]>),
     Gui(u64, Command),
     Gone(u64),
@@ -139,6 +141,79 @@ impl Bus {
             unsafe {
                 PostThreadMessageW(self.1, WAKE, 0, 0);
             }
+        }
+    }
+}
+struct DeviceNotifications {
+    registration: HCMNOTIFICATION,
+    context: *mut Bus,
+}
+unsafe extern "system" fn on_device_change(
+    _: HCMNOTIFICATION,
+    context: *const c_void,
+    action: CM_NOTIFY_ACTION,
+    _: *const CM_NOTIFY_EVENT_DATA,
+    _: u32,
+) -> u32 {
+    if matches!(
+        action,
+        CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL | CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL
+    ) {
+        // The allocation remains alive until unregister has waited for callbacks.
+        unsafe { &*context.cast::<Bus>() }.post(Msg::DeviceChanged);
+    }
+    0
+}
+impl DeviceNotifications {
+    fn new(bus: Bus) -> Option<Self> {
+        let filter = CM_NOTIFY_FILTER {
+            cbSize: std::mem::size_of::<CM_NOTIFY_FILTER>() as u32,
+            FilterType: CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE,
+            u: CM_NOTIFY_FILTER_0 {
+                DeviceInterface: CM_NOTIFY_FILTER_0_0 {
+                    ClassGuid: windows_sys::core::GUID {
+                        data1: 0x4d1e55b2,
+                        data2: 0xf16f,
+                        data3: 0x11cf,
+                        data4: [0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30],
+                    },
+                },
+            },
+            ..Default::default()
+        };
+        let context = Box::into_raw(Box::new(bus));
+        let mut registration = std::ptr::null_mut();
+        let rc = unsafe {
+            CM_Register_Notification(
+                &filter,
+                context.cast(),
+                Some(on_device_change),
+                &mut registration,
+            )
+        };
+        if rc != CR_SUCCESS {
+            unsafe {
+                drop(Box::from_raw(context));
+            }
+            eprintln!("HID device notifications unavailable: {rc}; polling remains active");
+            return None;
+        }
+        Some(Self {
+            registration,
+            context,
+        })
+    }
+}
+impl Drop for DeviceNotifications {
+    fn drop(&mut self) {
+        let rc = unsafe { CM_Unregister_Notification(self.registration) };
+        if rc == CR_SUCCESS {
+            unsafe {
+                drop(Box::from_raw(self.context));
+            }
+        } else {
+            // Do not free a callback context that the OS could still access.
+            eprintln!("HID notification cleanup failed: {rc}; retaining callback context");
         }
     }
 }
@@ -488,6 +563,11 @@ pub fn run(demo: bool) -> Result<(), String> {
         unsafe { SetTimer(std::ptr::null_mut(), 0, 60_000, None) }
     });
     let _power = (!demo).then(|| Power::new(svc.signals.clone()));
+    let _device_notifications = if demo {
+        None
+    } else {
+        DeviceNotifications::new(bus.clone())
+    };
     let s = svc.state.lock().unwrap().clone();
     let initial = TrayView::of(&s, icon::appearance());
     let mut tooltip = crate::tooltip::Tooltip::new(initial.tip.clone())?;
@@ -620,6 +700,7 @@ pub fn run(demo: bool) -> Result<(), String> {
         while let Ok(m) = rx.try_recv() {
             match m {
                 Msg::Quit => break 'pump,
+                Msg::DeviceChanged => svc.device_changed(),
                 Msg::Data => {
                     let s = svc.state.lock().unwrap().clone();
                     // Keep independent projections: a new timestamp may matter to a visible

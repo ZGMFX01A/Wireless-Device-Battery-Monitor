@@ -17,6 +17,7 @@ const SUSPEND: u8 = 32;
 #[derive(Default)]
 pub struct Signal {
     bits: Mutex<u8>,
+    device_scan: Mutex<Option<Instant>>,
     manual: Mutex<Option<(u64, bool)>>,
     jobs: Mutex<std::collections::VecDeque<DeviceJob>>,
     cv: Condvar,
@@ -182,6 +183,16 @@ enum Target {
     H(hid::Target, Option<hid::Session>),
     B(bluetooth::BtTarget),
 }
+fn transport_bound(prefs: &Prefs, d: &Descriptor) -> bool {
+    if d.kind == Kind::Keyboard {
+        prefs.keyboard_endpoint() == Some(d.id.as_str())
+    } else {
+        prefs.bound(d)
+    }
+}
+fn schedule_device_scan(pending: &mut Option<Instant>, now: Instant) {
+    pending.get_or_insert(now + Duration::from_millis(300));
+}
 fn next_poll(slots: &HashMap<String, Slot>, discovery: Option<u64>, now: u64) -> u64 {
     slots
         .values()
@@ -194,6 +205,12 @@ fn stale_bluetooth(slots: &HashMap<String, Slot>, prefs: &Prefs) -> bool {
     slots
         .values()
         .any(|s| s.row.device.kind == Kind::Bluetooth && prefs.bound(&s.row.device) && s.fail >= 3)
+}
+fn stale_keyboard(slots: &HashMap<String, Slot>, prefs: &Prefs) -> bool {
+    prefs
+        .keyboard_endpoint()
+        .and_then(|id| slots.get(id))
+        .is_some_and(|s| s.fail >= 3)
 }
 fn missing_devices<'a>(
     prefs: &Prefs,
@@ -211,10 +228,10 @@ fn missing_devices<'a>(
         );
     }
     let mouse = !devices.clone().any(|d| d.kind == Kind::Mouse);
-    let keyboard = prefs.keyboard.as_ref().is_some_and(|id| {
+    let keyboard = prefs.keyboard_endpoint().is_some_and(|id| {
         !devices
             .clone()
-            .any(|d| d.kind == Kind::Keyboard && d.id == *id)
+            .any(|d| d.kind == Kind::Keyboard && d.id == id)
     });
     (mouse, keyboard)
 }
@@ -233,8 +250,8 @@ fn restore_keyboard<T>(
     {
         return Ok(());
     }
-    let target = discover(id)?
-        .ok_or("键盘休眠或未连接；请唤醒后重试 / Keyboard not responding; wake it and retry")?;
+    let target =
+        discover(id)?.ok_or("接收器存在，但键盘电量暂不可读 / Keyboard battery unavailable")?;
     if info(&target).id != id || info(&target).kind != Kind::Keyboard {
         return Err("Keyboard identity changed; refresh did not change the binding".into());
     }
@@ -340,6 +357,13 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
     let mut discovery_at = interval_ms;
     loop {
         let mut flags = signal.take(delay);
+        {
+            let mut pending = signal.device_scan.lock().unwrap();
+            if pending.is_some_and(|due| Instant::now() >= due) {
+                *pending = None;
+                flags |= SCAN;
+            }
+        }
         if flags & STOP != 0 {
             break;
         }
@@ -428,6 +452,9 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
         if job.as_ref().is_some_and(|j| j.bind.is_none()) {
             flags |= SCAN;
         }
+        if !bt && flags & REFRESH != 0 && state.lock().unwrap().prefs.keyboard.is_some() {
+            flags |= SCAN;
+        }
         let mut recover_keyboard = false;
         if clock() >= discovery_at {
             // An existing descriptor can contain obsolete Windows endpoint IDs.
@@ -440,7 +467,8 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 devices.iter().map(Target::data),
                 bt,
             );
-            if (missing.0 || stale_bt) && flags & SCAN == 0 {
+            let stale_key = !bt && stale_keyboard(&slots, &state.lock().unwrap().prefs);
+            if (missing.0 || missing.1 || stale_bt || stale_key) && flags & SCAN == 0 {
                 recover_only = true;
                 flags |= SCAN;
                 if stale_bt {
@@ -450,14 +478,20 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             recover_keyboard = missing.1;
             discovery_at = clock() + interval_ms;
         }
+        let mut keyboard_inventory = None;
         if flags & SCAN != 0 {
             let mut warnings = Vec::new();
             let list: Result<Vec<Target>, String> = if bt {
                 bluetooth::discover().map(|ds| ds.into_iter().map(Target::B).collect())
             } else {
-                hid::discover_diagnosed().map(|(ds, notes)| {
-                    warnings = notes;
-                    ds.into_iter().map(|d| Target::H(d, None)).collect()
+                hid::discover_inventory().map(|found| {
+                    warnings = found.warnings;
+                    keyboard_inventory = Some(Ok(found.keyboards));
+                    found
+                        .targets
+                        .into_iter()
+                        .map(|d| Target::H(d, None))
+                        .collect()
                 })
             };
             let scan_result = list.as_ref().map(|_| ()).map_err(Clone::clone);
@@ -492,6 +526,18 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                         failed_reopens.clear();
                         recovered.clear();
                         last_fallback = None;
+                    }
+                    if let Some(Ok(present)) = keyboard_inventory.as_ref() {
+                        // Retaining an old session does not make its receiver present.
+                        // Missing keyboards must keep discovery on the polling deadline.
+                        devices.retain(|t| {
+                            t.data().kind != Kind::Keyboard
+                                || present.iter().any(|p| p.id == t.data().id)
+                        });
+                        slots.retain(|id, s| {
+                            s.row.device.kind != Kind::Keyboard
+                                || present.iter().any(|p| p.id == *id)
+                        });
                     }
                     let kinds = |d: &Descriptor| (d.kind == Kind::Bluetooth) == bt;
                     let mut st = state.lock().unwrap();
@@ -532,6 +578,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                     };
                 }
                 Err(e) => {
+                    keyboard_inventory = Some(Err(e.clone()));
                     manual_err = Some(e.clone());
                     state.lock().unwrap().note = e;
                 }
@@ -568,22 +615,74 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             state.lock().unwrap().finish(j, out);
             wake();
         }
-        let prefs = state.lock().unwrap().prefs.clone();
+        let mut prefs = state.lock().unwrap().prefs.clone();
         recover_only = false;
         let force = flags & REFRESH != 0;
-        if (force || recover_keyboard)
-            && !bt
-            && let Err(e) = restore_keyboard(
-                prefs.keyboard.as_deref(),
-                &mut devices,
-                Target::data,
-                |id| hid::rediscover(id).map(|t| t.map(|t| Target::H(t, None))),
-            )
-        {
-            manual_err = Some(e.clone());
-            state.lock().unwrap().note = e;
-        }
         let mut changed = flags != 0 || recover_keyboard;
+        let mut keyboard_blocked = false;
+        let mut recovered_sample = None;
+        if !bt
+            && prefs.keyboard.is_some()
+            && let Some(inventory) = keyboard_inventory.as_ref()
+        {
+            // The complete fresh inventory, never retained sessions or handshake successes,
+            // decides whether replacing an absent endpoint is unambiguous.
+            let recovery = crate::keyboard::probe(
+                &prefs,
+                inventory.as_deref().map_err(Clone::clone),
+                |connection| {
+                    let target = devices
+                        .iter_mut()
+                        .find(|t| t.data().id == connection.endpoint_id)
+                        .ok_or("no responsive keyboard control endpoint")?;
+                    target.read(clock(), true)
+                },
+            );
+            let outcome = match recovery {
+                Ok(Some((connection, sample))) => {
+                    let endpoint = connection.endpoint_id.clone();
+                    let mut st = state.lock().unwrap();
+                    match crate::keyboard::commit(&mut st, &prefs, connection, |p| {
+                        Prefs::path().and_then(|path| p.save(&path))
+                    }) {
+                        Ok(true) => {
+                            prefs = st.prefs.clone();
+                            slots.retain(|_, s| s.row.device.kind != Kind::Keyboard);
+                            let target = devices.iter().find(|t| t.data().id == endpoint).unwrap();
+                            let mut slot = Slot::new(target.data().clone(), clock());
+                            slot.set_interval(interval_ms, clock());
+                            slot.apply(Ok(sample), clock(), true);
+                            slots.insert(endpoint, slot);
+                            recovered_sample = prefs.keyboard_endpoint().map(str::to_owned);
+                            st.note = "键盘已自动恢复连接 / Keyboard reconnected".into();
+                            Ok(())
+                        }
+                        Ok(false) => {
+                            prefs = st.prefs.clone();
+                            Ok(())
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                Ok(None) => restore_keyboard(
+                    prefs.keyboard_endpoint(),
+                    &mut devices,
+                    Target::data,
+                    |_| Ok(None),
+                ),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = outcome {
+                // A failed enumeration forbids replacement, but an already-open
+                // endpoint may still provide a fresh valid reading.
+                keyboard_blocked = inventory.is_ok();
+                if keyboard_blocked {
+                    slots.retain(|_, s| s.row.device.kind != Kind::Keyboard);
+                }
+                state.lock().unwrap().note = e.clone();
+                manual_err.get_or_insert(e);
+            }
+        }
         let due_at = clock();
         let batch = bt.then(|| {
             bluetooth::ReadBatch::prepare(devices.iter().filter_map(|d| match d {
@@ -598,14 +697,17 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
         });
         for t in &mut devices {
             let d = t.data().clone();
-            if !prefs.bound(&d) {
+            if !transport_bound(&prefs, &d) || (keyboard_blocked && d.kind == Kind::Keyboard) {
                 slots.remove(&d.id);
                 t.close();
                 continue;
             }
+            if recovered_sample.as_deref() == Some(d.id.as_str()) {
+                continue;
+            }
             let slot = slots
                 .entry(d.id.clone())
-                .or_insert_with(|| Slot::new(d, due_at));
+                .or_insert_with(|| Slot::new(d.clone(), due_at));
             slot.set_interval(interval_ms, due_at);
             if !force && slot.due > due_at {
                 continue;
@@ -617,6 +719,32 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 (Target::B(dev), Some(batch)) => dev.read_in(batch),
                 _ => t.read(clock(), force),
             };
+            if r.is_ok()
+                && d.kind == Kind::Keyboard
+                && let Some(Ok(inventory)) = keyboard_inventory.as_ref()
+                && let Some(presence) = inventory.iter().find(|p| p.id == d.id)
+                && (prefs.keyboard_connection.is_none()
+                    || (prefs
+                        .keyboard_connection
+                        .as_ref()
+                        .is_some_and(|c| c.serial.is_none())
+                        && presence.serial.is_some()))
+            {
+                let connection = KeyboardConnection {
+                    endpoint_id: d.id.clone(),
+                    serial: presence.serial.clone(),
+                };
+                let mut st = state.lock().unwrap();
+                match crate::keyboard::commit(&mut st, &prefs, connection, |p| {
+                    Prefs::path().and_then(|path| p.save(&path))
+                }) {
+                    Ok(_) => prefs = st.prefs.clone(),
+                    Err(e) => {
+                        st.note = e.clone();
+                        manual_err.get_or_insert(e);
+                    }
+                }
+            }
             if sync.is_some()
                 && let Err(e) = &r
             {
@@ -645,7 +773,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             }
             changed = true;
         }
-        let mut known = devices.iter().filter(|d| prefs.bound(d.data()));
+        let mut known = devices.iter().filter(|d| transport_bound(&prefs, d.data()));
         if !bt
             && !recover_only
             && known.clone().next().is_some()
@@ -667,15 +795,30 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             wake();
         }
         let missing = missing_devices(&prefs, devices.iter().map(Target::data), bt);
-        let discovery = (missing.0 || missing.1 || (bt && stale_bluetooth(&slots, &prefs)))
-            .then_some(discovery_at);
+        let discovery = (missing.0
+            || missing.1
+            || (bt && stale_bluetooth(&slots, &prefs))
+            || (!bt && stale_keyboard(&slots, &prefs)))
+        .then_some(discovery_at);
         let next = next_poll(&slots, discovery, clock());
         delay = Duration::from_millis(next.saturating_sub(clock()).max(25));
+        if let Some(due) = *signal.device_scan.lock().unwrap() {
+            delay = delay.min(due.saturating_duration_since(Instant::now()));
+        }
     }
 }
 fn publish_rows(st: &mut State, slots: &HashMap<String, Slot>, bt: bool) {
     st.rows.retain(|r| (r.device.kind == Kind::Bluetooth) != bt);
-    st.rows.extend(slots.values().map(|s| s.row.clone()));
+    st.rows.extend(slots.iter().filter_map(|(endpoint, slot)| {
+        if slot.row.device.kind == Kind::Keyboard
+            && st.prefs.keyboard_endpoint() != Some(endpoint.as_str())
+        {
+            return None;
+        }
+        let mut row = slot.row.clone();
+        row.device = st.prefs.keyboard_row(row.device);
+        Some(row)
+    }));
     let current = st.prefs.clone();
     current.preserve_missing(&mut st.rows, bt);
     st.prune_unbound();
@@ -708,6 +851,15 @@ impl Service {
             signals,
             workers,
             demo,
+        }
+    }
+    pub fn device_changed(&self) {
+        if !self.demo {
+            schedule_device_scan(
+                &mut self.signals.hid.device_scan.lock().unwrap(),
+                Instant::now(),
+            );
+            self.signals.hid.send(PREFS);
         }
     }
     pub fn command(&self, c: Command) -> Result<(), String> {
@@ -832,6 +984,83 @@ impl Drop for Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires the original 0C45:FEFA receiver; uses a subprocess with isolated APPDATA"]
+    fn live_old_binding_recovers_without_touching_the_user_profile() {
+        const TEST_NAME: &str =
+            "service::tests::live_old_binding_recovers_without_touching_the_user_profile";
+        if std::env::var_os("WDBM_LIVE_PROFILE").is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([TEST_NAME, "--exact", "--ignored", "--nocapture"])
+                .env("APPDATA", dir.path())
+                .env("WDBM_LIVE_PROFILE", dir.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated hardware recovery failed");
+            return;
+        }
+        let profile = std::path::PathBuf::from(std::env::var_os("WDBM_LIVE_PROFILE").unwrap());
+        assert_eq!(std::env::var_os("APPDATA").unwrap(), profile.as_os_str());
+        const OLD: &str = "hid:0c45:fefa:Keyboard:container:799872a0d2b611f1b1e1806e6f6e6963";
+        let mut prefs = Prefs {
+            keyboard: Some(OLD.into()),
+            poll_interval_secs: 5,
+            ..Default::default()
+        };
+        prefs.aliases.insert(OLD.into(), "Isolated keyboard".into());
+        let svc = Service::start(prefs, false, || {});
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let state = svc.state.lock().unwrap().clone();
+            if let Some(row) = state
+                .rows
+                .iter()
+                .find(|r| r.device.id == OLD && r.battery.is_some() && r.error.is_none())
+            {
+                let loaded = Prefs::load(&Prefs::path().unwrap()).unwrap();
+                assert_eq!(loaded.keyboard.as_deref(), Some(OLD));
+                assert_ne!(loaded.keyboard_endpoint(), Some(OLD));
+                assert_eq!(loaded.aliases[OLD], "Isolated keyboard");
+                println!(
+                    "LIVE RECOVERY: logical={OLD}; endpoint={}; battery={}%; alias preserved; isolated profile persisted",
+                    loaded.keyboard_endpoint().unwrap(),
+                    row.battery.unwrap().raw
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "live recovery timed out: {}",
+                state.note
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    #[test]
+    fn notification_burst_coalesces_without_postponing_the_first_scan() {
+        let now = Instant::now();
+        let mut pending = None;
+        schedule_device_scan(&mut pending, now);
+        for ms in [10, 100, 200, 290] {
+            schedule_device_scan(&mut pending, now + Duration::from_millis(ms));
+        }
+        assert_eq!(pending, Some(now + Duration::from_millis(300)));
+    }
+    #[test]
+    fn failed_keyboard_is_rediscovered_even_while_the_mouse_is_healthy() {
+        let state = State::demo();
+        let mut keyboard = Slot::new(state.rows[1].device.clone(), 0);
+        for t in [0, 30_000, 60_000] {
+            keyboard.apply(Err("stale endpoint".into()), t, false);
+        }
+        let slots = HashMap::from([(keyboard.row.device.id.clone(), keyboard)]);
+        assert!(stale_keyboard(&slots, &state.prefs));
+        assert_eq!(
+            missing_devices(&state.prefs, state.rows.iter().map(|r| &r.device), false),
+            (false, false)
+        );
+    }
     fn slot() -> Slot {
         Slot::new(
             Descriptor {
@@ -1209,6 +1438,38 @@ mod formal_review_tests {
 #[cfg(test)]
 mod publication_tests {
     use super::*;
+    #[test]
+    fn recovered_physical_slot_publishes_once_under_the_stable_logical_key() {
+        let mut state = State::demo();
+        let logical = state.prefs.keyboard.clone().unwrap();
+        let endpoint = "hid:0c45:fefa:Keyboard:container:new";
+        state.prefs.keyboard_connection = Some(KeyboardConnection {
+            endpoint_id: endpoint.into(),
+            serial: None,
+        });
+        let mut target = state.rows[1].device.clone();
+        target.id = endpoint.into();
+        let mut current = Slot::new(target, 0);
+        current.apply(
+            Ok(Reading::new(80, Charge::Discharging, battery_protocol::Source::Weikav).unwrap()),
+            0,
+            false,
+        );
+        let old = Slot::new(state.rows[1].device.clone(), 0);
+        let slots = HashMap::from([(endpoint.into(), current), (logical.clone(), old)]);
+        publish_rows(&mut state, &slots, false);
+        let rows: Vec<_> = state
+            .rows
+            .iter()
+            .filter(|r| r.device.kind == Kind::Keyboard)
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].device.id, logical);
+        assert_eq!(rows[0].battery.unwrap().raw, 80);
+        assert!(state.prefs.change(&Command::Unbind(logical), &[]));
+        publish_rows(&mut state, &slots, false);
+        assert!(state.rows.iter().all(|r| r.device.kind != Kind::Keyboard));
+    }
     #[test]
     fn late_worker_result_cannot_resurrect_unbound_keyboard() {
         let mut st = State::demo();

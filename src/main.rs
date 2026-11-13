@@ -2,6 +2,7 @@
 mod entry;
 mod host;
 mod icon;
+mod keyboard;
 mod model;
 mod service;
 mod startup;
