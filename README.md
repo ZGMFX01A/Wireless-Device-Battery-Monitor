@@ -1,11 +1,13 @@
 # 无线设备电量监控
 
+**简体中文** | [English](README.en.md)
+
 [![Rust](https://img.shields.io/badge/Rust-1.85%2B-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![GUI Framework](https://img.shields.io/badge/GUI-GPUI%20(Direct3D)-black?logo=windows&logoColor=white)](https://github.com/zed-industries/zed)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
-[![Latest Release](https://img.shields.io/github/v/release/ZGMFX01A/mouse-battery?display_name=tag&sort=semver)](https://github.com/ZGMFX01A/mouse-battery/releases)
+[![Latest Release](https://img.shields.io/github/v/release/ZGMFX01A/Wireless-Device-Battery-Monitor?display_name=tag&sort=semver)](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/releases)
 [![Downloads](https://img.shields.io/github/downloads/ZGMFX01A/Wireless-Device-Battery-Monitor/total?label=Downloads&logo=github)](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/releases)
-[![License](https://img.shields.io/badge/License-Non--Commercial-orange)](LICENSE)
+[![License: Personal / Non-Commercial](https://img.shields.io/badge/License-Personal%20%2F%20Non--Commercial-orange)](LICENSE)
 
 
 **把鼠标、键盘和蓝牙设备的电量，放在任务栏的一角。**
@@ -117,4 +119,4 @@
 
 遇到问题时，请在 [Issues](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues) 中说明软件版本、Windows 版本、设备完整型号、连接方式和复现步骤。附上截图会更容易定位；公开截图前请遮盖个人信息。
 
-本项目供个人学习和非商业使用，商业用途需事先获得授权。完整条款见 [LICENSE](LICENSE)。
+本项目采用自定义许可证，仅供个人学习和非商业使用；商业用途需事先获得著作权人的明确书面授权。完整条款见 [LICENSE](LICENSE)。
