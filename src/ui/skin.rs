@@ -9,13 +9,19 @@ pub struct Skin {
 }
 impl Skin {
     pub fn text(self) -> Hsla {
-        rgb(if self.dark { 0xffffff } else { 0x0f172a }).into()
+        rgb(self.text_rgb()).into()
+    }
+    pub fn text_rgb(self) -> u32 {
+        if self.dark { 0xffffff } else { 0x0f172a }
     }
     pub fn sub(self) -> Hsla {
         rgb(if self.dark { 0xd8e2ec } else { 0x475569 }).into()
     }
     pub fn dim(self) -> Hsla {
-        rgb(if self.dark { 0xa5b5c7 } else { 0x64748b }).into()
+        rgb(self.dim_rgb()).into()
+    }
+    pub fn dim_rgb(self) -> u32 {
+        if self.dark { 0xa5b5c7 } else { 0x64748b }
     }
     pub fn line(self) -> Hsla {
         rgba(if self.dark { 0xffffff17 } else { 0x0000000f }).into()
@@ -101,7 +107,10 @@ impl Skin {
         gradient(a | (255. * t * x) as u32, b | (255. * t * y) as u32)
     }
     pub fn dialog(self) -> Hsla {
-        rgb(if self.dark { 0x202634 } else { 0xf5f8fc }).into()
+        rgb(self.dialog_rgb()).into()
+    }
+    pub fn dialog_rgb(self) -> u32 {
+        if self.dark { 0x202634 } else { 0xf5f8fc }
     }
 }
 pub fn gradient(a: u32, b: u32) -> Background {

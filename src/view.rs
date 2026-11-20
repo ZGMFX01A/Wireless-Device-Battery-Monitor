@@ -113,7 +113,7 @@ fn place(w: &Window, m: Mode, a: Option<[i32; 2]>, show: bool) {
         }
     }
 }
-fn system_dark() -> bool {
+pub(crate) fn apps_use_dark_theme() -> bool {
     use windows_sys::Win32::System::Registry::*;
     let mut v = 1u32;
     let mut n = 4;
@@ -367,7 +367,8 @@ pub fn run(managed: bool, initial: Mode) {
                 },
                 |w, cx| {
                     cx.new(|cx| {
-                        material::apply(hwnd(w), system_dark());
+                        let dark_auto = apps_use_dark_theme();
+                        material::apply(hwnd(w), dark_auto);
                         w.set_window_title("无线设备电量 · GPUI");
                         let sub = cx.observe_window_activation(w, |s: &mut Panel, w, cx| {
                             if w.is_window_active() {
@@ -389,7 +390,7 @@ pub fn run(managed: bool, initial: Mode) {
                             visible: !managed,
                             has_focus: false,
                             managed,
-                            dark_auto: system_dark(),
+                            dark_auto,
                             last_material: None,
                             live: true,
                             pending_rows: None,
@@ -451,7 +452,7 @@ pub fn run(managed: bool, initial: Mode) {
                                         s.editor = None;
                                         s.edit_blur = None;
                                         w.focus(&s.focus);
-                                        s.dark_auto = system_dark();
+                                        s.dark_auto = apps_use_dark_theme();
                                         s.visible = true;
                                         s.has_focus = false;
                                         place(w, m, a, true);

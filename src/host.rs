@@ -392,7 +392,7 @@ impl TrayView {
                 s.prefs.style.clone(),
                 appearance,
             ),
-            tip: crate::tooltip::Content::of(s, appearance.dark),
+            tip: crate::tooltip::Content::of(s),
             menu: MenuKey {
                 en: english(&s.prefs),
                 labels,
@@ -979,6 +979,28 @@ mod alert_tests {
 #[cfg(test)]
 mod audit_tray {
     use super::*;
+
+    #[test]
+    fn auto_tooltip_is_independent_of_taskbar_theme() {
+        let mut state = State::demo();
+        state.prefs.theme = Theme::Auto;
+        let light_taskbar = TrayView::of(
+            &state,
+            icon::Appearance {
+                dark: false,
+                size: 48,
+            },
+        );
+        let dark_taskbar = TrayView::of(
+            &state,
+            icon::Appearance {
+                dark: true,
+                size: 48,
+            },
+        );
+        assert_ne!(light_taskbar.icon, dark_taskbar.icon);
+        assert_eq!(light_taskbar.tip, dark_taskbar.tip);
+    }
 
     #[test]
     fn quit_is_the_last_menu_item_in_both_languages() {

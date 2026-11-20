@@ -2,9 +2,12 @@
 //! and uses GDI only; hovering never starts the GPUI child or touches devices.
 use crate::{
     model::{State, Theme},
-    view::{english, skin::BatteryTone},
+    view::{
+        apps_use_dark_theme, english,
+        skin::{BatteryTone, Skin},
+    },
 };
-use battery_protocol::Charge;
+use battery_protocol::{Charge, Kind};
 use std::{cell::RefCell, collections::BTreeMap, marker::PhantomData, rc::Rc};
 use tray_icon::TrayIconEvent;
 use windows_sys::Win32::{
@@ -17,17 +20,19 @@ use windows_sys::Win32::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Device {
     name: String,
+    kind: Kind,
     value: String,
+    charge: Option<Charge>,
     tone: BatteryTone,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Content {
     rows: Vec<Device>,
-    dark: bool,
+    theme: Theme,
     en: bool,
 }
 impl Content {
-    pub fn of(state: &State, system_dark: bool) -> Self {
+    pub fn of(state: &State) -> Self {
         let en = english(&state.prefs);
         Self {
             rows: state
@@ -45,24 +50,13 @@ impl Content {
                             .take(180)
                             .map(|c| if c.is_control() { ' ' } else { c })
                             .collect(),
+                        kind: r.device.kind,
                         value: if !online {
                             if en { "Offline" } else { "离线" }.into()
                         } else {
-                            battery.map_or_else(
-                                || "—".into(),
-                                |b| {
-                                    format!(
-                                        "{}%{}",
-                                        b.display,
-                                        if b.charge == Charge::Charging {
-                                            " ⚡"
-                                        } else {
-                                            ""
-                                        }
-                                    )
-                                },
-                            )
+                            battery.map_or_else(|| "—".into(), |b| format!("{}%", b.display))
                         },
+                        charge: battery.map(|b| b.charge),
                         tone: BatteryTone::for_sample(
                             battery.is_some(),
                             battery.is_some_and(|b| {
@@ -73,11 +67,7 @@ impl Content {
                     }
                 })
                 .collect(),
-            dark: match state.prefs.theme {
-                Theme::Auto => system_dark,
-                Theme::Light => false,
-                Theme::Dark => true,
-            },
+            theme: state.prefs.theme.clone(),
             en,
         }
     }
@@ -92,7 +82,16 @@ impl Content {
         }
         self.rows
             .iter()
-            .map(|r| format!("{}: {}", r.name, r.value))
+            .map(|r| {
+                let status = match (r.charge, self.en) {
+                    (Some(Charge::Charging), true) => ", Charging",
+                    (Some(Charge::Charging), false) => "，充电中",
+                    (Some(Charge::Full), true) => ", Fully charged",
+                    (Some(Charge::Full), false) => "，已充满",
+                    _ => "",
+                };
+                format!("{}: {}{status}", r.name, r.value)
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -102,6 +101,15 @@ const ENTER: u32 = WM_APP + 1;
 const HIDE: u32 = WM_APP + 2;
 const HOVER_TIMER: usize = 1;
 const CLASS: &str = "MouseBatteryTooltip";
+const ROW_HEIGHT: i32 = 31;
+const SUMMARY_HEIGHT: i32 = 24;
+const INSET_X: i32 = 13;
+const INSET_Y: i32 = 6;
+const GLYPH_SIZE: i32 = 14;
+const LABEL_OFFSET: i32 = INSET_X + GLYPH_SIZE + 10;
+const VALUE_GAP: i32 = 10;
+const CORNER_DIAMETER: i32 = 20;
+const TEXT_SIZE: i32 = 13;
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
 }
@@ -213,13 +221,27 @@ impl Tooltip {
         unsafe {
             SetWindowTextW(self.hwnd, wide(&content.accessible_text()).as_ptr());
         }
-        POPUPS.with_borrow_mut(|p| {
+        let layout_changed = POPUPS.with_borrow_mut(|p| {
             if let Some(p) = p.get_mut(&(self.hwnd as isize)) {
+                let layout_changed = p.content.en != content.en
+                    || p.content.rows.len() != content.rows.len()
+                    || p.content
+                        .rows
+                        .iter()
+                        .zip(&content.rows)
+                        .any(|(before, after)| before.name != after.name);
                 p.content = content;
+                layout_changed
+            } else {
+                false
             }
         });
         if unsafe { IsWindowVisible(self.hwnd) } != 0 {
-            show(self.hwnd);
+            if layout_changed {
+                show(self.hwnd);
+            } else {
+                unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+            }
         }
     }
 }
@@ -288,6 +310,49 @@ impl Drop for Font {
     }
 }
 
+fn text_width(dc: HDC, text: &str) -> i32 {
+    let text = wide(text);
+    let mut extent = SIZE::default();
+    unsafe {
+        GetTextExtentPoint32W(dc, text.as_ptr(), (text.len() - 1) as i32, &mut extent);
+    }
+    extent.cx
+}
+
+fn value_width(dc: HDC, en: bool) -> i32 {
+    ["100%", "88%", if en { "Offline" } else { "离线" }, "—"]
+        .into_iter()
+        .map(|value| text_width(dc, value))
+        .max()
+        .unwrap_or_default()
+}
+
+fn preferred_width(hwnd: HWND, p: &Popup) -> i32 {
+    unsafe {
+        let dc = GetDC(hwnd);
+        if dc.is_null() {
+            return px(234, p.dpi);
+        }
+        let name_font = Font::new(TEXT_SIZE, FW_NORMAL, p.dpi);
+        let value_font = Font::new(TEXT_SIZE, FW_SEMIBOLD, p.dpi);
+        let old_font = SelectObject(dc, name_font.0);
+        let name = p
+            .content
+            .rows
+            .iter()
+            .take(p.count)
+            .map(|row| text_width(dc, &row.name))
+            .max()
+            .unwrap_or_default();
+        SelectObject(dc, value_font.0);
+        let value = value_width(dc, p.content.en);
+        SelectObject(dc, old_font);
+        ReleaseDC(hwnd, dc);
+        (px(LABEL_OFFSET, p.dpi) + name + px(VALUE_GAP, p.dpi) + value + px(INSET_X, p.dpi))
+            .clamp(px(160, p.dpi), px(272, p.dpi))
+    }
+}
+
 fn show(hwnd: HWND) {
     let Some(mut p) = snapshot(hwnd) else {
         return;
@@ -307,20 +372,24 @@ fn show(hwnd: HWND) {
             p.dpi = xdpi;
         }
         let work = info.rcWork;
-        let width = px(360, p.dpi).min(work.right - work.left);
-        let count = visible_rows(&p, work.bottom - work.top);
-        p.count = count;
-        let summary = p.content.rows.len() > count;
-        let height = px(
-            24 + 44 * count.max(1) as i32 + if summary { 24 } else { 0 },
-            p.dpi,
-        )
-        .min(work.bottom - work.top);
+        let available = work.bottom - work.top;
+        p.count = visible_rows(&p, available);
+        let summary = p.content.rows.len() > p.count;
+        let width = preferred_width(hwnd, &p).min(work.right - work.left);
+        let height = (2 * px(INSET_Y, p.dpi)
+            + px(ROW_HEIGHT, p.dpi) * p.count.max(1) as i32
+            + if summary {
+                px(SUMMARY_HEIGHT, p.dpi)
+            } else {
+                0
+            })
+        .min(available);
         let (x, y) = position(p.anchor, work, width, height, px(10, p.dpi));
+        let diameter = px(CORNER_DIAMETER, p.dpi);
         POPUPS.with_borrow_mut(|all| {
             all.insert(hwnd as isize, p);
         });
-        let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, px(14, xdpi), px(14, xdpi));
+        let region = CreateRoundRectRgn(0, 0, width, height, diameter, diameter);
         if !region.is_null() && SetWindowRgn(hwnd, region, 0) == 0 {
             DeleteObject(region);
         }
@@ -337,8 +406,15 @@ fn show(hwnd: HWND) {
     }
 }
 fn visible_rows(p: &Popup, available: i32) -> usize {
-    let max = ((available - px(48, p.dpi)) / px(44, p.dpi)).clamp(1, 10) as usize;
-    p.content.rows.len().min(max)
+    let space = available - 2 * px(INSET_Y, p.dpi);
+    let row_height = px(ROW_HEIGHT, p.dpi);
+    let count = p.content.rows.len();
+    let capacity = (space / row_height).clamp(1, 10) as usize;
+    if count <= capacity {
+        count
+    } else {
+        ((space - px(SUMMARY_HEIGHT, p.dpi)) / row_height).clamp(1, 10) as usize
+    }
 }
 fn position(anchor: RECT, work: RECT, width: i32, height: i32, gap: i32) -> (i32, i32) {
     let left = i64::from(work.left);
@@ -371,6 +447,36 @@ fn draw_text(dc: HDC, text: &str, rect: &mut RECT, color: u32, flags: u32) {
         );
     }
 }
+
+fn draw_device_kind(dc: HDC, kind: Kind, left: i32, top: i32, size: i32) {
+    let x = |offset| left + (size * offset + GLYPH_SIZE / 2) / GLYPH_SIZE;
+    let y = |offset| top + (size * offset + GLYPH_SIZE / 2) / GLYPH_SIZE;
+    let stroke = |points: &[(i32, i32)]| {
+        let points: Vec<_> = points
+            .iter()
+            .map(|&(a, b)| POINT { x: x(a), y: y(b) })
+            .collect();
+        unsafe { Polyline(dc, points.as_ptr(), points.len() as i32) };
+    };
+    unsafe {
+        match kind {
+            Kind::Mouse => {
+                RoundRect(dc, x(3), y(0), x(12), y(14), x(6) - left, y(6) - top);
+                stroke(&[(7, 3), (7, 6)]);
+            }
+            Kind::Keyboard => {
+                RoundRect(dc, x(0), y(2), x(14), y(12), x(3) - left, y(3) - top);
+                for a in [3, 6, 9] {
+                    stroke(&[(a, 5), (a + 1, 5)]);
+                }
+                stroke(&[(4, 8), (10, 8)]);
+            }
+            Kind::Bluetooth => {
+                stroke(&[(3, 3), (11, 10), (7, 13), (7, 1), (11, 4), (3, 11)]);
+            }
+        }
+    }
+}
 fn paint(hwnd: HWND, dc: HDC) {
     let Some(p) = snapshot(hwnd) else {
         return;
@@ -378,33 +484,45 @@ fn paint(hwnd: HWND, dc: HDC) {
     unsafe {
         let mut client = RECT::default();
         GetClientRect(hwnd, &mut client);
-        let dark = p.content.dark;
-        let background = if dark { 0x272c33 } else { 0xf9fafb };
-        let ink = if dark { 0xf1f5f9 } else { 0x182331 };
-        let line = if dark { 0x414952 } else { 0xdce2e8 };
+        let dark = match p.content.theme {
+            Theme::Auto => apps_use_dark_theme(),
+            Theme::Light => false,
+            Theme::Dark => true,
+        };
+        let skin = Skin { dark, glass: 0 };
+        let ink = skin.text_rgb();
+        let edge = if dark { 0x3c4553 } else { 0xd6dfe9 };
+        let divider = if dark { 0x333c4b } else { 0xe1e8f0 };
         let brush = GetStockObject(DC_BRUSH);
         let pen = GetStockObject(DC_PEN);
         let old_brush = SelectObject(dc, brush);
         let old_pen = SelectObject(dc, pen);
-        SetDCBrushColor(dc, rgb(background));
-        SetDCPenColor(dc, rgb(line));
+        SetDCBrushColor(dc, rgb(skin.dialog_rgb()));
+        SetDCPenColor(dc, rgb(edge));
         RoundRect(
             dc,
             0,
             0,
             client.right,
             client.bottom,
-            px(14, p.dpi),
-            px(14, p.dpi),
+            px(CORNER_DIAMETER, p.dpi),
+            px(CORNER_DIAMETER, p.dpi),
         );
-        SelectObject(dc, old_pen);
-        SelectObject(dc, old_brush);
+        SelectObject(dc, GetStockObject(NULL_BRUSH));
         SetBkMode(dc, TRANSPARENT as i32);
-        let name_font = Font::new(13, FW_SEMIBOLD, p.dpi);
-        let value_font = Font::new(16, FW_BOLD, p.dpi);
-        let old_font = SelectObject(dc, name_font.0);
-        let pad = px(14, p.dpi);
-        let count = p.count;
+        let name_font = Font::new(TEXT_SIZE, FW_NORMAL, p.dpi);
+        let value_font = Font::new(TEXT_SIZE, FW_SEMIBOLD, p.dpi);
+        let old_font = SelectObject(dc, value_font.0);
+        let reserve = value_width(dc, p.content.en);
+        SelectObject(dc, name_font.0);
+        let inset = px(INSET_X, p.dpi);
+        let label_left = px(LABEL_OFFSET, p.dpi);
+        let right = client.right - inset;
+        let gap = px(VALUE_GAP, p.dpi);
+        let name_room = (right - label_left - gap - reserve).max(0);
+        let row_height = px(ROW_HEIGHT, p.dpi);
+        let inset_y = px(INSET_Y, p.dpi);
+        let glyph = px(GLYPH_SIZE, p.dpi);
         if p.content.rows.is_empty() {
             draw_text(
                 dc,
@@ -414,73 +532,74 @@ fn paint(hwnd: HWND, dc: HDC) {
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE,
             );
         }
-        for (i, row) in p.content.rows.iter().take(count).enumerate() {
-            let top = px(12 + 44 * i as i32, p.dpi);
-            let mut value = RECT {
-                left: client.right - px(100, p.dpi),
-                top,
-                right: client.right - pad,
-                bottom: top + px(40, p.dpi),
-            };
-            SelectObject(dc, value_font.0);
-            let mut measured = RECT::default();
-            draw_text(
-                dc,
-                &row.value,
-                &mut measured,
-                ink,
-                DT_CALCRECT | DT_SINGLELINE,
-            );
-            value.left = value.right - (measured.right - measured.left);
-            draw_text(
-                dc,
-                &row.value,
-                &mut value,
-                row.tone.palette(dark).0,
-                DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-            );
-            SelectObject(dc, name_font.0);
+        for (i, row) in p.content.rows.iter().take(p.count).enumerate() {
+            let top = inset_y + row_height * i as i32;
+            if i != 0 {
+                SetDCPenColor(dc, rgb(divider));
+                MoveToEx(dc, label_left, top, std::ptr::null_mut());
+                LineTo(dc, right, top);
+            }
+            SetDCPenColor(dc, rgb(skin.dim_rgb()));
+            draw_device_kind(dc, row.kind, inset, top + (row_height - glyph) / 2, glyph);
+
+            let name_right = label_left + text_width(dc, &row.name).min(name_room);
             let mut name = RECT {
-                left: pad,
-                top: 0,
-                right: value.left - px(18, p.dpi),
-                bottom: 0,
+                left: label_left,
+                top,
+                right: name_right,
+                bottom: top + row_height,
             };
-            draw_text(dc, &row.name, &mut name, ink, DT_CALCRECT | DT_WORDBREAK);
-            let height = (name.bottom - name.top).min(px(36, p.dpi));
-            name.right = value.left - px(18, p.dpi);
-            name.top = top + (px(40, p.dpi) - height) / 2;
-            name.bottom = name.top + height;
             draw_text(
                 dc,
                 &row.name,
                 &mut name,
                 ink,
-                DT_WORDBREAK | DT_END_ELLIPSIS,
+                DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
             );
+            let mut value = RECT {
+                left: name_right + gap,
+                top,
+                right,
+                bottom: top + row_height,
+            };
+            SelectObject(dc, value_font.0);
+            draw_text(
+                dc,
+                &row.value,
+                &mut value,
+                row.tone.palette(dark).0,
+                DT_VCENTER | DT_SINGLELINE,
+            );
+            SelectObject(dc, name_font.0);
         }
-        if p.content.rows.len() > count {
-            let remaining = p.content.rows.len() - count;
+        if p.content.rows.len() > p.count {
+            let remaining = p.content.rows.len() - p.count;
             let text = if p.content.en {
                 format!("+{remaining} more devices")
             } else {
                 format!("另有 {remaining} 个设备")
             };
+            let top = inset_y + row_height * p.count as i32;
+            SetDCPenColor(dc, rgb(divider));
+            MoveToEx(dc, label_left, top, std::ptr::null_mut());
+            LineTo(dc, right, top);
             let mut rect = RECT {
-                left: pad,
-                top: px(12 + 44 * count as i32, p.dpi),
-                right: client.right - pad,
-                bottom: client.bottom,
+                left: label_left,
+                top,
+                right,
+                bottom: top + px(SUMMARY_HEIGHT, p.dpi),
             };
             draw_text(
                 dc,
                 &text,
                 &mut rect,
                 BatteryTone::Offline.palette(dark).0,
-                DT_SINGLELINE,
+                DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
             );
         }
         SelectObject(dc, old_font);
+        SelectObject(dc, old_pen);
+        SelectObject(dc, old_brush);
     }
 }
 unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
@@ -541,6 +660,12 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             paint(hwnd, w as HDC);
             0
         }
+        WM_SETTINGCHANGE | WM_THEMECHANGED => {
+            if unsafe { IsWindowVisible(hwnd) } != 0 {
+                unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+            }
+            0
+        }
         WM_ERASEBKGND => 1,
         WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
         WM_NCHITTEST => HTTRANSPARENT as LRESULT,
@@ -569,6 +694,20 @@ mod tests {
         }
         native_probe::capture(hwnd, path).unwrap()
     }
+    fn capture_change(
+        hwnd: HWND,
+        path: &std::path::Path,
+        before: &image::RgbImage,
+    ) -> image::RgbImage {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            let current = capture(hwnd, path);
+            if &current != before || std::time::Instant::now() >= deadline {
+                return current;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+    }
     #[test]
     fn device_names_and_live_battery_states() {
         let mut state = State::demo();
@@ -576,22 +715,26 @@ mod tests {
             .prefs
             .aliases
             .insert(state.rows[0].device.id.clone(), "主力鼠标".into());
-        let c = Content::of(&state, true);
+        let c = Content::of(&state);
         assert_eq!(c.rows[0].name, "主力鼠标");
+        assert_eq!(c.rows[0].kind, Kind::Mouse);
         assert_eq!(c.rows[0].value, "72%");
         assert_eq!(c.rows[0].tone, BatteryTone::Normal);
+        assert_eq!(c.rows[1].kind, Kind::Keyboard);
+        assert_eq!(c.rows[1].value, "35%");
         assert_eq!(c.rows[1].tone, BatteryTone::Charging);
         state.rows[0].battery.as_mut().unwrap().display = 49;
-        assert_eq!(Content::of(&state, true).rows[0].tone, BatteryTone::Warning);
+        assert_eq!(Content::of(&state).rows[0].tone, BatteryTone::Warning);
         state.rows[0].battery.as_mut().unwrap().display = 0;
-        let c = Content::of(&state, true);
+        let c = Content::of(&state);
         assert_eq!(c.rows[0].value, "0%");
         assert_eq!(c.rows[0].tone, BatteryTone::Critical);
         state.rows[0].error = Some("disconnected".into());
         state.prefs.lang = crate::model::Language::En;
-        let c = Content::of(&state, true);
+        let c = Content::of(&state);
         assert_eq!(c.rows[0].value, "Offline");
         assert_eq!(c.rows[0].tone, BatteryTone::Offline);
+        assert!(c.accessible_text().contains("35%, Charging"));
     }
     #[test]
     fn popup_stays_on_work_area_for_each_taskbar_edge() {
@@ -631,11 +774,13 @@ mod tests {
         state.rows[1].battery.as_mut().unwrap().charge = Charge::Discharging;
         let mut third = state.rows[0].clone();
         third.device.id = "low-test".into();
-        third.device.name = "备用鼠标".into();
+        third.device.name = "Galaxy Buds4 Pro".into();
+        third.device.kind = Kind::Bluetooth;
+        state.prefs.bluetooth.insert(third.device.id.clone());
         third.battery.as_mut().unwrap().display = 12;
         state.rows.push(third);
-        state.prefs.theme = Theme::Dark;
-        let mut tooltip = Tooltip::new(Content::of(&state, true)).unwrap();
+        state.prefs.theme = Theme::Auto;
+        let mut tooltip = Tooltip::new(Content::of(&state)).unwrap();
         let hwnd = tooltip.hwnd;
         let foreground = unsafe { GetForegroundWindow() };
         let mut cursor = POINT::default();
@@ -660,18 +805,48 @@ mod tests {
         assert_ne!(unsafe { IsWindowVisible(hwnd) }, 0);
         assert_eq!(unsafe { GetForegroundWindow() }, foreground);
         assert_eq!(snapshot(hwnd).unwrap().count, 3);
-        let dark = capture(hwnd, &out.join("tooltip-dark.png"));
+        let auto = capture(hwnd, &out.join("tooltip-auto.png"));
+        let app_dark = apps_use_dark_theme();
+        let [r, g, b] = auto.get_pixel(auto.width() / 2, 4).0;
+        let background = u32::from_be_bytes([0, r, g, b]);
+        let expected = Skin {
+            dark: app_dark,
+            glass: 0,
+        }
+        .dialog_rgb();
+        assert_eq!(background, expected, "auto theme must match Windows apps");
+
+        state.prefs.theme = Theme::Dark;
+        tooltip.update(Content::of(&state));
+        let dark_path = out.join("tooltip-dark.png");
+        let dark = if app_dark {
+            capture(hwnd, &dark_path)
+        } else {
+            capture_change(hwnd, &dark_path, &auto)
+        };
         state.prefs.theme = Theme::Light;
-        tooltip.update(Content::of(&state, false));
-        let light = capture(hwnd, &out.join("tooltip-light.png"));
+        tooltip.update(Content::of(&state));
+        let light = capture_change(hwnd, &out.join("tooltip-light.png"), &dark);
         assert!(dark != light, "theme must change the rendered tooltip");
-        state.rows[0].battery.as_mut().unwrap().display = 10;
-        tooltip.update(Content::of(&state, false));
-        let updated = capture(hwnd, &out.join("tooltip-updated.png"));
+        let mut initial_bounds = RECT::default();
+        assert_ne!(unsafe { GetWindowRect(hwnd, &mut initial_bounds) }, 0);
+        let battery = state.rows[0].battery.as_mut().unwrap();
+        battery.display = 100;
+        battery.charge = Charge::Full;
+        tooltip.update(Content::of(&state));
+        let updated = capture_change(hwnd, &out.join("tooltip-updated.png"), &light);
         assert!(updated != light, "visible numbers and colors must update");
+        let mut updated_bounds = RECT::default();
+        assert_ne!(unsafe { GetWindowRect(hwnd, &mut updated_bounds) }, 0);
+        let edges = |r: RECT| (r.left, r.top, r.right, r.bottom);
+        assert_eq!(
+            edges(initial_bounds),
+            edges(updated_bounds),
+            "battery updates must not resize or move the popup"
+        );
         state.rows[0].error = Some("disconnected".into());
         state.rows[1].device.name = "A".repeat(180);
-        tooltip.update(Content::of(&state, false));
+        tooltip.update(Content::of(&state));
         capture(hwnd, &out.join("tooltip-offline-long-name.png"));
         assert_eq!(unsafe { GetForegroundWindow() }, foreground);
         tooltip.target().event(&TrayIconEvent::Click {
