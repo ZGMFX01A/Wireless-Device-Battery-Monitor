@@ -261,16 +261,26 @@ impl Panel {
                     if k.dark { 0xd8e2ec } else { 0x475569 },
                 )
             };
-        let st = if !online {
-            self.t("device.offline")
+        let st: String = if !online {
+            self.t("device.offline").into()
         } else if r.held {
-            self.tr("沿用上次读数", "Previous reading")
+            self.tr("沿用上次读数", "Previous reading").into()
         } else if b.is_some_and(|b| b.charge == Charge::Full) {
-            self.tr("已充满", "Fully charged")
+            self.tr("已充满", "Fully charged").into()
         } else if charge {
-            self.tr("充电中", "Charging")
+            if id.starts_with("hid:1d57:") {
+                // the RF level is frozen while the mouse is on its cable
+                format!(
+                    "{} · {} {}%",
+                    self.tr("充电中", "Charging"),
+                    self.tr("电缆前", "was"),
+                    pct
+                )
+            } else {
+                self.tr("充电中", "Charging").into()
+            }
         } else {
-            self.t("device.online")
+            self.t("device.online").into()
         };
         let badge = txt(brand, 11., rgb(fg).into())
             .px(px(8.))
@@ -283,7 +293,7 @@ impl Panel {
             row()
                 .gap(px(5.))
                 .child(dot(5., fill_start))
-                .child(txt(st, 11., k.card_secondary())),
+                .child(txt(st.clone(), 11., k.card_secondary())),
         );
         let edit_id = id.clone();
         let display = name.clone();
@@ -687,6 +697,7 @@ impl Panel {
         for (key, on, cmd) in [
             ("auto_refresh", self.live, None),
             ("auto_update", p.auto_update, Some(Command::AutoUpdate)),
+            ("headset_poll", p.headset_poll, Some(Command::HeadsetPoll)),
             ("autostart", self.state.autostart, Some(Command::Autostart)),
         ] {
             group = group.child(self.group(key, k, false, self.switch(key, on, cmd, k, cx)))
