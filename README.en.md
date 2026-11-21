@@ -23,7 +23,7 @@ For 64-bit PCs running Windows 10 or 11. Download `WirelessDeviceBatteryMonitor-
 
 Choose from four tray styles: **capsule, vertical bar, number, or ring**. Prioritize your mouse, your keyboard, or the **lowest battery level** to keep the device that needs attention in view.
 
-Hover over the icon for a battery summary. Device names appear in bold; battery levels use green, orange, and red for high, medium, and low, cyan for charging, and gray for offline devices. Click to open the device panel, or right-click for settings, an immediate refresh, or Exit at the bottom of the menu. There is no need to fit a separate icon for every device into the tray.
+Hover over the icon to see device names, device icons, and color-coded battery levels. A shared 2.4 GHz receiver shows a receiver name and icon when its connected model cannot be identified. Click to open the device panel, or right-click for settings, an immediate refresh, or Exit.
 
 ### All your devices together, with names you choose
 
@@ -39,7 +39,7 @@ Readings come from the device or Windows. When a device is disconnected or its b
 
 ### A comfortable interface and quiet background monitoring
 
-Choose light, dark, or system theme, adjust the frosted background's transparency, and switch between Chinese and English. Large battery numbers keep device cards easy to read.
+Choose light, dark, or system theme, adjust the frosted background's transparency, and switch between Chinese, English, and Russian. Large battery numbers keep device cards easy to read.
 
 Monitoring continues after you close the panel. After about 30 seconds of interface inactivity, the app releases UI resources; click the tray icon to open the panel again. You do not need to keep a window open for monitoring to continue.
 
@@ -65,10 +65,13 @@ Monitoring continues after you close the panel. After about 30 seconds of interf
 | Logitech wireless mice | Selected LIGHTSPEED, Unifying, Bolt, and other receivers with compatible mice, including supported models in the G502 X, G903, and PRO X SUPERLIGHT families. |
 | Razer wireless mice | Selected HyperSpeed wireless mice, including supported models in the Basilisk, Viper, and DeathAdder families. |
 | ASUS ROG wireless peripherals | Selected wireless mice, keyboards, and Omni receiver combinations. The pairing list may be unavailable on some Omni receivers. See [Issue #3](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues/3). |
-| Other 2.4 GHz wireless keyboards | Currently limited to models using the Huafenda wireless chipset, including some Weikav / NUT75 keyboards. |
+| Other wireless mice and keyboards | Selected MCHOSE, AULA, KYSONA, Weikav / NUT75, and ARDOR GAMING devices, depending on the model and connection mode. |
+| Wireless headsets | Selected Logitech, Razer, ASUS ROG, and MCHOSE models. |
 | Bluetooth mice, keyboards, headphones, and more | Devices paired and connected in Windows that expose a readable battery level to the system. |
 
 **Support for a brand does not mean every model is supported. Changing a device's connection mode can also affect battery availability.** For example, a keyboard's 2.4 GHz and Bluetooth modes require separate compatibility checks. Charging status and battery accuracy depend on the information provided by the device; some devices report a battery level without reporting whether they are charging.
+
+Battery-powered peripherals can be monitored in USB mode when they report an actual battery level. Battery-free wired peripherals are excluded.
 
 ## Getting started
 

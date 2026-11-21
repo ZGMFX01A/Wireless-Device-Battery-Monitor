@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 ZGMFX01A
+// SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+// See LICENSE in the repository root for the full terms.
+
 use battery_protocol::{Charge, Descriptor, Kind, Reading, hid::DiscoveryWarning};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -35,6 +39,7 @@ pub enum Language {
     Auto,
     Zh,
     En,
+    Ru,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KeyboardConnection {
@@ -42,6 +47,15 @@ pub struct KeyboardConnection {
     #[serde(default)]
     pub serial: Option<String>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CachedDeviceIdentity {
+    name: String,
+    identity: battery_protocol::DeviceIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generic_name: Option<battery_protocol::GenericName>,
+    endpoint_id: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Prefs {
@@ -61,6 +75,7 @@ pub struct Prefs {
     pub bluetooth: BTreeSet<String>,
     pub aliases: BTreeMap<String, String>,
     pub bound_names: BTreeMap<String, String>,
+    pub bound_identity: BTreeMap<String, CachedDeviceIdentity>,
     pub migration: LegacyDevices,
 }
 impl Default for Prefs {
@@ -80,6 +95,7 @@ impl Default for Prefs {
             bluetooth: Default::default(),
             aliases: Default::default(),
             bound_names: Default::default(),
+            bound_identity: Default::default(),
             migration: Default::default(),
         }
     }
@@ -107,7 +123,7 @@ impl Prefs {
     }
     pub fn bound(&self, d: &Descriptor) -> bool {
         match d.kind {
-            Kind::Mouse => true,
+            Kind::Mouse | Kind::Audio => true,
             Kind::Keyboard => {
                 self.keyboard.as_ref() == Some(&d.id)
                     || self.keyboard_endpoint() == Some(d.id.as_str())
@@ -115,11 +131,56 @@ impl Prefs {
             Kind::Bluetooth => self.bluetooth.contains(&d.id),
         }
     }
-    pub fn name<'a>(&'a self, d: &'a Descriptor) -> &'a str {
+    pub fn name(&self, d: &Descriptor) -> String {
+        let key = if d.kind == Kind::Keyboard && self.keyboard_endpoint() == Some(d.id.as_str()) {
+            self.keyboard.as_deref().unwrap()
+        } else {
+            &d.id
+        };
         self.aliases
-            .get(&d.id)
-            .map(String::as_str)
-            .unwrap_or(&d.name)
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| crate::device_display::display_name(d, crate::view::locale(self)))
+    }
+    fn identity_binding(&self, d: &Descriptor) -> Option<&str> {
+        match d.kind {
+            Kind::Keyboard if self.keyboard_endpoint() == Some(d.id.as_str()) => {
+                self.keyboard.as_deref()
+            }
+            Kind::Bluetooth => self.bluetooth.get(&d.id).map(String::as_str),
+            _ => None,
+        }
+    }
+    pub fn remember_identity(&mut self, d: &Descriptor) -> bool {
+        let Some(key) = self.identity_binding(d).map(str::to_owned) else {
+            return false;
+        };
+        let Some(identity) = &d.identity else {
+            return false;
+        };
+        let snapshot = CachedDeviceIdentity {
+            name: d.name.clone(),
+            identity: identity.clone(),
+            generic_name: d.generic_name.clone(),
+            endpoint_id: d.id.clone(),
+        };
+        if self.bound_identity.get(&key) == Some(&snapshot) {
+            return false;
+        }
+        self.bound_names.insert(key.clone(), d.name.clone());
+        self.bound_identity.insert(key, snapshot);
+        true
+    }
+    pub fn clear_identity(&mut self, d: &Descriptor) -> bool {
+        let Some(key) = self.identity_binding(d).map(str::to_owned) else {
+            return false;
+        };
+        let had_snapshot = self.bound_identity.remove(&key).is_some();
+        let changed_name = self.bound_names.get(&key) != Some(&d.name);
+        if changed_name {
+            self.bound_names.insert(key, d.name.clone());
+        }
+        had_snapshot || changed_name
     }
     pub fn preserve_missing(&self, rows: &mut Vec<Row>, bt: bool) {
         let ids: Vec<_> = if bt {
@@ -129,18 +190,24 @@ impl Prefs {
         };
         for id in ids {
             if !rows.iter().any(|r| &r.device.id == id) {
+                let cached = self.bound_identity.get(id);
                 rows.push(Row {
                     device: Descriptor {
                         id: id.clone(),
-                        name: self.bound_names.get(id).cloned().unwrap_or_else(|| {
-                            if bt {
-                                "Bluetooth".into()
-                            } else {
-                                "Keyboard".into()
-                            }
-                        }),
+                        name: cached
+                            .map(|d| d.name.clone())
+                            .or_else(|| self.bound_names.get(id).cloned())
+                            .unwrap_or_else(|| {
+                                if bt {
+                                    "Bluetooth".into()
+                                } else {
+                                    "Keyboard".into()
+                                }
+                            }),
                         kind: if bt { Kind::Bluetooth } else { Kind::Keyboard },
                         legacy_ids: vec![],
+                        identity: cached.map(|d| d.identity.clone()),
+                        generic_name: cached.and_then(|d| d.generic_name.clone()),
                     },
                     battery: None,
                     error: Some("offline".into()),
@@ -200,6 +267,7 @@ impl Prefs {
         };
         self.lang = match text("ui_language") {
             Some("en-US") => Language::En,
+            Some("ru-RU") => Language::Ru,
             Some("zh-CN") => Language::Zh,
             Some("auto") => Language::Auto,
             _ => self.lang.clone(),
@@ -250,6 +318,9 @@ impl Prefs {
                 .remove(&old)
                 .unwrap_or_else(|| d.name.clone());
             self.bound_names.entry(d.id.clone()).or_insert(previous);
+            if let Some(snapshot) = self.bound_identity.remove(&old) {
+                self.bound_identity.entry(d.id.clone()).or_insert(snapshot);
+            }
             remapped = true;
         }
         for (old, alias) in self.aliases.clone() {
@@ -345,13 +416,79 @@ impl Prefs {
         Ok(())
     }
 }
+#[cfg(test)]
+#[test]
+fn cached_keyboard_identity_tracks_the_logical_binding_and_survives_offline_restart() {
+    use battery_protocol::{
+        BatteryCapability, ConnectionKind, DeviceCategory, DeviceIdentity, ModelSource,
+    };
+    let mut prefs = Prefs {
+        keyboard: Some("logical".into()),
+        keyboard_connection: Some(KeyboardConnection {
+            endpoint_id: "current".into(),
+            serial: Some("physical".into()),
+        }),
+        ..Default::default()
+    };
+    prefs
+        .aliases
+        .insert("logical".into(), "Desk keyboard".into());
+    let device = Descriptor {
+        id: "current".into(),
+        name: "AULA MINI60HE MAX".into(),
+        kind: Kind::Keyboard,
+        legacy_ids: vec![],
+        identity: Some(DeviceIdentity {
+            model_key: Some("aula-mini60he-max".into()),
+            category: DeviceCategory::Keyboard,
+            connection: ConnectionKind::Rf24,
+            battery: BatteryCapability::Present,
+            model_source: Some(ModelSource::ProtocolIdentity),
+        }),
+        generic_name: None,
+    };
+    assert_eq!(prefs.name(&device), "Desk keyboard");
+    assert!(prefs.remember_identity(&device));
+    assert!(!prefs.remember_identity(&device));
+    let mut prefs: Prefs = serde_json::from_slice(&serde_json::to_vec(&prefs).unwrap()).unwrap();
+    let mut offline = Vec::new();
+    prefs.preserve_missing(&mut offline, false);
+    let row = &offline[0];
+    assert_eq!(row.device.id, "logical");
+    assert_eq!(row.device.name, device.name);
+    assert_eq!(row.device.identity, device.identity);
+    assert_eq!(prefs.name(&row.device), "Desk keyboard");
+    assert!(row.battery.is_none());
+    assert!(prefs.change(&Command::Unbind("logical".into()), &[]));
+    assert!(prefs.bound_identity.is_empty());
+}
+
+#[cfg(test)]
+#[test]
+fn old_preferences_and_descriptors_default_missing_identity_fields() {
+    let prefs: Prefs = serde_json::from_value(serde_json::json!({
+        "keyboard": "old", "bound_names": {"old": "Previous name"}
+    }))
+    .unwrap();
+    assert!(prefs.bound_identity.is_empty());
+    let mut rows = Vec::new();
+    prefs.preserve_missing(&mut rows, false);
+    assert_eq!(rows[0].device.name, "Previous name");
+    assert!(rows[0].device.identity.is_none());
+    let old: Descriptor = serde_json::from_value(serde_json::json!({
+        "id": "old", "name": "Previous name", "kind": "Keyboard"
+    }))
+    .unwrap();
+    assert!(old.identity.is_none());
+    assert!(old.generic_name.is_none());
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Row {
     pub device: Descriptor,
     pub battery: Option<Reading>,
     pub error: Option<String>,
     pub sampled: u64,
-    /// Last accepted reading remains valid; the most recent packet was rejected.
+    /// The displayed value comes from an earlier successful sample.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub held: bool,
 }
@@ -539,12 +676,12 @@ impl State {
                     Priority::Mouse => match r.device.kind {
                         Kind::Mouse => 0,
                         Kind::Keyboard => 1,
-                        Kind::Bluetooth => 2,
+                        Kind::Bluetooth | Kind::Audio => 2,
                     },
                     Priority::Keyboard => match r.device.kind {
                         Kind::Keyboard => 0,
                         Kind::Mouse => 1,
-                        Kind::Bluetooth => 2,
+                        Kind::Bluetooth | Kind::Audio => 2,
                     },
                 };
                 (rank, r.battery.unwrap().display)
@@ -565,6 +702,8 @@ impl State {
                     name: name.into(),
                     kind,
                     legacy_ids: Vec::new(),
+                    identity: None,
+                    generic_name: None,
                 },
                 battery: Reading::new(pct, charge, battery_protocol::Source::Rog),
                 error: None,
@@ -584,6 +723,8 @@ impl State {
                 name: n.into(),
                 kind: k,
                 legacy_ids: Vec::new(),
+                identity: None,
+                generic_name: None,
             });
         }
         s
@@ -669,7 +810,8 @@ impl Prefs {
                 self.lang = match self.lang {
                     Language::Auto => Language::Zh,
                     Language::Zh => Language::En,
-                    Language::En => Language::Auto,
+                    Language::En => Language::Ru,
+                    Language::Ru => Language::Auto,
                 }
             }
             Command::Style => {
@@ -687,25 +829,26 @@ impl Prefs {
                     Priority::Lowest => Priority::Mouse,
                 }
             }
-            Command::Bind(id) => match list.iter().find(|d| d.id == *id).map(|d| d.kind) {
-                Some(Kind::Bluetooth) => {
-                    self.bound_names.insert(
-                        id.clone(),
-                        list.iter().find(|d| d.id == *id).unwrap().name.clone(),
-                    );
-                    self.bluetooth.insert(id.clone());
+            Command::Bind(id) => {
+                let Some(d) = list.iter().find(|d| d.id == *id) else {
+                    return false;
+                };
+                match d.kind {
+                    Kind::Bluetooth => {
+                        self.bluetooth.insert(id.clone());
+                    }
+                    Kind::Keyboard => {
+                        if let Some(old) = self.keyboard.replace(id.clone()).filter(|old| old != id)
+                        {
+                            self.bound_identity.remove(&old);
+                        }
+                        self.keyboard_connection = None;
+                        self.migration.keyboard = None;
+                    }
+                    _ => return false,
                 }
-                Some(Kind::Keyboard) => {
-                    self.bound_names.insert(
-                        id.clone(),
-                        list.iter().find(|d| d.id == *id).unwrap().name.clone(),
-                    );
-                    self.keyboard = Some(id.clone());
-                    self.keyboard_connection = None;
-                    self.migration.keyboard = None;
-                }
-                _ => return false,
-            },
+                self.bound_names.insert(id.clone(), d.name.clone());
+            }
             Command::Unbind(id) => {
                 if self.keyboard.as_ref() == Some(id) {
                     self.keyboard = None;
@@ -713,6 +856,7 @@ impl Prefs {
                 }
                 self.bluetooth.remove(id);
                 self.bound_names.remove(id);
+                self.bound_identity.remove(id);
             }
             Command::Alias(id, name)
                 if (list.iter().any(|d| d.id == *id) || self.bound_names.contains_key(id))
@@ -733,6 +877,27 @@ impl Prefs {
 mod tests {
     use super::*;
     #[test]
+    fn russian_preferences_round_trip_and_legacy_language_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        let mut prefs = Prefs::default();
+        for lang in [Language::Auto, Language::Zh, Language::En, Language::Ru] {
+            assert!(prefs.change(&Command::SetLanguage(lang.clone()), &[]));
+            prefs.save(&path).unwrap();
+            assert_eq!(Prefs::load(&path).unwrap().lang, lang);
+        }
+        let command: Command = serde_json::from_str(r#"{"SetLanguage":"Ru"}"#).unwrap();
+        assert!(prefs.change(&command, &[]));
+        assert_eq!(prefs.lang, Language::Ru);
+        assert!(prefs.change(&Command::Language, &[]));
+        assert_eq!(prefs.lang, Language::Auto);
+        prefs.lang = Language::En;
+        prefs
+            .import_appearance_value(&serde_json::json!({"ui_language":"ru-RU"}))
+            .unwrap();
+        assert_eq!(prefs.lang, Language::Ru);
+    }
+    #[test]
     fn keyboard_rebind_and_unbind_clear_transport_but_bluetooth_bind_does_not() {
         let mut state = State::demo();
         let id = state.prefs.keyboard.clone().unwrap();
@@ -746,6 +911,8 @@ mod tests {
             name: "Headset".into(),
             kind: Kind::Bluetooth,
             legacy_ids: vec![],
+            identity: None,
+            generic_name: None,
         };
         assert!(state.prefs.change(&Command::Bind(bt.id.clone()), &[bt]));
         assert_eq!(state.prefs.keyboard_connection, Some(connection.clone()));
@@ -964,7 +1131,7 @@ mod parity_tests {
         m.finish(11, false, None);
         m.finish(10, true, None);
         assert!(!m.completed());
-        m.finish(11, true, Some("timeout".into()));
+        m.finish(11, true, Some(Notice::RefreshFailed));
         assert!(m.completed());
         assert!(m.error.is_some())
     }
@@ -983,6 +1150,8 @@ mod parity_tests {
             kind: Kind::Keyboard,
             name: "Same".into(),
             legacy_ids: vec!["old_path".into()],
+            identity: None,
+            generic_name: None,
         };
         let temp = tempfile::tempdir().unwrap();
         let f = temp.path().join("old.json");
@@ -1043,6 +1212,8 @@ mod audit_identity {
             name: "NUT75".into(),
             kind: Kind::Keyboard,
             legacy_ids: vec![old.clone()],
+            identity: None,
+            generic_name: None,
         };
         assert!(!p.resolve(&[mk("a"), mk("b")]));
         assert_eq!(p.keyboard.as_ref(), Some(&old));

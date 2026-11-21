@@ -1,13 +1,19 @@
+// SPDX-FileCopyrightText: 2026 ZGMFX01A
+// SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+// See LICENSE in the repository root for the full terms.
+
 //! A small, nonactivating tray tooltip. It lives on the host message-pump thread
 //! and uses GDI only; hovering never starts the GPUI child or touches devices.
 use crate::{
+    device_display::{DeviceIcon, device_icon, icon_accessible_name},
     model::{State, Theme},
     view::{
-        apps_use_dark_theme, english,
+        apps_use_dark_theme, locale,
         skin::{BatteryTone, Skin},
+        strings::{Locale, label},
     },
 };
-use battery_protocol::{Charge, Kind};
+use battery_protocol::Charge;
 use std::{cell::RefCell, collections::BTreeMap, marker::PhantomData, rc::Rc};
 use tray_icon::TrayIconEvent;
 use windows_sys::Win32::{
@@ -20,7 +26,7 @@ use windows_sys::Win32::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Device {
     name: String,
-    kind: Kind,
+    icon: Option<DeviceIcon>,
     value: String,
     charge: Option<Charge>,
     tone: BatteryTone,
@@ -29,11 +35,11 @@ struct Device {
 pub struct Content {
     rows: Vec<Device>,
     theme: Theme,
-    en: bool,
+    locale: Locale,
 }
 impl Content {
     pub fn of(state: &State) -> Self {
-        let en = english(&state.prefs);
+        let locale = locale(&state.prefs);
         Self {
             rows: state
                 .rows
@@ -50,9 +56,9 @@ impl Content {
                             .take(180)
                             .map(|c| if c.is_control() { ' ' } else { c })
                             .collect(),
-                        kind: r.device.kind,
+                        icon: device_icon(&r.device),
                         value: if !online {
-                            if en { "Offline" } else { "离线" }.into()
+                            label(locale, "tray.offline").into()
                         } else {
                             battery.map_or_else(|| "—".into(), |b| format!("{}%", b.display))
                         },
@@ -68,29 +74,34 @@ impl Content {
                 })
                 .collect(),
             theme: state.prefs.theme.clone(),
-            en,
+            locale,
         }
     }
     fn accessible_text(&self) -> String {
         if self.rows.is_empty() {
-            return if self.en {
-                "No devices"
-            } else {
-                "暂无设备"
-            }
-            .into();
+            return label(self.locale, "tray.no_devices").into();
         }
         self.rows
             .iter()
             .map(|r| {
-                let status = match (r.charge, self.en) {
-                    (Some(Charge::Charging), true) => ", Charging",
-                    (Some(Charge::Charging), false) => "，充电中",
-                    (Some(Charge::Full), true) => ", Fully charged",
-                    (Some(Charge::Full), false) => "，已充满",
+                let status = match r.charge {
+                    Some(Charge::Charging) => label(self.locale, "device.charging_short"),
+                    Some(Charge::Full) => label(self.locale, "device.full"),
                     _ => "",
                 };
-                format!("{}: {}{status}", r.name, r.value)
+                let device_type = r.icon.map_or_else(String::new, |icon| {
+                    let name = icon_accessible_name(self.locale, icon);
+                    if r.name.contains(name) {
+                        String::new()
+                    } else {
+                        format!(" ({name})")
+                    }
+                });
+                if status.is_empty() {
+                    format!("{}{device_type}: {}", r.name, r.value)
+                } else {
+                    format!("{}{device_type}: {}, {status}", r.name, r.value)
+                }
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -224,7 +235,7 @@ impl Tooltip {
         }
         let layout_changed = POPUPS.with_borrow_mut(|p| {
             if let Some(p) = p.get_mut(&(self.hwnd as isize)) {
-                let layout_changed = p.content.en != content.en
+                let layout_changed = p.content.locale != content.locale
                     || p.content.rows.len() != content.rows.len()
                     || p.content
                         .rows
@@ -324,11 +335,10 @@ impl TooltipFonts {
             battery: Font::new("Consolas", BATTERY_TEXT_SIZE, FW_BOLD, dpi),
         }
     }
-    fn value_width(&self, dc: HDC, en: bool) -> i32 {
+    fn value_width(&self, dc: HDC, locale: Locale) -> i32 {
         unsafe {
             let old_font = SelectObject(dc, self.status.0);
-            let status =
-                text_width(dc, if en { "Offline" } else { "离线" }).max(text_width(dc, "—"));
+            let status = text_width(dc, label(locale, "tray.offline")).max(text_width(dc, "—"));
             SelectObject(dc, self.battery.0);
             let battery = text_width(dc, "100%").max(text_width(dc, "88%"));
             SelectObject(dc, old_font);
@@ -362,7 +372,7 @@ fn preferred_width(hwnd: HWND, p: &Popup) -> i32 {
             .map(|row| text_width(dc, &row.name))
             .max()
             .unwrap_or_default();
-        let value = fonts.value_width(dc, p.content.en);
+        let value = fonts.value_width(dc, p.content.locale);
         SelectObject(dc, old_font);
         ReleaseDC(hwnd, dc);
         (px(LABEL_OFFSET, p.dpi) + name + px(VALUE_GAP, p.dpi) + value + px(INSET_X, p.dpi))
@@ -465,7 +475,7 @@ fn draw_text(dc: HDC, text: &str, rect: &mut RECT, color: u32, flags: u32) {
     }
 }
 
-fn draw_device_kind(dc: HDC, kind: Kind, left: i32, top: i32, size: i32) {
+fn draw_device_icon(dc: HDC, icon: DeviceIcon, left: i32, top: i32, size: i32) {
     let x = |offset| left + (size * offset + GLYPH_SIZE / 2) / GLYPH_SIZE;
     let y = |offset| top + (size * offset + GLYPH_SIZE / 2) / GLYPH_SIZE;
     let stroke = |points: &[(i32, i32)]| {
@@ -476,20 +486,31 @@ fn draw_device_kind(dc: HDC, kind: Kind, left: i32, top: i32, size: i32) {
         unsafe { Polyline(dc, points.as_ptr(), points.len() as i32) };
     };
     unsafe {
-        match kind {
-            Kind::Mouse => {
+        match icon {
+            DeviceIcon::Mouse => {
                 RoundRect(dc, x(3), y(0), x(12), y(14), x(6) - left, y(6) - top);
                 stroke(&[(7, 3), (7, 6)]);
             }
-            Kind::Keyboard => {
+            DeviceIcon::Keyboard => {
                 RoundRect(dc, x(0), y(2), x(14), y(12), x(3) - left, y(3) - top);
                 for a in [3, 6, 9] {
                     stroke(&[(a, 5), (a + 1, 5)]);
                 }
                 stroke(&[(4, 8), (10, 8)]);
             }
-            Kind::Bluetooth => {
+            DeviceIcon::Bluetooth => {
                 stroke(&[(3, 3), (11, 10), (7, 13), (7, 1), (11, 4), (3, 11)]);
+            }
+            DeviceIcon::Headset => {
+                stroke(&[(1, 8), (1, 4), (3, 1), (7, 0), (11, 1), (13, 4), (13, 8)]);
+                RoundRect(dc, x(0), y(7), x(4), y(13), x(2) - left, y(2) - top);
+                RoundRect(dc, x(10), y(7), x(14), y(13), x(2) - left, y(2) - top);
+            }
+            DeviceIcon::Receiver24g => {
+                RoundRect(dc, x(1), y(1), x(13), y(6), x(2) - left, y(2) - top);
+                Rectangle(dc, x(3), y(5), x(11), y(13));
+                stroke(&[(5, 8), (5, 11)]);
+                stroke(&[(9, 8), (9, 11)]);
             }
         }
     }
@@ -529,7 +550,7 @@ fn paint(hwnd: HWND, dc: HDC) {
         SetBkMode(dc, TRANSPARENT as i32);
         let fonts = TooltipFonts::new(p.dpi);
         let old_font = SelectObject(dc, fonts.name.0);
-        let reserve = fonts.value_width(dc, p.content.en);
+        let reserve = fonts.value_width(dc, p.content.locale);
         let inset = px(INSET_X, p.dpi);
         let label_left = px(LABEL_OFFSET, p.dpi);
         let right = client.right - inset;
@@ -555,7 +576,9 @@ fn paint(hwnd: HWND, dc: HDC) {
                 LineTo(dc, right, top);
             }
             SetDCPenColor(dc, rgb(skin.dim_rgb()));
-            draw_device_kind(dc, row.kind, inset, top + (row_height - glyph) / 2, glyph);
+            if let Some(icon) = row.icon {
+                draw_device_icon(dc, icon, inset, top + (row_height - glyph) / 2, glyph);
+            }
 
             let name_right = label_left + text_width(dc, &row.name).min(name_room);
             let mut name = RECT {
@@ -594,11 +617,8 @@ fn paint(hwnd: HWND, dc: HDC) {
         }
         if p.content.rows.len() > p.count {
             let remaining = p.content.rows.len() - p.count;
-            let text = if p.content.en {
-                format!("+{remaining} more devices")
-            } else {
-                format!("另有 {remaining} 个设备")
-            };
+            let text =
+                label(p.content.locale, "tray.more").replace("{count}", &remaining.to_string());
             let top = inset_y + row_height * p.count as i32;
             SetDCPenColor(dc, rgb(divider));
             MoveToEx(dc, label_left, top, std::ptr::null_mut());
@@ -701,6 +721,19 @@ mod native_probe;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use battery_protocol::Kind;
+    use battery_protocol::{BatteryCapability, ConnectionKind, DeviceCategory, DeviceIdentity};
+
+    fn identity(category: DeviceCategory, connection: ConnectionKind) -> DeviceIdentity {
+        DeviceIdentity {
+            model_key: None,
+            category,
+            connection,
+            battery: BatteryCapability::Present,
+            model_source: None,
+        }
+    }
+
     fn capture(hwnd: HWND, path: &std::path::Path) -> image::RgbImage {
         #[link(name = "dwmapi")]
         unsafe extern "system" {
@@ -729,6 +762,20 @@ mod tests {
         }
     }
     #[test]
+    fn russian_tooltip_replaces_english_even_when_percentages_do_not_change() {
+        let mut state = State::demo();
+        state.prefs.lang = crate::model::Language::En;
+        let en = Content::of(&state);
+        state.prefs.lang = crate::model::Language::Ru;
+        let ru = Content::of(&state);
+        assert_ne!(en, ru);
+        assert!(ru.accessible_text().contains("Заряжается"));
+        state.rows[0].error = Some("offline".into());
+        assert!(Content::of(&state).accessible_text().contains("Не в сети"));
+        state.rows.clear();
+        assert_eq!(Content::of(&state).accessible_text(), "Нет устройств");
+    }
+    #[test]
     fn device_names_and_live_battery_states() {
         let mut state = State::demo();
         state
@@ -737,10 +784,10 @@ mod tests {
             .insert(state.rows[0].device.id.clone(), "主力鼠标".into());
         let c = Content::of(&state);
         assert_eq!(c.rows[0].name, "主力鼠标");
-        assert_eq!(c.rows[0].kind, Kind::Mouse);
+        assert_eq!(c.rows[0].icon, Some(DeviceIcon::Mouse));
         assert_eq!(c.rows[0].value, "72%");
         assert_eq!(c.rows[0].tone, BatteryTone::Normal);
-        assert_eq!(c.rows[1].kind, Kind::Keyboard);
+        assert_eq!(c.rows[1].icon, Some(DeviceIcon::Keyboard));
         assert_eq!(c.rows[1].value, "35%");
         assert_eq!(c.rows[1].tone, BatteryTone::Charging);
         state.rows[0].battery.as_mut().unwrap().display = 49;
@@ -778,6 +825,81 @@ mod tests {
     }
 
     #[test]
+    fn all_device_glyphs_remain_distinct_at_96_144_and_192_dpi() {
+        let icons = [
+            DeviceIcon::Mouse,
+            DeviceIcon::Keyboard,
+            DeviceIcon::Headset,
+            DeviceIcon::Bluetooth,
+            DeviceIcon::Receiver24g,
+        ];
+        for (dpi, expected_size) in [(96, 14), (144, 21), (192, 28)] {
+            let size = px(GLYPH_SIZE, dpi);
+            assert_eq!(size, expected_size);
+            let margin = px(2, dpi);
+            let gap = px(4, dpi);
+            let step = size + gap;
+            let width = margin * 2 + size * icons.len() as i32 + gap * (icons.len() as i32 - 1);
+            let height = size + margin * 2;
+            let masks = unsafe {
+                let screen = GetDC(std::ptr::null_mut());
+                assert!(!screen.is_null());
+                let memory = CreateCompatibleDC(screen);
+                assert!(!memory.is_null());
+                let bitmap = CreateCompatibleBitmap(screen, width, height);
+                assert!(!bitmap.is_null());
+                let old_bitmap = SelectObject(memory, bitmap);
+                let background = CreateSolidBrush(rgb(0xffffff));
+                assert!(!background.is_null());
+                let canvas = RECT {
+                    left: 0,
+                    top: 0,
+                    right: width,
+                    bottom: height,
+                };
+                assert_ne!(FillRect(memory, &canvas, background), 0);
+                DeleteObject(background);
+                let old_pen = SelectObject(memory, GetStockObject(DC_PEN));
+                let old_brush = SelectObject(memory, GetStockObject(NULL_BRUSH));
+                SetDCPenColor(memory, rgb(0x303030));
+                for (i, icon) in icons.iter().copied().enumerate() {
+                    draw_device_icon(memory, icon, margin + i as i32 * step, margin, size);
+                }
+                GdiFlush();
+                let masks = icons
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| {
+                        let left = margin + i as i32 * step;
+                        let mut points = Vec::new();
+                        for y in 0..size {
+                            for x in 0..size {
+                                if GetPixel(memory, left + x, margin + y) != rgb(0xffffff) {
+                                    points.push((x, y));
+                                }
+                            }
+                        }
+                        points
+                    })
+                    .collect::<Vec<_>>();
+                SelectObject(memory, old_brush);
+                SelectObject(memory, old_pen);
+                SelectObject(memory, old_bitmap);
+                DeleteObject(bitmap);
+                DeleteDC(memory);
+                ReleaseDC(std::ptr::null_mut(), screen);
+                masks
+            };
+            assert!(masks.iter().all(|mask| mask.len() >= 4));
+            for (i, mask) in masks.iter().enumerate() {
+                for other in masks.iter().skip(i + 1) {
+                    assert_ne!(mask, other, "icons overlap at {dpi} DPI");
+                }
+            }
+        }
+    }
+
+    #[test]
     #[ignore = "requires an interactive Windows desktop"]
     fn native_render_and_hover_lifecycle() {
         native_probe::dpi_aware();
@@ -796,9 +918,22 @@ mod tests {
         third.device.id = "low-test".into();
         third.device.name = "Galaxy Buds4 Pro".into();
         third.device.kind = Kind::Bluetooth;
+        third.device.identity = Some(identity(DeviceCategory::Unknown, ConnectionKind::Bluetooth));
         state.prefs.bluetooth.insert(third.device.id.clone());
         third.battery.as_mut().unwrap().display = 12;
         state.rows.push(third);
+        let mut headset = state.rows[0].clone();
+        headset.device.id = "headset-test".into();
+        headset.device.name = "Studio Headset".into();
+        headset.device.kind = Kind::Audio;
+        headset.device.identity =
+            Some(identity(DeviceCategory::Headset, ConnectionKind::Bluetooth));
+        state.rows.push(headset);
+        let mut receiver = state.rows[0].clone();
+        receiver.device.id = "receiver-test".into();
+        receiver.device.name = "Shared receiver".into();
+        receiver.device.identity = Some(identity(DeviceCategory::Unknown, ConnectionKind::Rf24));
+        state.rows.push(receiver);
         state.prefs.theme = Theme::Auto;
         let mut tooltip = Tooltip::new(Content::of(&state)).unwrap();
         let hwnd = tooltip.hwnd;
@@ -824,8 +959,8 @@ mod tests {
         }
         assert_ne!(unsafe { IsWindowVisible(hwnd) }, 0);
         assert_eq!(unsafe { GetForegroundWindow() }, foreground);
-        assert_eq!(snapshot(hwnd).unwrap().count, 3);
-        let auto = capture(hwnd, &out.join("tooltip-auto.png"));
+        assert_eq!(snapshot(hwnd).unwrap().count, 5);
+        let auto = capture(hwnd, &out.join("tooltip-five-icons-auto.png"));
         let app_dark = apps_use_dark_theme();
         let [r, g, b] = auto.get_pixel(auto.width() / 2, 4).0;
         let background = u32::from_be_bytes([0, r, g, b]);
@@ -835,6 +970,34 @@ mod tests {
         }
         .dialog_rgb();
         assert_eq!(background, expected, "auto theme must match Windows apps");
+
+        let mut icon_before = RECT::default();
+        assert_ne!(unsafe { GetWindowRect(hwnd, &mut icon_before) }, 0);
+        state.rows[0].device.identity =
+            Some(identity(DeviceCategory::Unknown, ConnectionKind::Rf24));
+        tooltip.update(Content::of(&state));
+        let receiver_icon = capture_change(hwnd, &out.join("tooltip-icon-only.png"), &auto);
+        assert_ne!(
+            receiver_icon, auto,
+            "icon-only changes must redraw immediately"
+        );
+        let mut icon_after = RECT::default();
+        assert_ne!(unsafe { GetWindowRect(hwnd, &mut icon_after) }, 0);
+        assert_eq!(
+            (
+                icon_before.left,
+                icon_before.top,
+                icon_before.right,
+                icon_before.bottom
+            ),
+            (
+                icon_after.left,
+                icon_after.top,
+                icon_after.right,
+                icon_after.bottom
+            ),
+            "icon-only changes must not recompute tooltip layout"
+        );
 
         state.prefs.theme = Theme::Dark;
         tooltip.update(Content::of(&state));

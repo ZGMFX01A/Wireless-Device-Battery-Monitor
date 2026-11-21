@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 ZGMFX01A
+// SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+// See LICENSE in the repository root for the full terms.
+
 //! Match a logical keyboard to a fresh physical inventory, independently of I/O.
 use crate::model::{KeyboardConnection, Prefs, State};
 use battery_protocol::Reading;
@@ -265,6 +269,8 @@ mod tests {
             name: "2.4G Dongle".into(),
             kind: battery_protocol::Kind::Keyboard,
             legacy_ids: vec![],
+            identity: None,
+            generic_name: None,
         });
         assert_eq!(row.id, OLD);
         assert_eq!(state.prefs.name(&row), "Renamed");

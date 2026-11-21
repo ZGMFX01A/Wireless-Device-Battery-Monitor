@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 ZGMFX01A
+// SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+// See LICENSE in the repository root for the full terms.
+
 //! Automatic checks do not take ownership of a manually initiated download.
 use super::Status;
 use std::time::{Duration, Instant};
@@ -128,12 +132,17 @@ mod tests {
         let now = Instant::now();
         let mut s = Schedule::new(true, false, now);
         assert_eq!(s.tick(true, false, &Status::Idle, now), Some(Action::Check));
-        s.tick(true, false, &Status::Error("offline".into()), now);
+        s.tick(
+            true,
+            false,
+            &Status::Error(crate::update::Failure::Check),
+            now,
+        );
         assert_eq!(
             s.tick(
                 true,
                 false,
-                &Status::Error("offline".into()),
+                &Status::Error(crate::update::Failure::Check),
                 now + Duration::from_secs(299)
             ),
             None
@@ -142,7 +151,7 @@ mod tests {
             s.tick(
                 true,
                 false,
-                &Status::Error("offline".into()),
+                &Status::Error(crate::update::Failure::Check),
                 now + Duration::from_secs(300)
             ),
             Some(Action::Check)

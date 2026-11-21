@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 ZGMFX01A
+// SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+// See LICENSE in the repository root for the full terms.
+
 use super::{skin::*, *};
 use crate::update::Status;
 fn token() -> u64 {
@@ -13,7 +17,8 @@ fn token() -> u64 {
 fn footbtn(id: &'static str, label: &'static str, primary: bool, k: Skin) -> Stateful<Div> {
     action(id)
         .px(px(13.))
-        .h(px(29.))
+        .min_h(px(29.))
+        .py(px(5.))
         .rounded(px(6.))
         .bg(if primary {
             rgb(GREEN).into()
@@ -137,6 +142,8 @@ impl Panel {
         let mut sub = String::new();
         let mut body = col()
             .id("dialog-list")
+            .w_full()
+            .flex_none()
             .max_h(px(240.))
             .min_h(px(42.))
             .overflow_y_scroll()
@@ -144,7 +151,9 @@ impl Panel {
             .py(px(8.))
             .gap(px(6.));
         let mut footer = row()
+            .flex_none()
             .justify_end()
+            .flex_wrap()
             .gap(px(8.))
             .px(px(16.))
             .pt(px(10.))
@@ -236,11 +245,7 @@ impl Panel {
                                 })
                                 .child(
                                     col()
-                                        .child(txt(
-                                            self.state.prefs.name(dev).to_owned(),
-                                            12.,
-                                            k.text(),
-                                        ))
+                                        .child(txt(self.state.prefs.name(dev), 12., k.text()))
                                         .child(txt(
                                             if bound {
                                                 self.t("device.bound")
@@ -278,7 +283,7 @@ impl Panel {
                 let confirm = footbtn(
                     "dialog-confirm",
                     if retry {
-                        self.tr("重试", "Retry")
+                        self.t("dialog.retry")
                     } else {
                         self.t(if kind == Kind::Keyboard {
                             "dialog.connect"
@@ -346,11 +351,7 @@ impl Panel {
                                     .bg(k.grad(false))
                                     .child(txt(
                                         if self.state.release_notes.is_empty() {
-                                            self.tr(
-                                                "此版本未提供更新说明",
-                                                "No release notes provided",
-                                            )
-                                            .into()
+                                            self.t("update.no_notes").into()
                                         } else {
                                             self.state.release_notes.clone()
                                         },
@@ -415,19 +416,9 @@ impl Panel {
                     }
                     Status::Ready(v) => {
                         sub = format!("v{v}");
-                        body = body.child(txt(
-                            self.tr("签名与文件校验通过", "Signature and file verified"),
-                            12.,
-                            k.text(),
-                        ));
+                        body = body.child(txt(self.t("update.verified"), 12., k.text()));
                         footer = footer.child(close(self.t("update.later"))).child(
-                            footbtn(
-                                "install",
-                                self.tr("安装并重启", "Install & restart"),
-                                true,
-                                k,
-                            )
-                            .on_click(
+                            footbtn("install", self.t("update.install_restart"), true, k).on_click(
                                 cx.listener(|s, _, _, cx| s.issue(Command::InstallUpdate, cx)),
                             ),
                         )
@@ -435,15 +426,20 @@ impl Panel {
                     other => {
                         let msg = match other {
                             Status::Error(failure) => {
-                                strings::update_failure(english(&self.state.prefs), *failure).into()
+                                strings::update_failure(locale(&self.state.prefs), *failure).into()
                             }
                             Status::Current => self
                                 .t("update.latest")
                                 .replace("{version}", env!("APP_VERSION")),
                             Status::Cancelled => self.t("update.cancelled").into(),
-                            _ => self.tr("正在检查更新…", "Checking for updates…").into(),
+                            _ => self.t("update.checking").into(),
                         };
-                        body = body.child(txt(msg, 12., k.sub()));
+                        body = body.child(
+                            txt(msg, 12., k.sub())
+                                .w_full()
+                                .whitespace_normal()
+                                .flex_none(),
+                        );
                         footer = footer.child(close(self.t("dialog.ok")))
                     }
                 }
@@ -452,8 +448,9 @@ impl Panel {
         let card = col()
             .id("dialog-card")
             .on_click(|_, _, cx| cx.stop_propagation())
-            .w_full()
-            .max_w(px(width))
+            .w(px(width))
+            .max_w_full()
+            .flex_none()
             .rounded(px(14.))
             .bg(k.dialog())
             .border_1()
@@ -466,8 +463,14 @@ impl Panel {
                     .pt(px(14.))
                     .pb(px(8.))
                     .gap(px(3.))
-                    .child(txt(title, 14., k.text()).font_weight(FontWeight::SEMIBOLD))
-                    .when(!sub.is_empty(), |e| e.child(txt(sub, 11., k.dim()))),
+                    .child(
+                        txt(title, 14., k.text())
+                            .whitespace_normal()
+                            .font_weight(FontWeight::SEMIBOLD),
+                    )
+                    .when(!sub.is_empty(), |e| {
+                        e.child(txt(sub, 11., k.dim()).whitespace_normal())
+                    }),
             )
             .child(body)
             .child(footer);

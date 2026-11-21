@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 ZGMFX01A
+// SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+// See LICENSE in the repository root for the full terms.
+
 use super::*;
 pub fn run(exe: &Path, out: &Path) -> Result<Value> {
     let mut a = Ui::new(exe, out)?;
@@ -6,7 +10,7 @@ pub fn run(exe: &Path, out: &Path) -> Result<Value> {
         a.update()?;
         a.open("Settings")?;
         for (x, y, cmd, label) in [
-            (415., 165., json!({"SetLanguage":"En"}), "language"),
+            (320., 165., json!({"SetLanguage":"En"}), "language"),
             (319., 277., json!({"SetStyle":"Number"}), "tray style"),
             (478., 420., json!({"SetLow":30}), "low battery threshold"),
             (475., 556., json!("AutoUpdate"), "update switch"),
@@ -112,12 +116,12 @@ pub fn run(exe: &Path, out: &Path) -> Result<Value> {
             "gear replaced window",
         )?;
         passed.push("gear in same window");
-        a.exact(282., 164., json!({"SetLanguage":"En"}))?;
+        a.exact(230., 164., json!({"SetLanguage":"En"}))?;
         passed.push("settings in flyout");
         a.open("Settings")?;
         native::wheel(a.hwnd, -360, 9)?;
         a.photo("Settings-bottom")?;
-        a.exact(205., 650., json!("CheckUpdate"))?;
+        a.exact(220., 610., json!("CheckUpdate"))?;
         passed.push("check updates");
         a.state["update"] = json!({"Available":"0.2.0"});
         a.state["release_notes"] = json!("Fix device sleep recovery.\n修复设备休眠恢复。");

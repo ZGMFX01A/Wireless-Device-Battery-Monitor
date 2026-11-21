@@ -1,8 +1,15 @@
+// SPDX-FileCopyrightText: 2026 ZGMFX01A
+// SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+// See LICENSE in the repository root for the full terms.
+
 use crate::{
     icon,
     model::*,
     service::{Service, Signals},
-    view::{english, strings::label},
+    view::{
+        locale,
+        strings::{Locale, label},
+    },
 };
 use battery_protocol::Charge;
 use std::{
@@ -71,14 +78,14 @@ pub fn report(error: AppError) {
     let prefs = Prefs::path()
         .and_then(|path| Prefs::load(&path))
         .unwrap_or_default();
-    let en = english(&prefs);
-    let message = label(en, key);
+    let locale = locale(&prefs);
+    let message = label(locale, key);
     eprintln!("{message}");
     unsafe {
         MessageBoxW(
             std::ptr::null_mut(),
             wide(message).as_ptr(),
-            wide(label(en, "app.header_title")).as_ptr(),
+            wide(label(locale, "app.header_title")).as_ptr(),
             MB_OK | MB_ICONERROR,
         );
     }
@@ -390,7 +397,7 @@ impl Drop for WindowProcess {
 }
 #[derive(Debug, PartialEq, Eq)]
 struct MenuKey {
-    en: bool,
+    locale: Locale,
     labels: Vec<String>,
 }
 #[derive(Debug, PartialEq, Eq)]
@@ -424,14 +431,14 @@ impl TrayView {
             ),
             tip: crate::tooltip::Content::of(s),
             menu: MenuKey {
-                en: english(&s.prefs),
+                locale: locale(&s.prefs),
                 labels,
             },
         }
     }
 }
 fn menu(key: &MenuKey) -> Menu {
-    let en = key.en;
+    let locale = key.locale;
     let m = Menu::new();
     let mut rows = key
         .labels
@@ -439,29 +446,29 @@ fn menu(key: &MenuKey) -> Menu {
         .enumerate()
         .map(|(i, label)| MenuItem::with_id(format!("d{i}"), label, false, None))
         .collect::<Vec<_>>();
-    for (id, zh, e) in [
-        ("refresh", "立即刷新", "Refresh"),
-        ("settings", "设置", "Settings"),
+    for (id, key) in [
+        ("refresh", "tray.menu.refresh_now"),
+        ("settings", "tray.settings"),
     ] {
-        rows.push(MenuItem::with_id(id, if en { e } else { zh }, true, None))
+        rows.push(MenuItem::with_id(id, label(locale, key), true, None))
     }
     for i in &rows {
         let _ = m.append(i);
     }
-    let styles = tray_icon::menu::Submenu::new(if en { "Icon style" } else { "图标样式" }, true);
-    for (id, zh, e) in [
-        ("capsule", "胶囊", "Capsule"),
-        ("vertical", "竖向", "Vertical"),
-        ("number", "数字", "Number"),
-        ("circle", "圆环", "Circle"),
+    let styles = tray_icon::menu::Submenu::new(label(locale, "tray.style"), true);
+    for (id, key) in [
+        ("capsule", "settings.tray_style.capsule"),
+        ("vertical", "settings.tray_style.vertical"),
+        ("number", "settings.tray_style.number"),
+        ("circle", "settings.tray_style.circle"),
     ] {
-        let _ = styles.append(&MenuItem::with_id(id, if en { e } else { zh }, true, None));
+        let _ = styles.append(&MenuItem::with_id(id, label(locale, key), true, None));
     }
     let _ = m.append(&styles);
     let _ = m.append(&tray_icon::menu::PredefinedMenuItem::separator());
     let _ = m.append(&MenuItem::with_id(
         "quit",
-        if en { "Quit" } else { "退出" },
+        label(locale, "tray.quit"),
         true,
         None,
     ));
@@ -708,7 +715,7 @@ pub fn run(demo: bool) -> Result<(), AppError> {
                     &tray,
                     "GPUI",
                     label(
-                        english(&svc.state.lock().unwrap().prefs),
+                        locale(&svc.state.lock().unwrap().prefs),
                         "window.start_timeout",
                     ),
                 );
@@ -789,11 +796,7 @@ pub fn run(demo: bool) -> Result<(), AppError> {
                             if notify && !demo {
                                 balloon(
                                     &tray,
-                                    if english(&s.prefs) {
-                                        "Low battery"
-                                    } else {
-                                        "低电量提醒"
-                                    },
+                                    label(locale(&s.prefs), "settings.low_battery.title"),
                                     &format!("{} · {}%", s.prefs.name(&r.device), v.raw),
                                 );
                             }
@@ -842,7 +845,7 @@ pub fn run(demo: bool) -> Result<(), AppError> {
                                     &tray,
                                     "GPUI",
                                     label(
-                                        english(&svc.state.lock().unwrap().prefs),
+                                        locale(&svc.state.lock().unwrap().prefs),
                                         "window.start_failed",
                                     ),
                                 );
@@ -877,7 +880,7 @@ pub fn run(demo: bool) -> Result<(), AppError> {
                                     &tray,
                                     "GPUI",
                                     label(
-                                        english(&svc.state.lock().unwrap().prefs),
+                                        locale(&svc.state.lock().unwrap().prefs),
                                         "window.exited",
                                     ),
                                 );
@@ -1056,10 +1059,48 @@ mod audit_tray {
     }
 
     #[test]
-    fn quit_is_the_last_menu_item_in_both_languages() {
-        for en in [false, true] {
+    fn switching_between_english_and_russian_invalidates_the_native_tray_menu() {
+        let appearance = icon::Appearance {
+            dark: false,
+            size: 48,
+        };
+        let mut state = State::demo();
+        state.prefs.lang = Language::En;
+        let before = TrayView::of(&state, appearance);
+        state.prefs.lang = Language::Ru;
+        let after = TrayView::of(&state, appearance);
+        assert_ne!(before.menu, after.menu);
+        assert_ne!(before.tip, after.tip);
+        assert_eq!(before.icon, after.icon);
+    }
+
+    #[test]
+    fn icon_only_identity_change_invalidates_the_tray_tooltip() {
+        let appearance = icon::Appearance {
+            dark: false,
+            size: 48,
+        };
+        let mut state = State::demo();
+        let before = TrayView::of(&state, appearance);
+        state.rows[0].device.identity = Some(battery_protocol::DeviceIdentity {
+            model_key: None,
+            category: battery_protocol::DeviceCategory::Unknown,
+            connection: battery_protocol::ConnectionKind::Rf24,
+            battery: battery_protocol::BatteryCapability::Present,
+            model_source: None,
+        });
+        let after = TrayView::of(&state, appearance);
+        assert_eq!(before.icon, after.icon);
+        assert_eq!(before.menu, after.menu);
+        assert_ne!(before.tip, after.tip);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn quit_is_the_last_menu_item_in_all_three_languages() {
+        for locale in [Locale::Zh, Locale::En, Locale::Ru] {
             let m = menu(&MenuKey {
-                en,
+                locale,
                 labels: vec!["Mouse: 69%".into()],
             });
             assert_eq!(m.items().last().unwrap().id().0, "quit");
@@ -1121,7 +1162,7 @@ mod audit_tray {
         }
         let worker = thread::spawn(move || write_mail(wr, Ping(writer, Some(started))));
         let big = State {
-            note: "x".repeat(4 << 20),
+            release_notes: "x".repeat(4 << 20),
             ..Default::default()
         };
         enqueue(&mail, Event::State(Box::new(big)));

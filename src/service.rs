@@ -1,5 +1,11 @@
+// SPDX-FileCopyrightText: 2026 ZGMFX01A
+// SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+// See LICENSE in the repository root for the full terms.
+
 use crate::model::*;
-use battery_protocol::{Charge, Descriptor, Kind, Reading, bluetooth, hid};
+use battery_protocol::{
+    Charge, Descriptor, Kind, Reading, Source, bluetooth, codec::KYSONA_SLOT_UNPAIRED, hid,
+};
 use std::{
     collections::HashMap,
     sync::{Arc, Condvar, Mutex},
@@ -105,6 +111,23 @@ struct Slot {
     interval_ms: u64,
     rebaseline: bool,
 }
+fn retains_last_peripheral_sample(source: Source) -> bool {
+    matches!(
+        source,
+        Source::Kysona24g
+            | Source::ArdorFury
+            | Source::KysonaBluetooth
+            | Source::MchoseQhw
+            | Source::MchoseMouse
+            | Source::AulaHfd
+            | Source::AulaSparkLink
+            | Source::AulaHx
+            | Source::AulaJm
+            | Source::AulaRlw
+            | Source::AulaBytech
+            | Source::MchoseAudio
+    )
+}
 impl Slot {
     fn new(d: Descriptor, t: u64) -> Self {
         Self {
@@ -127,8 +150,16 @@ impl Slot {
             self.due = now;
         }
     }
+    fn clear_sample(&mut self) {
+        self.row.battery = None;
+        self.row.error = None;
+        self.row.sampled = 0;
+        self.row.held = false;
+        self.rebaseline = true;
+    }
     fn apply(&mut self, r: Result<Reading, String>, t: u64, manual: bool) {
         if let Ok(r) = r
+            && !retains_last_peripheral_sample(r.source)
             && !manual
             && !self.rebaseline
             && self.row.device.kind == Kind::Mouse
@@ -164,14 +195,19 @@ impl Slot {
             }
             Err(e) => {
                 self.rebaseline = true;
+                self.row.held = e != KYSONA_SLOT_UNPAIRED && self.has_peripheral_sample();
                 self.row.error = Some(e);
-                self.row.held = false;
-                // No fresh device response means offline/unknown, never a
-                // current percentage (or a cached zero) for any transport.
-                self.row.battery = None;
+                if !self.row.held {
+                    self.row.battery = None;
+                }
                 self.retry(t);
             }
         }
+    }
+    fn has_peripheral_sample(&self) -> bool {
+        self.row
+            .battery
+            .is_some_and(|reading| retains_last_peripheral_sample(reading.source))
     }
     fn retry(&mut self, t: u64) {
         self.fail = self.fail.saturating_add(1);
@@ -180,14 +216,34 @@ impl Slot {
     }
 }
 enum Target {
-    H(hid::Target, Option<hid::Session>),
+    H(hid::Target, Option<Box<hid::Session>>),
     B(bluetooth::BtTarget),
+}
+struct TargetSample {
+    reading: Result<Reading, String>,
+    association_changed: bool,
 }
 fn transport_bound(prefs: &Prefs, d: &Descriptor) -> bool {
     if d.kind == Kind::Keyboard {
         prefs.keyboard_endpoint() == Some(d.id.as_str())
     } else {
         prefs.bound(d)
+    }
+}
+
+fn merge_bluetooth_discovery<T>(
+    standard: Result<Vec<T>, String>,
+    private: Result<Vec<T>, String>,
+) -> (Result<Vec<T>, String>, Option<String>) {
+    match (standard, private) {
+        (Ok(mut standard), Ok(private)) => {
+            standard.extend(private);
+            (Ok(standard), None)
+        }
+        (Ok(standard), Err(error)) => (Ok(standard), Some(error)),
+        (Err(error), Ok(private)) if private.is_empty() => (Err(error), None),
+        (Err(error), Ok(private)) => (Ok(private), Some(error)),
+        (Err(standard), Err(private)) => (Err(format!("{standard}; {private}")), None),
     }
 }
 fn schedule_device_scan(pending: &mut Option<Instant>, now: Instant) {
@@ -267,42 +323,72 @@ impl Target {
             Self::B(t) => &t.info,
         }
     }
-    fn read(&mut self, ms: u64, reset: bool) -> Result<Reading, String> {
-        match self {
-            Self::H(t, s) => {
-                if s.is_none() {
-                    *s = Some(t.open()?)
-                }
-                let h = s.as_mut().unwrap();
-                if reset {
-                    h.reset_filter()
-                }
-                let r = h.read(ms)?;
-                if let Some(name) = h.name_once() {
-                    t.info.name = name;
-                }
-                Ok(r)
-            }
-            Self::B(t) => t.read(),
+    fn same_endpoint(&self, prior: &Self) -> bool {
+        match (self, prior) {
+            (Self::H(t, _), Self::H(old, _)) => t.same_endpoint(old),
+            (Self::B(t), Self::B(old)) => t.same_endpoint(old),
+            _ => false,
         }
     }
-    fn reopen_one(&mut self) -> bool {
+    fn retain_identity(&mut self, prior: &Self) {
+        match (self, prior) {
+            (Self::H(t, _), Self::H(old, _)) => t.retain_identity(old),
+            (Self::B(t), Self::B(old)) if t.same_endpoint(old) => {
+                t.info.identity.clone_from(&old.info.identity);
+            }
+            _ => (),
+        }
+    }
+    fn read(&mut self, ms: u64, reset: bool) -> TargetSample {
+        let mut association_changed = false;
+        let reading = match self {
+            Self::H(t, session) => (|| {
+                if session.is_none() {
+                    *session = Some(Box::new(t.open()?));
+                }
+                let h = session.as_mut().unwrap();
+                if reset {
+                    h.reset_filter();
+                    h.reset_identity_query();
+                }
+                let reading = h.read(ms);
+                if let Some(update) = h.take_identity_update() {
+                    association_changed = t.apply_identity_update(update);
+                }
+                if reading.is_ok()
+                    && let Some(name) = h.name_once()
+                {
+                    association_changed = t.apply_legacy_name(name);
+                }
+                reading
+            })(),
+            Self::B(t) => t.read(),
+        };
+        TargetSample {
+            reading,
+            association_changed,
+        }
+    }
+    /// The result marks whether reopening found a physically different endpoint.
+    fn reopen_one(&mut self) -> Option<bool> {
         let Self::H(t, session) = self else {
-            return false;
+            return None;
         };
         *session = None;
         if let Ok(s) = t.open() {
-            *session = Some(s);
-            return true;
+            *session = Some(Box::new(s));
+            return Some(false);
         }
-        if let Ok(Some(fresh)) = t.rediscover()
+        if let Ok(Some(mut fresh)) = t.rediscover()
             && let Ok(s) = fresh.open()
         {
+            let replaced = !fresh.same_endpoint(t);
+            fresh.retain_identity(t);
             *t = fresh;
-            *session = Some(s);
-            return true;
+            *session = Some(Box::new(s));
+            return Some(replaced);
         }
-        false
+        None
     }
     fn close(&mut self) {
         if let Self::H(_, s) = self {
@@ -311,37 +397,13 @@ impl Target {
     }
 }
 fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn() + Send + Sync>) {
-    let _apartment = if bt {
+    let (_apartment, bluetooth_initialization_error) = if bt {
         match bluetooth::Apartment::enter() {
-            Ok(a) => Some(a),
-            Err(e) => {
-                // Preserve the request/reply contract even on systems without a usable WinRT apartment.
-                eprintln!("Bluetooth initialization failed: {e}");
-                state.lock().unwrap().note = Some(Notice::BluetoothScanFailed);
-                wake();
-                loop {
-                    let f = sig.bt.take(Duration::from_secs(3600));
-                    if f & STOP != 0 {
-                        return;
-                    }
-                    let j = std::mem::take(&mut *sig.bt.jobs.lock().unwrap());
-                    let sync = sig.bt.manual.lock().unwrap().take();
-                    let mut st = state.lock().unwrap();
-                    if let Some((id, _)) = sync {
-                        st.manual
-                            .finish(id, true, Some(Notice::BluetoothScanFailed));
-                    }
-                    for j in j {
-                        st.finish(&j, Err(e.clone()));
-                    }
-                    st.note = Some(Notice::BluetoothScanFailed);
-                    drop(st);
-                    wake();
-                }
-            }
+            Ok(a) => (Some(a), None),
+            Err(e) => (None, Some(e)),
         }
     } else {
-        None
+        (None, None)
     };
     let signal = if bt { &sig.bt } else { &sig.hid };
     let start = Instant::now();
@@ -357,6 +419,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
     let mut first = true;
     let mut interval_ms = state.lock().unwrap().prefs.poll_ms();
     let mut discovery_at = interval_ms;
+    let mut unpaired = Vec::<Descriptor>::new();
     loop {
         let mut flags = signal.take(delay);
         {
@@ -386,7 +449,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 slot.rebaseline = true;
                 slot.fail = 0;
                 slot.due = t + 1000;
-                slot.row.held = false;
+                slot.row.held = slot.has_peripheral_sample();
                 slot.row.error = Some("Resuming".into());
             }
             if devices.is_empty() && !bt {
@@ -484,11 +547,24 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
         if flags & SCAN != 0 {
             let mut warnings = Vec::new();
             let list: Result<Vec<Target>, String> = if bt {
-                bluetooth::discover().map(|ds| ds.into_iter().map(Target::B).collect())
+                let standard = match bluetooth_initialization_error.as_ref() {
+                    Some(error) => Err(error.clone()),
+                    None => bluetooth::discover().map(|ds| ds.into_iter().map(Target::B).collect()),
+                };
+                let private = hid::discover_private_bluetooth()
+                    .map(|ds| ds.into_iter().map(|t| Target::H(t, None)).collect());
+                let (targets, partial_error) = merge_bluetooth_discovery(standard, private);
+                if let Some(error) = partial_error {
+                    recover_only = true;
+                    eprintln!("Bluetooth discovery incomplete: {error}");
+                    manual_err.get_or_insert(Notice::BluetoothScanFailed);
+                }
+                targets
             } else {
                 hid::discover_inventory_with_diagnostics().map(|found| {
                     warnings = found.warnings;
                     keyboard_inventory = Some(Ok(found.keyboards));
+                    unpaired = found.unpaired;
                     found
                         .targets
                         .into_iter()
@@ -499,32 +575,44 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             let scan_result = list.as_ref().map(|_| ()).map_err(Clone::clone);
             match list {
                 Ok(v) => {
-                    if recover_only {
-                        let mut old = std::mem::take(&mut devices);
-                        devices = v
-                            .into_iter()
-                            .map(|new| {
-                                if let Some(i) =
-                                    old.iter().position(|t| t.data().id == new.data().id)
+                    let mut old = std::mem::take(&mut devices);
+                    devices = v
+                        .into_iter()
+                        .map(|mut new| {
+                            if let Some(i) = old.iter().position(|prior| new.same_endpoint(prior)) {
+                                let prior = old.swap_remove(i);
+                                if recover_only
                                     && slots.get(&new.data().id).is_some_and(|s| s.fail < 3)
                                 {
-                                    old.swap_remove(i)
-                                } else {
-                                    new
+                                    return prior;
                                 }
-                            })
-                            .collect();
+                                new.retain_identity(&prior);
+                            } else {
+                                slots.remove(&new.data().id);
+                            }
+                            new
+                        })
+                        .collect();
+                    if recover_only {
                         // Recovery enumeration can be incomplete during login. Keep
                         // existing paths, including healthy devices omitted by this scan.
                         for old_device in old {
-                            if !devices.iter().any(|d| d.data().id == old_device.data().id) {
+                            if !devices.iter().any(|d| d.data().id == old_device.data().id)
+                                && !unpaired.iter().any(|d| d.id == old_device.data().id)
+                            {
                                 devices.push(old_device);
                             }
                         }
                         slots.retain(|id, _| devices.iter().any(|t| t.data().id == *id));
                     } else {
-                        devices = v;
-                        slots.clear();
+                        slots.retain(|id, slot| {
+                            slot.has_peripheral_sample()
+                                && devices.iter().any(|t| t.data().id == *id)
+                        });
+                        for slot in slots.values_mut() {
+                            slot.due = clock();
+                            slot.fail = 0;
+                        }
                         failed_reopens.clear();
                         recovered.clear();
                         last_fallback = None;
@@ -541,11 +629,14 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                                 || present.iter().any(|p| p.id == *id)
                         });
                     }
-                    let kinds = |d: &Descriptor| (d.kind == Kind::Bluetooth) == bt;
                     let mut st = state.lock().unwrap();
-                    st.candidates.retain(|d| !kinds(d));
-                    st.candidates
-                        .extend(devices.iter().map(|t| t.data().clone()));
+                    update_candidates(&mut st, &devices, bt);
+                    for target in &devices {
+                        let d = target.data();
+                        if let Some(slot) = slots.get_mut(&d.id) {
+                            slot.row.device = d.clone();
+                        }
+                    }
                     let candidates = st.candidates.clone();
                     let mut pref = st.prefs.clone();
                     if pref.resolve(&candidates) {
@@ -573,6 +664,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                         manual_err = Some(m.clone());
                         m
                     });
+                    publish_device_rows(&mut st, &slots, &unpaired, bt);
                 }
                 Err(e) => {
                     keyboard_inventory = Some(Err(e.clone()));
@@ -597,24 +689,38 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             && let Some(id) = j.bind.as_ref()
         {
             let out = (|| -> Result<(), String> {
+                let before = state.lock().unwrap().prefs.clone();
                 let t = devices
                     .iter_mut()
                     .find(|t| t.data().id == *id && t.data().kind == j.kind)
                     .ok_or("Device is no longer available")?;
-                let sample = t.read(clock(), true)?;
+                let sample = t.read(clock(), true);
                 let mut st = state.lock().unwrap();
-                let mut p = st.prefs.clone();
-                if !p.change(&Command::Bind(id.clone()), &st.candidates) {
-                    return Err("Device identity changed".into());
-                }
-                p.save(&Prefs::path()?)?;
-                st.prefs = p;
                 let slot = slots
                     .entry(id.clone())
                     .or_insert_with(|| Slot::new(t.data().clone(), clock()));
                 slot.set_interval(interval_ms, clock());
-                slot.apply(Ok(sample), clock(), true);
-                Ok(())
+                let error = sample.reading.as_ref().err().cloned();
+                apply_target_sample(slot, t.data(), sample, clock(), true);
+                update_candidates(&mut st, &devices, bt);
+                let outcome = (|| {
+                    if let Some(error) = error {
+                        return Err(error);
+                    }
+                    if !same_binding(&before, &st.prefs, j.kind, id) {
+                        return Err("Device binding changed while reading".into());
+                    }
+                    let mut p = st.prefs.clone();
+                    if !p.change(&Command::Bind(id.clone()), &st.candidates) {
+                        return Err("Device identity changed".into());
+                    }
+                    p.remember_identity(&slot.row.device);
+                    p.save(&Prefs::path()?)?;
+                    st.prefs = p;
+                    Ok(())
+                })();
+                publish_device_rows(&mut st, &slots, &unpaired, bt);
+                outcome
             })();
             state.lock().unwrap().finish(j, out);
             wake();
@@ -627,6 +733,9 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
         let mut recovered_sample = None;
         if !bt
             && prefs.keyboard.is_some()
+            && !unpaired
+                .iter()
+                .any(|d| prefs.keyboard_endpoint() == Some(d.id.as_str()))
             && let Some(inventory) = keyboard_inventory.as_ref()
         {
             // The complete fresh inventory, never retained sessions or handshake successes,
@@ -639,7 +748,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                         .iter_mut()
                         .find(|t| t.data().id == connection.endpoint_id)
                         .ok_or("no responsive keyboard control endpoint")?;
-                    target.read(clock(), true)
+                    target.read(clock(), true).reading
                 },
             );
             let outcome = match recovery {
@@ -689,7 +798,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             }
         }
         let due_at = clock();
-        let batch = bt.then(|| {
+        let batch = (bt && _apartment.is_some()).then(|| {
             bluetooth::ReadBatch::prepare(devices.iter().filter_map(|d| match d {
                 Target::B(t)
                     if prefs.bound(&t.info)
@@ -720,11 +829,14 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             if *signal.bits.lock().unwrap() & (STOP | SUSPEND) != 0 {
                 break;
             }
-            let r = match (&*t, batch.as_ref()) {
-                (Target::B(dev), Some(batch)) => dev.read_in(batch),
+            let sample = match (&mut *t, batch.as_ref()) {
+                (Target::B(dev), Some(batch)) => TargetSample {
+                    reading: dev.read_in(batch),
+                    association_changed: false,
+                },
                 _ => t.read(clock(), force),
             };
-            if r.is_ok()
+            if sample.reading.is_ok()
                 && d.kind == Kind::Keyboard
                 && let Some(Ok(inventory)) = keyboard_inventory.as_ref()
                 && let Some(presence) = inventory.iter().find(|p| p.id == d.id)
@@ -752,13 +864,12 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 }
             }
             if sync.is_some()
-                && let Err(e) = &r
+                && let Err(e) = &sample.reading
             {
                 eprintln!("Battery refresh failed: {e}");
                 manual_err = Some(Notice::RefreshFailed);
             }
-            slot.row.device = t.data().clone();
-            slot.apply(r, clock(), force);
+            apply_target_sample(slot, t.data(), sample, clock(), force);
             let key = t.data().id.clone();
             if slot.fail == 0 {
                 failed_reopens.remove(&key);
@@ -771,14 +882,30 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                     .is_none_or(|prior| now.saturating_sub(*prior) >= 60_000)
             {
                 recovered.insert(key.clone(), now);
-                if t.reopen_one() {
+                if let Some(replaced) = t.reopen_one() {
                     slot.rebaseline = true;
+                    if replaced {
+                        slot.clear_sample();
+                        slot.row.device = t.data().clone();
+                    }
                     failed_reopens.remove(&key);
                 } else {
                     failed_reopens.insert(key);
                 }
             }
             changed = true;
+        }
+        let mut category_pending = false;
+        for target in &mut devices {
+            if let Target::B(t) = target {
+                if t.poll_category() {
+                    if let Some(slot) = slots.get_mut(&t.info.id) {
+                        slot.row.device = t.info.clone();
+                    }
+                    changed = true;
+                }
+                category_pending |= t.category_pending();
+            }
         }
         let mut known = devices.iter().filter(|d| transport_bound(&prefs, d.data()));
         if !bt
@@ -793,11 +920,11 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
         }
         if changed {
             let mut st = state.lock().unwrap();
-            publish_rows(&mut st, &slots, bt);
+            update_candidates(&mut st, &devices, bt);
+            publish_device_rows(&mut st, &slots, &unpaired, bt);
             if let Some((id, _)) = sync {
                 st.manual.finish(id, bt, manual_err);
             }
-            st.rows.sort_by(|a, b| a.device.id.cmp(&b.device.id));
             drop(st);
             wake();
         }
@@ -809,8 +936,84 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
         .then_some(discovery_at);
         let next = next_poll(&slots, discovery, clock());
         delay = Duration::from_millis(next.saturating_sub(clock()).max(25));
+        if category_pending {
+            delay = delay.min(Duration::from_millis(100));
+        }
         if let Some(due) = *signal.device_scan.lock().unwrap() {
             delay = delay.min(due.saturating_duration_since(Instant::now()));
+        }
+    }
+}
+fn apply_target_sample(
+    slot: &mut Slot,
+    device: &Descriptor,
+    sample: TargetSample,
+    now: u64,
+    manual: bool,
+) {
+    if sample.association_changed {
+        slot.clear_sample();
+    }
+    slot.row.device = device.clone();
+    slot.apply(sample.reading, now, manual);
+}
+fn same_binding(before: &Prefs, current: &Prefs, kind: Kind, id: &str) -> bool {
+    match kind {
+        Kind::Keyboard => {
+            before.keyboard == current.keyboard
+                && before.keyboard_connection == current.keyboard_connection
+        }
+        Kind::Bluetooth => before.bluetooth.contains(id) == current.bluetooth.contains(id),
+        _ => false,
+    }
+}
+fn update_candidates(st: &mut State, devices: &[Target], bt: bool) {
+    st.candidates.retain(|d| (d.kind == Kind::Bluetooth) != bt);
+    st.candidates
+        .extend(devices.iter().map(|t| t.data().clone()));
+    st.candidates.sort_by(|a, b| a.id.cmp(&b.id));
+}
+fn publish_device_rows(
+    st: &mut State,
+    slots: &HashMap<String, Slot>,
+    unpaired: &[Descriptor],
+    bt: bool,
+) {
+    let mut prefs = st.prefs.clone();
+    let mut changed = false;
+    for device in unpaired {
+        changed |= prefs.clear_identity(device);
+    }
+    for slot in slots.values() {
+        let row = &slot.row;
+        if row.error.as_deref() == Some(KYSONA_SLOT_UNPAIRED) {
+            changed |= prefs.clear_identity(&row.device);
+        } else if row.battery.is_some()
+            || (row.device.kind == Kind::Bluetooth
+                && row
+                    .device
+                    .identity
+                    .as_ref()
+                    .is_some_and(|i| i.category != battery_protocol::DeviceCategory::Unknown))
+        {
+            changed |= prefs.remember_identity(&row.device);
+        }
+    }
+    if changed {
+        match Prefs::path().and_then(|path| prefs.save(&path)) {
+            Ok(()) => st.prefs = prefs,
+            Err(error) => {
+                eprintln!("Failed to save device identity: {error}");
+                st.note = Some(Notice::SettingsSaveFailed);
+            }
+        }
+    }
+    publish_rows(st, slots, bt);
+    for device in unpaired.iter().filter(|d| transport_bound(&st.prefs, d)) {
+        let device = st.prefs.keyboard_row(device.clone());
+        if let Some(row) = st.rows.iter_mut().find(|r| r.device.id == device.id) {
+            row.device = device;
+            row.error = Some(KYSONA_SLOT_UNPAIRED.into());
         }
     }
 }
@@ -829,6 +1032,7 @@ fn publish_rows(st: &mut State, slots: &HashMap<String, Slot>, bt: bool) {
     let current = st.prefs.clone();
     current.preserve_missing(&mut st.rows, bt);
     st.prune_unbound();
+    st.rows.sort_by(|a, b| a.device.id.cmp(&b.device.id));
 }
 impl Service {
     pub fn start(p: Prefs, demo: bool, wake: impl Fn() + Send + Sync + 'static) -> Self {
@@ -972,7 +1176,9 @@ impl Service {
                 s.prune_unbound();
                 s.demo_reconcile();
                 drop(s);
-                self.signals.both(PREFS)
+                if !matches!(c, Command::SetLanguage(_) | Command::Language) {
+                    self.signals.both(PREFS)
+                }
             }
         }
         Ok(())
@@ -1036,7 +1242,7 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "live recovery timed out: {}",
+                "live recovery timed out: {:?}",
                 state.note
             );
             thread::sleep(Duration::from_millis(100));
@@ -1073,9 +1279,44 @@ mod tests {
                 name: "a".into(),
                 kind: Kind::Mouse,
                 legacy_ids: Vec::new(),
+                identity: None,
+                generic_name: None,
             },
             0,
         )
+    }
+    #[test]
+    fn changed_association_never_holds_the_previous_peripheral_battery() {
+        let mut slot = slot();
+        let reading = Reading::new(74, Charge::Unknown, Source::Kysona24g).unwrap();
+        slot.apply(Ok(reading), 0, false);
+        let mut device = slot.row.device.clone();
+        device.name = "2.4G Receiver".into();
+        apply_target_sample(
+            &mut slot,
+            &device,
+            TargetSample {
+                reading: Err("new association has no reading".into()),
+                association_changed: true,
+            },
+            1000,
+            false,
+        );
+        assert_eq!(slot.row.device, device);
+        assert!(!slot.row.held);
+        assert_eq!(slot.row.battery, None);
+        assert_eq!(slot.row.sampled, 0);
+    }
+
+    #[test]
+    fn an_unbind_during_a_probe_does_not_pass_the_binding_check() {
+        let mut before = Prefs::default();
+        before.bluetooth.extend(["target".into(), "other".into()]);
+        let mut after = before.clone();
+        after.bluetooth.remove("other");
+        assert!(same_binding(&before, &after, Kind::Bluetooth, "target"));
+        after.bluetooth.remove("target");
+        assert!(!same_binding(&before, &after, Kind::Bluetooth, "target"));
     }
     #[test]
     fn offline_retries_keep_the_configured_interval() {
@@ -1278,6 +1519,137 @@ mod tests {
             );
             assert_eq!(devices, original);
         }
+    }
+    #[test]
+    fn peripheral_disconnect_preserves_the_last_reading_until_a_fresh_zero() {
+        let mut state = State::demo();
+        let mut mouse = Slot::new(state.rows[0].device.clone(), 0);
+        let read = |v| Reading::new(v, Charge::Unknown, Source::Kysona24g).unwrap();
+        mouse.apply(Ok(read(85)), 0, false);
+        let sample_time = mouse.row.sampled;
+        mouse.apply(Err("device asleep".into()), 1000, false);
+        assert_eq!(mouse.row.battery, Some(read(85)));
+        assert_eq!(mouse.row.sampled, sample_time);
+        assert!(mouse.row.held && mouse.row.error.is_some());
+        state.rows[0] = mouse.row.clone();
+        assert_ne!(state.selected().unwrap().device.kind, Kind::Mouse);
+        mouse.apply(Ok(read(0)), 2000, false);
+        assert_eq!(mouse.row.battery, Some(read(0)));
+        assert!(!mouse.row.held && mouse.row.error.is_none());
+        mouse.apply(Ok(read(85)), 3000, false);
+        mouse.apply(Ok(read(0)), 4000, false);
+        assert_eq!(mouse.row.battery, Some(read(0)));
+        mouse.apply(Err(KYSONA_SLOT_UNPAIRED.into()), 5000, false);
+        assert!(mouse.row.battery.is_none() && !mouse.row.held);
+    }
+
+    #[test]
+    fn ardor_fury_keeps_sleeping_samples_and_accepts_fresh_battery_tiers() {
+        let device = Descriptor {
+            id: "hid:1d57:fa60:Mouse:test".into(),
+            name: "ARDOR GAMING Fury Wireless".into(),
+            kind: Kind::Mouse,
+            legacy_ids: vec![],
+            identity: None,
+            generic_name: None,
+        };
+        let mut slot = Slot::new(device, 0);
+        let read = |v| Reading::new(v, Charge::Unknown, Source::ArdorFury).unwrap();
+        slot.apply(Ok(read(100)), 0, false);
+        slot.apply(Ok(read(25)), 1000, false);
+        assert_eq!(slot.row.battery, Some(read(25)));
+        let sampled = slot.row.sampled;
+        slot.apply(
+            Err("Peripheral status notification timed out".into()),
+            2000,
+            false,
+        );
+        assert_eq!(slot.row.battery, Some(read(25)));
+        assert_eq!(slot.row.sampled, sampled);
+        assert!(slot.row.held && slot.row.error.is_some());
+        slot.apply(Ok(read(75)), 3000, false);
+        assert_eq!(slot.row.battery, Some(read(75)));
+        assert!(!slot.row.held && slot.row.error.is_none());
+    }
+    #[test]
+    fn private_bluetooth_survives_standard_initialization_and_scan_failures() {
+        for error in [
+            "WinRT apartment initialization failed",
+            "Classic and LE enumeration failed",
+        ] {
+            let (result, warning) =
+                merge_bluetooth_discovery(Err(error.into()), Ok(vec!["private HID"]));
+            assert_eq!(result.unwrap(), ["private HID"]);
+            assert_eq!(warning.as_deref(), Some(error));
+            let (result, _) = merge_bluetooth_discovery::<&str>(Err(error.into()), Ok(vec![]));
+            assert_eq!(result.unwrap_err(), error);
+        }
+        let (result, warning) =
+            merge_bluetooth_discovery(Ok(vec!["standard"]), Err("HID enumeration failed".into()));
+        assert_eq!(result.unwrap(), ["standard"]);
+        assert_eq!(warning.as_deref(), Some("HID enumeration failed"));
+        let (result, warning) =
+            merge_bluetooth_discovery(Ok(vec!["standard"]), Ok(vec!["private HID"]));
+        assert_eq!(result.unwrap(), ["standard", "private HID"]);
+        assert!(warning.is_none());
+        let (result, _) =
+            merge_bluetooth_discovery::<&str>(Err("standard".into()), Err("private".into()));
+        let error = result.unwrap_err();
+        assert!(error.contains("standard") && error.contains("private"));
+    }
+
+    #[test]
+    fn private_bluetooth_uses_the_bluetooth_binding_and_retains_sleeping_samples() {
+        let mut state = State::demo();
+        let device = Descriptor {
+            id: "hid:3151:5027:Bluetooth:path:private".into(),
+            name: "RY Bluetooth Device".into(),
+            kind: Kind::Bluetooth,
+            legacy_ids: vec![],
+            identity: None,
+            generic_name: None,
+        };
+        assert!(!transport_bound(&state.prefs, &device));
+        state.prefs.bluetooth.insert(device.id.clone());
+        assert!(transport_bound(&state.prefs, &device));
+        let mut slot = Slot::new(device, 0);
+        let reading = |pct| Reading::new(pct, Charge::Unknown, Source::KysonaBluetooth).unwrap();
+        slot.apply(Ok(reading(85)), 0, false);
+        slot.apply(Err("KYSONA Bluetooth device is asleep".into()), 1000, false);
+        assert_eq!(slot.row.battery, Some(reading(85)));
+        assert!(slot.row.held && slot.row.error.is_some());
+        slot.apply(Ok(reading(0)), 2000, false);
+        assert_eq!(slot.row.battery, Some(reading(0)));
+        assert!(!slot.row.held && slot.row.error.is_none());
+    }
+
+    #[test]
+    fn audio_is_monitored_and_retains_its_sample_while_asleep() {
+        let mut state = State::demo();
+        let device = Descriptor {
+            id: "hid:3837:6011:Audio:test".into(),
+            name: "MCHOSE V9 PRO 2".into(),
+            kind: Kind::Audio,
+            legacy_ids: vec![],
+            identity: None,
+            generic_name: None,
+        };
+        assert!(state.prefs.bound(&device));
+        let encoded = serde_json::to_vec(&device).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Descriptor>(&encoded).unwrap(),
+            device
+        );
+        let mut slot = Slot::new(device, 0);
+        let reading = Reading::new(73, Charge::Charging, Source::MchoseAudio).unwrap();
+        slot.apply(Ok(reading), 0, false);
+        state.rows = vec![slot.row.clone()];
+        assert_eq!(state.selected().unwrap().battery, Some(reading));
+        slot.apply(Err("MCHOSE audio device is asleep".into()), 1000, false);
+        assert_eq!(slot.row.battery, Some(reading));
+        assert!(slot.row.held);
+        state.rows = vec![slot.row];
+        assert!(state.selected().is_none());
     }
     #[test]
     fn sleeping_keyboard_switches_tray_to_remaining_mouse() {

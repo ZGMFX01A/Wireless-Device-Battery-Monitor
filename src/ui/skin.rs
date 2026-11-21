@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 ZGMFX01A
+// SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+// See LICENSE in the repository root for the full terms.
+
 use gpui::{prelude::*, *};
 pub const GREEN: u32 = 0x10b981;
 pub const CYAN: u32 = 0x06b6d4;
@@ -233,8 +237,9 @@ mod material_tests {
                 let (ink, _, _) = tone.palette(dark);
                 let a = luminance(ink);
                 let b = luminance(bg);
+                let minimum = if !dark && tone == Normal { 7.0 } else { 4.5 };
                 assert!(
-                    (a.max(b) + 0.05) / (a.min(b) + 0.05) >= 4.5,
+                    (a.max(b) + 0.05) / (a.min(b) + 0.05) >= minimum,
                     "{dark}: {tone:?}"
                 );
             }

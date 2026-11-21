@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 ZGMFX01A
+// SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+// See LICENSE in the repository root for the full terms.
+
 //! Offline native UI regression; launches only --gui-child / --exercise-tray.
 //! Run manually on an interactive Windows desktop, never as a hardware test.
 #[path = "probe/controls.rs"]
@@ -143,7 +147,7 @@ fn fixture() -> Value {
     let rows:Vec<Value>=values.into_iter().map(|(id,name,kind,pct,charge,source)|json!({"device":{"id":id,"name":name,"kind":kind},"battery":{"raw":pct,"display":pct,"charge":charge,"source":source,"mv":null},"sampled":0,"error":null})).collect();
     let mut candidates: Vec<Value> = rows.iter().map(|r| r["device"].clone()).collect();
     candidates.push(json!({"id":"spare","name":"NUT75","kind":"Keyboard"}));
-    json!({"prefs":{"theme":"Dark","lang":"Zh","keyboard":rows[1]["device"]["id"],"bluetooth":[rows[2]["device"]["id"]]},"rows":rows,"candidates":candidates,"note":"","demo":true,"autostart":false,"update":"Idle"})
+    json!({"prefs":{"theme":"Dark","lang":"Zh","keyboard":rows[1]["device"]["id"],"bluetooth":[rows[2]["device"]["id"]]},"rows":rows,"candidates":candidates,"demo":true,"autostart":false,"update":"Idle"})
 }
 struct Ui {
     p: Process,
@@ -291,7 +295,13 @@ fn hung(exe: &Path) -> Result<Value> {
 fn visual(exe: &Path, out: &Path) -> Result<Value> {
     let mut ui = Ui::new(exe, out)?;
     let mut results = serde_json::Map::new();
-    for (theme, lang) in [("Dark", "Zh"), ("Light", "Zh"), ("Dark", "En")] {
+    for (theme, lang) in [
+        ("Dark", "Zh"),
+        ("Light", "Zh"),
+        ("Dark", "En"),
+        ("Dark", "Ru"),
+        ("Light", "Ru"),
+    ] {
         for mode in ["Flyout", "Settings"] {
             ui.state = fixture();
             ui.state["prefs"]["theme"] = json!(theme);
@@ -309,6 +319,10 @@ fn visual(exe: &Path, out: &Path) -> Result<Value> {
                 img.dimensions() == expected,
                 "incorrect screenshot dimensions",
             )?;
+            if lang == "Ru" && mode == "Settings" {
+                native::wheel(ui.hwnd, -360, 9)?;
+                ui.photo(&format!("{theme}-Ru-Settings-bottom"))?;
+            }
             results.insert(
                 name,
                 json!({"logical":[img.width(),img.height()],"dpi":scale(ui.hwnd)*96.}),
@@ -326,8 +340,63 @@ fn visual(exe: &Path, out: &Path) -> Result<Value> {
         ui.open("Flyout")?;
         ui.photo(&format!("{theme}-states"))?;
     }
+    ui.state = fixture();
+    ui.state["prefs"]["lang"] = json!("En");
+    ui.update()?;
+    ui.open("Flyout")?;
+    ui.state["note"] = json!({"DiscoveryWarnings":["OmniPairingList","OmniDeviceEndpoint"]});
+    ui.update()?;
+    ui.photo("Omni-warning-En")?;
+    ui.state["prefs"]["lang"] = json!("Zh");
+    ui.update()?;
+    ui.photo("Omni-warning-Zh")?;
+    ui.state["prefs"]["lang"] = json!("Ru");
+    ui.update()?;
+    ui.photo("Omni-warning-Ru")?;
+    ui.state = fixture();
+    ui.state["prefs"]["lang"] = json!("Ru");
+    ui.state["rows"][0]["error"] = json!("offline");
+    ui.state["rows"][1]["held"] = json!(true);
+    ui.state["rows"][2]["device"]["kind"] = json!("Audio");
+    for row in ui.state["rows"].as_array_mut().unwrap() {
+        row["sampled"] = json!(1700000000);
+    }
+    ui.update()?;
+    ui.open("Flyout")?;
+    ui.photo("Ru-offline-held-audio")?;
+    ui.state["rows"] = json!([]);
+    ui.update()?;
+    ui.photo("Ru-empty")?;
+    ui.state = fixture();
+    ui.state["prefs"]["lang"] = json!("Ru");
+    ui.update()?;
+    ui.open("Flyout")?;
+    ui.click(316., 24.)?;
+    ui.photo("Ru-narrow-settings")?;
+    native::wheel(ui.hwnd, -360, 9)?;
+    ui.photo("Ru-narrow-settings-bottom")?;
+    ui.exact(110., 470., json!("CheckUpdate"))?;
+    ui.state["update"] = json!({"Error":"AutomaticInstallPaused"});
+    ui.update()?;
+    ui.photo("Ru-long-update-error")?;
+    ui.state["update"] = json!({"Ready":"9.9.9"});
+    ui.update()?;
+    ui.photo("Ru-install-confirmation")?;
+    ui.key(27)?;
+    ui.click(316., 24.)?;
+    ui.click(332., 277.)?;
+    ui.photo("Ru-remove-confirmation")?;
+    ui.key(27)?;
+    ui.click(140., 76.)?;
+    let job = ui.p.json(|v| v.get("DeviceRequest").is_some())?["DeviceRequest"].clone();
+    ui.photo("Ru-keyboard-loading")?;
+    ui.state["keyboard_reply"] = json!({"id":job["id"],"result":{"Err":"receiver unavailable"}});
+    ui.update()?;
+    ui.photo("Ru-keyboard-error")?;
     ui.p.close()?;
-    Ok(json!({"ok":true,"cases":results,"state_screenshots":2}))
+    Ok(
+        json!({"ok":true,"cases":results,"state_screenshots":4,"warning_screenshots":3,"russian_dialog_and_narrow_cases":7}),
+    )
 }
 fn glass(exe: &Path, out: &Path) -> Result<Value> {
     let mut ui = Ui::new(exe, out)?;
@@ -366,9 +435,10 @@ fn glass(exe: &Path, out: &Path) -> Result<Value> {
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let controls_only = args.get(2).is_some_and(|v| v == "--controls");
+    let visual_only = args.get(2).is_some_and(|v| v == "--visual");
     require(
-        args.len() == 2 || (args.len() == 3 && controls_only),
-        "usage: ui_probe EXE EVIDENCE_DIR [--controls]",
+        args.len() == 2 || (args.len() == 3 && (controls_only || visual_only)),
+        "usage: ui_probe EXE EVIDENCE_DIR [--controls|--visual]",
     )?;
     let exe = Path::new(&args[0]).canonicalize()?;
     let out = PathBuf::from(&args[1]);
@@ -376,6 +446,10 @@ fn run() -> Result<()> {
     dpi_aware();
     if controls_only {
         println!("{}", controls::run(&exe, &out)?);
+        return Ok(());
+    }
+    if visual_only {
+        println!("{}", visual(&exe, &out)?);
         return Ok(());
     }
     let mut result = json!({"ok":false,"hardware":false});

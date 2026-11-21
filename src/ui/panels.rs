@@ -1,6 +1,10 @@
+// SPDX-FileCopyrightText: 2026 ZGMFX01A
+// SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+// See LICENSE in the repository root for the full terms.
+
 //! Native layout mirrors web_ui/{theme-layout,devices,settings}.css in logical pixels.
 use super::{skin::*, *};
-use battery_protocol::Source;
+use battery_protocol::{Source, codec::KYSONA_SLOT_UNPAIRED};
 const PROJECT_HOME_URL: &str = "https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor";
 fn time_text(sec: u64) -> Option<String> {
     if sec == 0 {
@@ -162,7 +166,7 @@ impl Panel {
         let mut list = col().w_full().gap(px(12.)).child(
             row()
                 .id("device-actions")
-                .overflow_x_scroll()
+                .flex_wrap()
                 .gap(px(6.))
                 .child(self.device_button("scan", "action.scan", "scan", k, cx))
                 .child(self.device_button("add-keyboard", "action.add_keyboard", "keyboard", k, cx))
@@ -208,7 +212,7 @@ impl Panel {
         rows.sort_by_key(|r| match r.device.kind {
             Kind::Mouse => 0,
             Kind::Keyboard => 1,
-            Kind::Bluetooth => 2,
+            Kind::Bluetooth | Kind::Audio => 2,
         });
         for r in rows {
             list = list.child(self.card(r, k, cx))
@@ -218,9 +222,10 @@ impl Panel {
     fn card(&self, r: &Row, k: Skin, cx: &mut Context<Self>) -> Stateful<Div> {
         let d = &r.device;
         let id = d.id.clone();
-        let name = self.state.prefs.name(d).to_string();
+        let name = self.state.prefs.name(d);
         let b = r.battery;
         let online = b.is_some() && r.error.is_none();
+        let show_percent = online || (r.held && b.is_some());
         let charge =
             online && b.is_some_and(|x| matches!(x.charge, Charge::Charging | Charge::Full));
         let pct = b.map_or(0, |x| x.display);
@@ -230,39 +235,51 @@ impl Panel {
         let (brand, bg, fg) =
             if matches!(src, Some(Source::Hidpp(_))) || id.starts_with("hid:046d:") {
                 (
-                    self.tr("罗技", "Logitech"),
+                    self.t("brand.logitech"),
                     0x3b82f6,
                     if k.dark { 0x9ac8ff } else { 0x285c99 },
                 )
             } else if src == Some(Source::Razer) || id.starts_with("hid:1532:") {
                 (
-                    self.tr("雷蛇", "Razer"),
+                    self.t("brand.razer"),
                     0x22c55e,
                     if k.dark { 0x85dcb4 } else { 0x266b48 },
                 )
             } else if src == Some(Source::Rog) || id.starts_with("hid:0b05:") {
                 ("ROG", 0xff4d67, if k.dark { 0xffb0b8 } else { 0x9f3c4a })
+            } else if d.kind == Kind::Mouse && id.starts_with("hid:1d57:fa60:") {
+                ("Ardor", 0xf59e0b, if k.dark { 0xfcd34d } else { 0x92600a })
             } else if d.kind == Kind::Bluetooth {
                 (
-                    self.tr("蓝牙", "Bluetooth"),
+                    self.t("device.bluetooth_short"),
                     0x94a3b8,
                     if k.dark { 0xd8e2ec } else { 0x475569 },
                 )
             } else {
                 (
-                    self.tr("键盘", "Keyboard"),
+                    if d.kind == Kind::Mouse {
+                        self.t("device.mouse_short")
+                    } else if d.kind == Kind::Audio {
+                        self.t("device.audio_short")
+                    } else {
+                        self.t("device.keyboard_short")
+                    },
                     0x94a3b8,
                     if k.dark { 0xd8e2ec } else { 0x475569 },
                 )
             };
-        let st = if !online {
+        let st = if r.error.as_deref() == Some(KYSONA_SLOT_UNPAIRED) {
+            self.t("device.unpaired")
+        } else if !online && show_percent {
+            self.t("device.offline_previous")
+        } else if !online {
             self.t("device.offline")
         } else if r.held {
-            self.tr("沿用上次读数", "Previous reading")
+            self.t("device.previous")
         } else if b.is_some_and(|b| b.charge == Charge::Full) {
-            self.tr("已充满", "Fully charged")
+            self.t("device.full")
         } else if charge {
-            self.tr("充电中", "Charging")
+            self.t("device.charging_short")
         } else {
             self.t("device.online")
         };
@@ -273,12 +290,19 @@ impl Panel {
             .bg(rgba(bg << 8 | if k.dark { 34 } else { 23 }))
             .border_1()
             .border_color(rgba(bg << 8 | if k.dark { 22 } else { 12 }));
-        let labels = row().gap(px(6.)).child(badge).child(
-            row()
-                .gap(px(5.))
-                .child(dot(5., fill_start))
-                .child(txt(st, 11., k.card_secondary())),
-        );
+        let labels = row()
+            .min_w_0()
+            .flex_1()
+            .flex_wrap()
+            .gap(px(6.))
+            .child(badge)
+            .child(
+                row()
+                    .gap(px(5.))
+                    .child(dot(5., fill_start))
+                    .min_w_0()
+                    .child(txt(st, 11., k.card_secondary()).whitespace_normal()),
+            );
         let edit_id = id.clone();
         let display = name.clone();
         let mut controls = row().gap(px(4.)).child(
@@ -291,7 +315,7 @@ impl Panel {
                     cx.listener(move |s, _, w, cx| s.edit(edit_id.clone(), display.clone(), w, cx)),
                 ),
         );
-        if d.kind != Kind::Mouse {
+        if matches!(d.kind, Kind::Keyboard | Kind::Bluetooth) {
             let remove_id = id.clone();
             let title = name.clone();
             let kind = d.kind;
@@ -325,7 +349,11 @@ impl Panel {
         };
         let mut numbers = row().items_baseline().gap(px(3.)).flex_none().child(
             txt(
-                if online { pct.to_string() } else { "--".into() },
+                if show_percent {
+                    pct.to_string()
+                } else {
+                    "--".into()
+                },
                 32.,
                 rgb(ink).into(),
             )
@@ -333,7 +361,7 @@ impl Panel {
             .font(numeric_font())
             .font_weight(FontWeight::SEMIBOLD),
         );
-        if online {
+        if show_percent {
             numbers =
                 numbers.child(txt("%", 13., k.card_secondary()).font_weight(FontWeight::SEMIBOLD))
         }
@@ -351,6 +379,7 @@ impl Panel {
             Kind::Mouse => "device.mouse",
             Kind::Keyboard => "device.keyboard",
             Kind::Bluetooth => "device.bluetooth",
+            Kind::Audio => "device.audio",
         });
         col()
             .id(SharedString::from(format!("card-{id}")))
@@ -391,7 +420,7 @@ impl Panel {
                     .child(
                         div()
                             .h_full()
-                            .w(relative(if online { pct as f32 / 100. } else { 0. }))
+                            .w(relative(if show_percent { pct as f32 / 100. } else { 0. }))
                             .rounded_full()
                             .bg(gradient(fill_start << 8 | 255, fill_end << 8 | 255)),
                     ),
@@ -399,7 +428,9 @@ impl Panel {
             .child(
                 row()
                     .justify_between()
-                    .child(txt(ty, 11., k.card_secondary()))
+                    .gap(px(8.))
+                    .flex_wrap()
+                    .child(txt(ty, 11., k.card_secondary()).whitespace_normal())
                     .child(txt(time, 11., k.card_secondary()).font(numeric_font())),
             )
     }
@@ -412,10 +443,12 @@ impl Panel {
             .flex_1()
             .child(
                 txt(self.t(&format!("settings.{key}.title")), 13., k.text())
+                    .whitespace_normal()
                     .font_weight(FontWeight::MEDIUM),
             )
             .child(
                 txt(self.t(&format!("settings.{key}.subtitle")), 12., k.sub())
+                    .whitespace_normal()
                     .line_height(px(16.2)),
             )
     }
@@ -457,12 +490,17 @@ impl Panel {
                 action(format!("{id}-{i}"))
                     .flex_1()
                     .min_w_0()
-                    .h(px(28.))
+                    .min_h(px(28.))
+                    .py(px(5.))
+                    .px(px(3.))
                     .rounded(px(6.))
                     .when(sel, |d| d.bg(k.selected()).shadow_sm())
                     .hover(move |d| d.bg(k.selected()))
                     .child(
                         txt(label.to_string(), 11., if sel { k.text() } else { k.sub() })
+                            .min_w_0()
+                            .whitespace_normal()
+                            .text_center()
                             .when(sel, |d| d.font_weight(FontWeight::SEMIBOLD)),
                     )
                     .on_click(cx.listener(move |s, _, _, cx| s.issue(c.clone(), cx))),
@@ -572,6 +610,11 @@ impl Panel {
                     "English",
                     Command::SetLanguage(Language::En),
                     p.lang == Language::En,
+                ),
+                (
+                    "Русский",
+                    Command::SetLanguage(Language::Ru),
+                    p.lang == Language::Ru,
                 ),
             ],
             k,
@@ -773,17 +816,22 @@ impl Panel {
         let import = action("import")
             .px(px(8.))
             .h(px(34.))
-            .child(txt(
-                self.tr("导入旧版设置", "Import legacy settings"),
-                11.,
-                k.dim(),
-            ))
+            .child(txt(self.t("settings.import"), 11., k.dim()))
             .on_click(cx.listener(|s, _, _, cx| s.issue(Command::ImportAppearance, cx)));
         col()
             .w_full()
             .items_center()
             .child(group)
-            .child(row().mt(px(14.)).gap(px(8.)).child(check).child(import))
+            .child(
+                row()
+                    .w_full()
+                    .flex_wrap()
+                    .justify_center()
+                    .mt(px(14.))
+                    .gap(px(8.))
+                    .child(check)
+                    .child(import),
+            )
             .child(self.author_footer(k))
     }
     fn author_footer(&self, k: Skin) -> Stateful<Div> {
@@ -794,7 +842,7 @@ impl Panel {
             .gap(px(4.))
             .rounded_full()
             .hover(move |d| d.bg(k.grad(false)))
-            .child(txt("Built by", 11., k.dim()))
+            .child(txt(self.t("about.author"), 11., k.dim()))
             .child(txt("ZGMFX01A", 11., rgb(GREEN).into()).font_weight(FontWeight::MEDIUM))
             .child(txt("·", 11., k.dim()))
             .child(txt(self.t("about.homepage"), 11., k.dim()))
@@ -804,6 +852,11 @@ impl Panel {
 impl Render for Panel {
     fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let k = self.skin();
+        let lang = locale(&self.state.prefs);
+        if self.last_locale != Some(lang) {
+            w.set_window_title(&format!("{} · GPUI", self.t("app.header_title")));
+            self.last_locale = Some(lang);
+        }
         if self.last_material != Some(k.dark) {
             super::material::apply(super::hwnd(w), k.dark);
             self.last_material = Some(k.dark);
@@ -934,7 +987,7 @@ impl Render for Panel {
                     .justify_center()
                     .child(
                         txt(
-                            msg.text(english(&self.state.prefs)),
+                            msg.text(locale(&self.state.prefs)),
                             11.,
                             rgb(0xf8fafc).into(),
                         )

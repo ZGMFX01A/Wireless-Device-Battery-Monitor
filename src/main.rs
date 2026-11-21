@@ -1,4 +1,9 @@
+// SPDX-FileCopyrightText: 2026 ZGMFX01A
+// SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+// See LICENSE in the repository root for the full terms.
+
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod device_display;
 mod entry;
 mod host;
 mod icon;

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 ZGMFX01A
+// SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+// See LICENSE in the repository root for the full terms.
+
 //! Only this process starts GPUI/Direct3D. No HID, GATT, updater or web engine here.
 use crate::model::Style;
 use crate::model::*;
@@ -134,15 +138,21 @@ pub(crate) fn apps_use_dark_theme() -> bool {
             && v == 0
     }
 }
-pub fn english(p: &Prefs) -> bool {
+pub fn locale(p: &Prefs) -> strings::Locale {
     match p.lang {
-        Language::Zh => false,
-        Language::En => true,
-        Language::Auto => unsafe {
-            windows_sys::Win32::Globalization::GetUserDefaultUILanguage() & 0x3ff != 4
-        },
+        Language::Zh => strings::Locale::Zh,
+        Language::En => strings::Locale::En,
+        Language::Ru => strings::Locale::Ru,
+        Language::Auto => strings::Locale::from_windows_language(unsafe {
+            windows_sys::Win32::Globalization::GetUserDefaultUILanguage()
+        }),
     }
 }
+// Release metadata currently provides Chinese and English notes only.
+pub fn english(p: &Prefs) -> bool {
+    locale(p) != strings::Locale::Zh
+}
+
 struct Panel {
     state: State,
     mode: Mode,
@@ -152,6 +162,7 @@ struct Panel {
     has_focus: bool,
     dark_auto: bool,
     last_material: Option<bool>,
+    last_locale: Option<strings::Locale>,
     live: bool,
     pending_rows: Option<Vec<Row>>,
     settings_open: bool,
@@ -181,9 +192,6 @@ impl Panel {
             }
             send(&Command::Hidden(self.generation));
         }
-    }
-    fn tr(&self, zh: &'static str, en: &'static str) -> &'static str {
-        if english(&self.state.prefs) { en } else { zh }
     }
     fn issue(&mut self, c: Command, cx: &mut Context<Self>) {
         if self.managed {
@@ -228,7 +236,7 @@ impl Panel {
         cx.notify()
     }
     fn t(&self, k: &str) -> &'static str {
-        strings::label(english(&self.state.prefs), k)
+        strings::label(locale(&self.state.prefs), k)
     }
     fn accept(&mut self, mut st: State, cx: &mut Context<Self>) {
         let completed = self
@@ -285,10 +293,10 @@ enum Toast {
     Notice(Notice),
 }
 impl Toast {
-    fn text(&self, en: bool) -> String {
+    fn text(&self, locale: strings::Locale) -> String {
         match self {
-            Self::Label(key) => strings::label(en, key).into(),
-            Self::Notice(notice) => strings::notice(en, notice),
+            Self::Label(key) => strings::label(locale, key).into(),
+            Self::Notice(notice) => strings::notice(locale, notice),
         }
     }
 }
@@ -379,7 +387,10 @@ pub fn run(managed: bool, initial: Mode) {
                     cx.new(|cx| {
                         let dark_auto = apps_use_dark_theme();
                         material::apply(hwnd(w), dark_auto);
-                        w.set_window_title("无线设备电量 · GPUI");
+                        w.set_window_title(&format!(
+                            "{} · GPUI",
+                            strings::label(locale(&Prefs::default()), "app.header_title")
+                        ));
                         let sub = cx.observe_window_activation(w, |s: &mut Panel, w, cx| {
                             if w.is_window_active() {
                                 s.has_focus = true
@@ -402,6 +413,7 @@ pub fn run(managed: bool, initial: Mode) {
                             managed,
                             dark_auto,
                             last_material: None,
+                            last_locale: None,
                             live: true,
                             pending_rows: None,
                             settings_open: initial == Mode::Settings,
