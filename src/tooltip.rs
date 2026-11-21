@@ -60,9 +60,9 @@ impl Content {
                             // the RF level is frozen while the mouse is on its cable
                             battery.map_or_else(|| "—".into(), |b| {
                                 if en {
-                                    format!("{}% (frozen)", b.display)
+                                    format!("{}% - frozen while charging", b.display)
                                 } else {
-                                    format!("{}%（冻结）", b.display)
+                                    format!("{}% - 冻结（充电中）", b.display)
                                 }
                             })
                         } else {
@@ -336,15 +336,26 @@ impl TooltipFonts {
             battery: Font::new("Consolas", BATTERY_TEXT_SIZE, FW_BOLD, dpi),
         }
     }
-    fn value_width(&self, dc: HDC, en: bool) -> i32 {
+    fn value_width(&self, dc: HDC, rows: &[Device]) -> i32 {
         unsafe {
             let old_font = SelectObject(dc, self.status.0);
-            let status =
-                text_width(dc, if en { "Offline" } else { "离线" }).max(text_width(dc, "—"));
             SelectObject(dc, self.battery.0);
             let battery = text_width(dc, "100%").max(text_width(dc, "88%"));
+            let longest = rows
+                .iter()
+                .map(|row| {
+                    // mirror the draw path: charge rows use the battery font
+                    let _ = SelectObject(dc, if row.charge.is_some() {
+                        self.battery.0
+                    } else {
+                        self.status.0
+                    });
+                    text_width(dc, &row.value)
+                })
+                .max()
+                .unwrap_or_default();
             SelectObject(dc, old_font);
-            status.max(battery)
+            battery.max(longest)
         }
     }
 }
@@ -374,11 +385,11 @@ fn preferred_width(hwnd: HWND, p: &Popup) -> i32 {
             .map(|row| text_width(dc, &row.name))
             .max()
             .unwrap_or_default();
-        let value = fonts.value_width(dc, p.content.en);
+        let value = fonts.value_width(dc, &p.content.rows);
         SelectObject(dc, old_font);
         ReleaseDC(hwnd, dc);
         (px(LABEL_OFFSET, p.dpi) + name + px(VALUE_GAP, p.dpi) + value + px(INSET_X, p.dpi))
-            .clamp(px(160, p.dpi), px(272, p.dpi))
+            .clamp(px(160, p.dpi), px(400, p.dpi))
     }
 }
 
@@ -541,7 +552,7 @@ fn paint(hwnd: HWND, dc: HDC) {
         SetBkMode(dc, TRANSPARENT as i32);
         let fonts = TooltipFonts::new(p.dpi);
         let old_font = SelectObject(dc, fonts.name.0);
-        let reserve = fonts.value_width(dc, p.content.en);
+        let reserve = fonts.value_width(dc, &p.content.rows);
         let inset = px(INSET_X, p.dpi);
         let label_left = px(LABEL_OFFSET, p.dpi);
         let right = client.right - inset;
