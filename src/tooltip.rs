@@ -53,6 +53,18 @@ impl Content {
                         kind: r.device.kind,
                         value: if !online {
                             if en { "Offline" } else { "离线" }.into()
+                        } else if battery.is_some_and(|b| {
+                            matches!(b.charge, Charge::Charging)
+                                && r.device.id.starts_with("hid:1d57:")
+                        }) {
+                            // the RF level is frozen while the mouse is on its cable
+                            battery.map_or_else(|| "—".into(), |b| {
+                                if en {
+                                    format!("{}% (frozen)", b.display)
+                                } else {
+                                    format!("{}%（冻结）", b.display)
+                                }
+                            })
                         } else {
                             battery.map_or_else(|| "—".into(), |b| format!("{}%", b.display))
                         },
