@@ -135,6 +135,7 @@ pub fn label(locale: Locale, key: &str) -> &'static str {
         "display.channel.keyboard" => ("键盘通道", "Keyboard channel", "Канал клавиатуры"),
         "device.bound" => ("已添加", "Added", "Добавлено"),
         "device.ready" => ("就绪", "Ready", "Готово"),
+        "device.paired" => ("已配对", "Paired", "Сопряжено"),
         "action.close" => ("收起", "Close", "Закрыть"),
         "toast.saving_failed" => (
             "设置保存失败",

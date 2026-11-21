@@ -249,6 +249,8 @@ impl Panel {
                                         .child(txt(
                                             if bound {
                                                 self.t("device.bound")
+                                            } else if kind == Kind::Bluetooth {
+                                                self.t("device.paired")
                                             } else {
                                                 self.t("device.ready")
                                             },
