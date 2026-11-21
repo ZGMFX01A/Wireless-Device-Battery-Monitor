@@ -1,6 +1,10 @@
+# SPDX-FileCopyrightText: 2026 ZGMFX01A
+# SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+# See LICENSE in the repository root for the full terms.
+
 [package]
 name = "mouse-battery-gpui"
-version = "2.9.0"
+version = "3.0.0"
 edition = "2024"
 [dependencies]
 battery-protocol = {path="../mouse-battery-core"}

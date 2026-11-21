@@ -1,4 +1,8 @@
-param([Parameter(Mandatory)][string]$Tag, [Parameter(Mandatory)][string]$Repository, [string]$Dist='dist')
+# SPDX-FileCopyrightText: 2026 ZGMFX01A
+# SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+# See LICENSE in the repository root for the full terms.
+
+param([Parameter(Mandatory)][string]$Tag, [Parameter(Mandatory)][string]$Repository, [string]$Dist='dist', [switch]$KeepDraft)
 $ErrorActionPreference='Stop'
 . "$PSScriptRoot/Common.ps1"
 $version=Get-AppVersion $Tag
@@ -33,8 +37,12 @@ if ($published.Count -gt 1) { throw 'Multiple published releases share this tag'
 $release=$published | Select-Object -First 1
 if (!$release) { $release=$matching | Select-Object -First 1 }
 if (!$release) {
-    $notes=JsonApi 'POST' "repos/$Repository/releases/generate-notes" @{tag_name=$Tag;target_commitish=$commit.sha}
-    $release=JsonApi 'POST' "repos/$Repository/releases" @{tag_name=$Tag;target_commitish=$commit.sha;name=$Tag;body=$notes.body;draft=$true}
+    $body=''
+    if (!$KeepDraft.IsPresent) {
+        $notes=JsonApi 'POST' "repos/$Repository/releases/generate-notes" @{tag_name=$Tag;target_commitish=$commit.sha}
+        $body=$notes.body
+    }
+    $release=JsonApi 'POST' "repos/$Repository/releases" @{tag_name=$Tag;target_commitish=$commit.sha;name=$Tag;body=$body;draft=$true}
 }
 $endpoint="repos/$Repository/releases/$($release.id)"
 # Upload first. A failed upload must not remove the working public executable.
@@ -48,6 +56,9 @@ $body=[regex]::Replace([string]$release.body,$marker,'').TrimEnd()
 $envelope=$signed | ConvertTo-Json -Compress
 $body+="`n`n<!-- gpui-update-manifest`n$envelope`n-->`n"
 $previous=@($release.assets | Where-Object { $_.name -ceq $name })
+$remainDraft=$KeepDraft.IsPresent -and $release.draft
+$metadata=@{target_commitish=$commit.sha;body=$body;draft=$remainDraft}
+if (!$remainDraft) { $metadata.make_latest='true' }
 $renamed=@()
 $promoted=$false
 try {
@@ -57,7 +68,7 @@ try {
     }
     JsonApi 'PATCH' "repos/$Repository/releases/assets/$($upload.id)" @{name=$name} | Out-Null
     $promoted=$true
-    JsonApi 'PATCH' $endpoint @{target_commitish=$commit.sha;body=$body;draft=$false;make_latest='true'} | Out-Null
+    JsonApi 'PATCH' $endpoint $metadata | Out-Null
 } catch {
     $failure=$_
     # Rename rollback is best effort; GitHub does not offer an atomic asset/body
@@ -78,5 +89,6 @@ foreach($draft in $matching) {
     if ($draft.draft -and $draft.id -ne $release.id) { Api @("repos/$Repository/releases/$($draft.id)",'--method','DELETE') | Out-Null }
 }
 $current=Api @($endpoint)
-if (@($current.assets).Count -ne 1 -or $current.assets[0].id -ne $upload.id -or $current.assets[0].digest -cne "sha256:$hash" -or $current.target_commitish -cne $commit.sha -or $current.body -cne $body) { throw 'Published release differs from the verified executable or metadata' }
-Write-Host "Published $Tag at $($commit.sha): $name sha256:$hash (release $($release.id))"
+if (@($current.assets).Count -ne 1 -or $current.assets[0].id -ne $upload.id -or $current.assets[0].digest -cne "sha256:$hash" -or $current.target_commitish -cne $commit.sha -or $current.body -cne $body -or $current.draft -ne $remainDraft) { throw 'Release differs from the verified executable or metadata' }
+$verb=if ($remainDraft) { 'Staged' } else { 'Published' }
+Write-Host "$verb $Tag at $($commit.sha): $name sha256:$hash (release $($release.id))"

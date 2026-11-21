@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 ZGMFX01A
+# SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+# See LICENSE in the repository root for the full terms.
+
 # Offline GitHub API simulation. No network requests, credentials or real releases.
 $ErrorActionPreference='Stop'
 $root=Join-Path ([IO.Path]::GetTempPath()) ('battery-publish-test-'+[guid]::NewGuid().ToString('N'))
@@ -12,6 +16,14 @@ function gh {
     $index=[Array]::IndexOf($Arguments,'--input'); if($index -ge 0 -and $endpoint -notlike 'https://uploads.*'){$payload=Get-Content $Arguments[$index+1] -Raw | ConvertFrom-Json -AsHashtable}
     $s.calls.Add("$method $endpoint")
     if($endpoint -like '*/commits/*'){return (@{sha=$s.sha}|ConvertTo-Json -Compress)}
+    if($endpoint -eq 'repos/fixture/test/releases' -and $method -eq 'POST'){
+        if ($s.release -or !$payload.draft -or $payload.body -cne '') { throw 'Expected an empty draft' }
+        $payload.id=11
+        $payload.assets=[Collections.Generic.List[object]]::new()
+        $s.release=$payload
+        return ($s.release|ConvertTo-Json -Depth 15 -Compress)
+    }
+    if($endpoint -like '*/releases?per_page=*' -and !$s.release){return '[[]]'}
     if($endpoint -like '*/releases?per_page=*'){return (ConvertTo-Json -InputObject @(@($s.release)) -Depth 15 -Compress)}
     if($endpoint -like 'https://uploads.*'){
         if($s.mode -eq 'upload-failure'){$global:LASTEXITCODE=1;return}
@@ -63,7 +75,13 @@ try {
             if(@($s.calls|Where-Object{$_ -like 'DELETE *'}).Count){throw "Failed publication deleted an existing asset: $mode"}
         }
     }
-    Write-Host '4 offline release-publication scenarios passed'
+    $global:WdbmPublishTest=@{mode='stage';sha=$sha;hash=$hash;size=$size;calls=[Collections.Generic.List[string]]::new();release=$null}
+    & "$PSScriptRoot/Publish-Release.ps1" -Tag v3.0.0 -Repository fixture/test -Dist $root -KeepDraft | Out-Null
+    $s=$global:WdbmPublishTest
+    if(!$s.release.draft -or $s.release.Contains('make_latest') -or $s.release.assets.Count -ne 1 -or $s.release.assets[0].name -cne $name -or $s.release.body -notlike '*gpui-update-manifest*'){
+        throw 'Staging must keep the signed asset and manifest in a draft'
+    }
+    Write-Host '5 offline release-publication scenarios passed'
 } finally {
     $global:WdbmPublishTest=$oldMock
     if(Test-Path $root){Remove-Item $root -Recurse -Force}
