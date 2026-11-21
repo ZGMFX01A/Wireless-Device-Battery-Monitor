@@ -2,7 +2,7 @@ use crate::{
     icon,
     model::*,
     service::{Service, Signals},
-    view::english,
+    view::{english, strings::label},
 };
 use battery_protocol::Charge;
 use std::{
@@ -42,20 +42,50 @@ impl Drop for UpdateTimer {
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
 }
-pub fn report(s: &str) {
-    eprintln!("{s}");
+pub enum AppError {
+    AlreadyRunning,
+    Startup(String),
+    UpdateWorker(String),
+    SmokeTest,
+    UnknownOption,
+}
+impl From<String> for AppError {
+    fn from(error: String) -> Self {
+        Self::Startup(error)
+    }
+}
+pub fn report(error: AppError) {
+    let key = match error {
+        AppError::AlreadyRunning => "app.already_running",
+        AppError::Startup(e) => {
+            eprintln!("Application startup failed: {e}");
+            "app.start_failed"
+        }
+        AppError::UpdateWorker(e) => {
+            eprintln!("Update worker failed: {e}");
+            "update.install_failed"
+        }
+        AppError::SmokeTest => "app.smoke_failed",
+        AppError::UnknownOption => "app.unknown_option",
+    };
+    let prefs = Prefs::path()
+        .and_then(|path| Prefs::load(&path))
+        .unwrap_or_default();
+    let en = english(&prefs);
+    let message = label(en, key);
+    eprintln!("{message}");
     unsafe {
         MessageBoxW(
             std::ptr::null_mut(),
-            wide(s).as_ptr(),
-            wide("无线设备电量 · GPUI").as_ptr(),
+            wide(message).as_ptr(),
+            wide(label(en, "app.header_title")).as_ptr(),
             MB_OK | MB_ICONERROR,
         );
     }
 }
 struct Lease(HANDLE);
 impl Lease {
-    fn new() -> Result<Self, String> {
+    fn new() -> Result<Self, AppError> {
         unsafe {
             let h = CreateMutexW(
                 std::ptr::null(),
@@ -63,11 +93,11 @@ impl Lease {
                 wide("Local\\MouseBattery_Main_SingleInstance").as_ptr(),
             );
             if h.is_null() {
-                return Err(std::io::Error::last_os_error().to_string());
+                return Err(std::io::Error::last_os_error().to_string().into());
             }
             if GetLastError() == ERROR_ALREADY_EXISTS {
                 CloseHandle(h);
-                return Err("旧版或新版已经运行。请先从托盘正常退出；未访问硬件。".into());
+                return Err(AppError::AlreadyRunning);
             }
             Ok(Self(h))
         }
@@ -525,7 +555,7 @@ fn balloon(tray: &tray_icon::TrayIcon, title: &str, text: &str) {
         Shell_NotifyIconW(NIM_MODIFY, &n);
     }
 }
-pub fn run(demo: bool) -> Result<(), String> {
+pub fn run(demo: bool) -> Result<(), AppError> {
     let _lease = if demo { None } else { Some(Lease::new()?) };
     let p = if demo {
         Prefs::default()
@@ -544,7 +574,10 @@ pub fn run(demo: bool) -> Result<(), String> {
     if !demo {
         match crate::startup::enabled() {
             Ok(v) => svc.state.lock().unwrap().autostart = v,
-            Err(e) => svc.state.lock().unwrap().note = e,
+            Err(e) => {
+                eprintln!("Unable to read launch-at-startup status: {e}");
+                svc.state.lock().unwrap().note = Some(Notice::AutostartStatusFailed);
+            }
         };
     }
     let wb = bus.clone();
@@ -674,7 +707,10 @@ pub fn run(demo: bool) -> Result<(), String> {
                 balloon(
                     &tray,
                     "GPUI",
-                    "图形窗口启动超时。后台仍在运行；可从托盘重试。",
+                    label(
+                        english(&svc.state.lock().unwrap().prefs),
+                        "window.start_timeout",
+                    ),
                 );
             }
             if let Some((mode, a)) = pending.take() {
@@ -801,7 +837,15 @@ pub fn run(demo: bool) -> Result<(), String> {
                         let g = match WindowProcess::spawn(serial, bus.clone()) {
                             Ok(g) => g,
                             Err(e) => {
-                                balloon(&tray, "GPUI", &format!("窗口未启动；托盘监控继续：{e}"));
+                                eprintln!("Could not start the window: {e}");
+                                balloon(
+                                    &tray,
+                                    "GPUI",
+                                    label(
+                                        english(&svc.state.lock().unwrap().prefs),
+                                        "window.start_failed",
+                                    ),
+                                );
                                 continue;
                             }
                         };
@@ -832,7 +876,10 @@ pub fn run(demo: bool) -> Result<(), String> {
                                 balloon(
                                     &tray,
                                     "GPUI",
-                                    "图形进程意外退出，后台监控未停止。再次点击可重开。",
+                                    label(
+                                        english(&svc.state.lock().unwrap().prefs),
+                                        "window.exited",
+                                    ),
                                 );
                             }
                         }
@@ -895,9 +942,12 @@ pub fn run(demo: bool) -> Result<(), String> {
                             });
                         }
                         Err(e) => {
+                            eprintln!("Update installation failed: {e}");
                             let mut state = svc.state.lock().unwrap();
-                            state.note = e.clone();
-                            state.update = crate::update::Status::Error(e);
+                            state.note =
+                                Some(Notice::UpdateFailed(crate::update::Failure::Install));
+                            state.update =
+                                crate::update::Status::Error(crate::update::Failure::Install);
                             bus.post(Msg::Data);
                         }
                     }
@@ -910,21 +960,22 @@ pub fn run(demo: bool) -> Result<(), String> {
                         handing_off = false;
                         continue;
                     }
-                    if writeln!(pipe, "GPUI-DEPART/1")
-                        .and_then(|_| pipe.flush())
-                        .is_ok()
-                    {
-                        break 'pump;
-                    }
+                    let error = match writeln!(pipe, "GPUI-DEPART/1").and_then(|_| pipe.flush()) {
+                        Ok(()) => break 'pump,
+                        Err(e) => e,
+                    };
+                    eprintln!("Update handoff failed: {error}");
                     handing_off = false;
-                    svc.state.lock().unwrap().note = "更新交接失败；旧版继续运行".into();
+                    svc.state.lock().unwrap().note =
+                        Some(Notice::UpdateFailed(crate::update::Failure::Handoff));
                     bus.post(Msg::Data);
                 }
                 Msg::UpdateHandoff(Err(e)) => {
                     handing_off = false;
+                    eprintln!("Update handoff failed: {e}");
                     let mut state = svc.state.lock().unwrap();
-                    state.note = e.clone();
-                    state.update = crate::update::Status::Error(e);
+                    state.note = Some(Notice::UpdateFailed(crate::update::Failure::Handoff));
+                    state.update = crate::update::Status::Error(crate::update::Failure::Handoff);
                     bus.post(Msg::Data);
                 }
                 Msg::Install(_) => (),
@@ -942,13 +993,15 @@ pub fn run(demo: bool) -> Result<(), String> {
                 }
                 Msg::Action(Command::OpenUpdate) => {
                     if let Err(e) = updater.open_dir() {
-                        svc.state.lock().unwrap().note = e;
+                        eprintln!("Unable to open the update folder: {e}");
+                        svc.state.lock().unwrap().note = Some(Notice::UpdateFolderFailed);
                         bus.post(Msg::Data)
                     }
                 }
                 Msg::Action(c) => {
                     if let Err(e) = svc.command(c) {
-                        svc.state.lock().unwrap().note = e;
+                        eprintln!("Application command failed: {e}");
+                        svc.state.lock().unwrap().note = Some(Notice::OperationFailed);
                     }
                     bus.post(Msg::Data)
                 }

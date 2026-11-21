@@ -316,7 +316,8 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             Ok(a) => Some(a),
             Err(e) => {
                 // Preserve the request/reply contract even on systems without a usable WinRT apartment.
-                state.lock().unwrap().note = e.clone();
+                eprintln!("Bluetooth initialization failed: {e}");
+                state.lock().unwrap().note = Some(Notice::BluetoothScanFailed);
                 wake();
                 loop {
                     let f = sig.bt.take(Duration::from_secs(3600));
@@ -327,12 +328,13 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                     let sync = sig.bt.manual.lock().unwrap().take();
                     let mut st = state.lock().unwrap();
                     if let Some((id, _)) = sync {
-                        st.manual.finish(id, true, Some(e.clone()));
+                        st.manual
+                            .finish(id, true, Some(Notice::BluetoothScanFailed));
                     }
                     for j in j {
                         st.finish(&j, Err(e.clone()));
                     }
-                    st.note = e.clone();
+                    st.note = Some(Notice::BluetoothScanFailed);
                     drop(st);
                     wake();
                 }
@@ -385,7 +387,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 slot.fail = 0;
                 slot.due = t + 1000;
                 slot.row.held = false;
-                slot.row.error = Some("等待唤醒后读数 / Resuming".into());
+                slot.row.error = Some("Resuming".into());
             }
             if devices.is_empty() && !bt {
                 flags |= SCAN;
@@ -409,7 +411,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                     .lock()
                     .unwrap()
                     .manual
-                    .finish(id, bt, Some("System suspended".into()));
+                    .finish(id, bt, Some(Notice::Suspended));
                 wake();
             }
             if flags & JOB != 0 {
@@ -484,7 +486,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             let list: Result<Vec<Target>, String> = if bt {
                 bluetooth::discover().map(|ds| ds.into_iter().map(Target::B).collect())
             } else {
-                hid::discover_inventory().map(|found| {
+                hid::discover_inventory_with_diagnostics().map(|found| {
                     warnings = found.warnings;
                     keyboard_inventory = Some(Ok(found.keyboards));
                     found
@@ -550,37 +552,39 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                         match Prefs::path().and_then(|path| pref.save(&path)) {
                             Ok(()) => st.prefs = pref,
                             Err(e) => {
-                                manual_err = Some(e.clone());
-                                st.note = e;
+                                eprintln!("Failed to save discovered device preferences: {e}");
+                                manual_err = Some(Notice::SettingsSaveFailed);
                             }
                         }
                     }
-                    st.note = if let Some(e) = manual_err.as_ref() {
+                    st.note = Some(if let Some(e) = manual_err.as_ref() {
                         e.clone()
                     } else if warnings.is_empty() {
                         if bt {
-                            "蓝牙扫描完成"
+                            Notice::BluetoothScanComplete
                         } else {
-                            "接收器扫描完成"
+                            Notice::HidScanComplete
                         }
-                        .into()
                     } else {
                         warnings.sort();
                         warnings.dedup();
-                        let m = warnings
-                            .iter()
-                            .take(3)
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join("；");
+                        warnings.truncate(3);
+                        let m = Notice::DiscoveryWarnings(warnings);
                         manual_err = Some(m.clone());
                         m
-                    };
+                    });
                 }
                 Err(e) => {
                     keyboard_inventory = Some(Err(e.clone()));
-                    manual_err = Some(e.clone());
-                    state.lock().unwrap().note = e;
+                    let notice = if bt {
+                        eprintln!("Bluetooth scan failed: {e}");
+                        Notice::BluetoothScanFailed
+                    } else {
+                        eprintln!("Receiver scan failed: {e}");
+                        Notice::HidScanFailed
+                    };
+                    manual_err = Some(notice.clone());
+                    state.lock().unwrap().note = Some(notice);
                 }
             }
             discovery_at = clock() + interval_ms;
@@ -654,7 +658,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                             slot.apply(Ok(sample), clock(), true);
                             slots.insert(endpoint, slot);
                             recovered_sample = prefs.keyboard_endpoint().map(str::to_owned);
-                            st.note = "键盘已自动恢复连接 / Keyboard reconnected".into();
+                            st.note = Some(Notice::KeyboardReconnected);
                             Ok(())
                         }
                         Ok(false) => {
@@ -679,8 +683,9 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 if keyboard_blocked {
                     slots.retain(|_, s| s.row.device.kind != Kind::Keyboard);
                 }
-                state.lock().unwrap().note = e.clone();
-                manual_err.get_or_insert(e);
+                eprintln!("Keyboard reconnect failed: {e}");
+                state.lock().unwrap().note = Some(Notice::KeyboardReconnectFailed);
+                manual_err.get_or_insert(Notice::KeyboardReconnectFailed);
             }
         }
         let due_at = clock();
@@ -740,15 +745,17 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 }) {
                     Ok(_) => prefs = st.prefs.clone(),
                     Err(e) => {
-                        st.note = e.clone();
-                        manual_err.get_or_insert(e);
+                        eprintln!("Failed to save restored keyboard preferences: {e}");
+                        st.note = Some(Notice::SettingsSaveFailed);
+                        manual_err.get_or_insert(Notice::SettingsSaveFailed);
                     }
                 }
             }
             if sync.is_some()
                 && let Err(e) = &r
             {
-                manual_err = Some(e.clone())
+                eprintln!("Battery refresh failed: {e}");
+                manual_err = Some(Notice::RefreshFailed);
             }
             slot.row.device = t.data().clone();
             slot.apply(r, clock(), force);
@@ -905,7 +912,7 @@ impl Service {
             }
             Command::ImportAppearance => {
                 if self.demo {
-                    return Err("预览模式不读取旧配置 / Preview does not import preferences".into());
+                    return Err("Preview does not import preferences".into());
                 }
                 let target = Prefs::path()?;
                 let old = target
@@ -933,9 +940,7 @@ impl Service {
                 prefs.save(&target)?;
                 st.prefs = prefs;
                 st.prune_unbound();
-                st.note = format!(
-                    "已导入偏好与匹配的设备；待匹配 {pending} 项 / Import complete; {pending} pending"
-                );
+                st.note = Some(Notice::PreferencesImported(pending));
                 drop(st);
                 self.signals.hid.send(SCAN);
                 self.signals.bt.send(SCAN);

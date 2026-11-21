@@ -933,11 +933,18 @@ impl Render for Panel {
                     .bottom(px(16.))
                     .justify_center()
                     .child(
-                        txt(msg.clone(), 11., rgb(0xf8fafc).into())
-                            .px(px(14.))
-                            .py(px(6.))
-                            .bg(rgba(0x0f172af2))
-                            .rounded_full(),
+                        txt(
+                            msg.text(english(&self.state.prefs)),
+                            11.,
+                            rgb(0xf8fafc).into(),
+                        )
+                        .min_w_0()
+                        .whitespace_normal()
+                        .text_center()
+                        .px(px(14.))
+                        .py(px(6.))
+                        .bg(rgba(0x0f172af2))
+                        .rounded(px(12.)),
                     ),
             )
         }

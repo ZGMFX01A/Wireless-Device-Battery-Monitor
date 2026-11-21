@@ -1,3 +1,65 @@
+use crate::{model::Notice, update::Failure};
+use battery_protocol::hid::DiscoveryWarning;
+
+pub fn notice(en: bool, notice: &Notice) -> String {
+    let key = match notice {
+        Notice::HidScanComplete => "toast.hid_scan_completed",
+        Notice::BluetoothScanComplete => "toast.bluetooth_scan_completed",
+        Notice::DiscoveryWarnings(warnings) => {
+            return warnings
+                .iter()
+                .map(|warning| discovery_warning(en, *warning))
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        Notice::HidScanFailed => "toast.hid_scan_failed",
+        Notice::BluetoothScanFailed => "toast.bluetooth_scan_failed",
+        Notice::RefreshFailed => "toast.refresh_failed",
+        Notice::Suspended => "toast.suspended",
+        Notice::SettingsSaveFailed => "toast.saving_failed",
+        Notice::KeyboardReconnected => "toast.keyboard_reconnected",
+        Notice::KeyboardReconnectFailed => "toast.keyboard_reconnect_failed",
+        Notice::PreferencesImported(pending) => {
+            return label(en, "toast.preferences_imported")
+                .replace("{pending}", &pending.to_string());
+        }
+        Notice::PreviewHardwareUnavailable => "toast.preview_hardware_unavailable",
+        Notice::AutostartStatusFailed => "toast.autostart_status_failed",
+        Notice::UpdateFailed(failure) => return update_failure(en, *failure).into(),
+        Notice::UpdateFolderFailed => "toast.update_folder_failed",
+        Notice::OperationFailed => "toast.op_failed",
+    };
+    label(en, key).into()
+}
+
+fn discovery_warning(en: bool, warning: DiscoveryWarning) -> String {
+    let key = match warning {
+        DiscoveryWarning::LogiLongEndpoint(pid) => {
+            return label(en, "warning.logi_long_endpoint").replace("{pid}", &format!("{pid:04x}"));
+        }
+        DiscoveryWarning::LogiDeviceType => "warning.logi_device_type",
+        DiscoveryWarning::OmniPairingPort => "warning.omni_pairing_port",
+        DiscoveryWarning::OmniPairingList => "warning.omni_pairing_list",
+        DiscoveryWarning::OmniDeviceEndpoint => "warning.omni_device_endpoint",
+    };
+    label(en, key).into()
+}
+
+pub fn update_failure(en: bool, failure: Failure) -> &'static str {
+    label(
+        en,
+        match failure {
+            Failure::Check => "update.check_failed",
+            Failure::Download => "update.download_failed",
+            Failure::Install => "update.install_failed",
+            Failure::Handoff => "update.handoff_failed",
+            Failure::Preview => "update.preview_unavailable",
+            Failure::Unavailable => "update.unavailable",
+            Failure::AutomaticInstallPaused => "update.automatic_install_paused",
+        },
+    )
+}
+
 // Generated from the two dictionaries in legacy web_ui/locale.js.
 pub fn label(en: bool, key: &str) -> &'static str {
     let (z, e) = match key {
@@ -31,8 +93,21 @@ pub fn label(en: bool, key: &str) -> &'static str {
         "device.bound" => ("已添加", "Added"),
         "device.ready" => ("就绪", "Ready"),
         "action.close" => ("收起", "Close"),
-        "toast.saving_failed" => ("设置保存失败：{msg}", "Failed to save settings: {msg}"),
+        "toast.saving_failed" => ("设置保存失败", "Failed to save settings."),
         "app.header_title" => ("无线设备电量", "Device Battery"),
+        "app.already_running" => (
+            "应用已在运行。请先从托盘退出。",
+            "The app is already running. Exit it from the tray first.",
+        ),
+        "app.start_failed" => (
+            "无法启动无线设备电量监控。",
+            "Could not start Device Battery.",
+        ),
+        "app.smoke_failed" => ("应用自检失败。", "The application self-test failed."),
+        "app.unknown_option" => (
+            "未知选项。请使用 --preview、--demo-tray 或 --smoke-test。",
+            "Unknown option. Use --preview, --demo-tray or --smoke-test.",
+        ),
         "action.scan" => ("重新扫描", "Rescan"),
         "action.scan_title" => (
             "重新扫描所有 2.4G 接收器与 HID 外设",
@@ -149,20 +224,102 @@ pub fn label(en: bool, key: &str) -> &'static str {
         ),
         "toast.scan_started" => ("正在重新扫描硬件设备...", "Scanning hardware devices..."),
         "toast.scan_completed" => ("硬件设备扫描完成", "Hardware scan completed"),
+        "toast.hid_scan_completed" => ("接收器扫描完成", "Receiver scan completed"),
+        "toast.bluetooth_scan_completed" => ("蓝牙扫描完成", "Bluetooth scan completed"),
+        "toast.hid_scan_failed" => ("接收器扫描失败", "Receiver scan failed."),
+        "toast.bluetooth_scan_failed" => ("蓝牙扫描失败", "Bluetooth scan failed."),
         "toast.refresh_started" => ("正在刷新电量...", "Refreshing battery status..."),
         "toast.refresh_completed" => ("电量刷新完成", "Battery status refreshed"),
+        "toast.refresh_failed" => (
+            "无法刷新设备电量",
+            "Could not refresh device battery status.",
+        ),
+        "toast.suspended" => (
+            "系统已暂停，请在唤醒后重试。",
+            "System suspended. Try again after waking it.",
+        ),
+        "toast.keyboard_reconnected" => ("键盘已自动恢复连接", "Keyboard reconnected"),
+        "toast.keyboard_reconnect_failed" => {
+            ("无法重新连接键盘", "Could not reconnect the keyboard.")
+        }
+        "toast.preferences_imported" => (
+            "已导入偏好与匹配的设备，待匹配 {pending} 项",
+            "Preferences and matching devices imported. Pending matches: {pending}.",
+        ),
+        "toast.preview_hardware_unavailable" => {
+            ("预览模式不访问外设", "Preview does not access hardware.")
+        }
+        "toast.autostart_status_failed" => (
+            "无法读取开机自启动状态",
+            "Could not read the launch-at-startup status.",
+        ),
+        "toast.update_folder_failed" => ("无法打开更新文件夹", "Could not open the update folder."),
         "toast.bound_success" => ("设备绑定成功", "Device bound successfully"),
         "toast.removed_success" => ("已移除设备", "Device removed"),
         "toast.rename_success" => ("设备名称已修改为“{name}”", "Device renamed to \"{name}\""),
         "toast.rename_cleared" => ("已恢复设备默认名称", "Device name reset to default"),
-        "toast.op_failed" => ("操作失败：{msg}", "Operation failed: {msg}"),
+        "toast.op_failed" => ("操作失败，请重试。", "Operation failed. Please try again."),
+        "device.add_failed" => (
+            "无法添加设备，请检查连接后重试。",
+            "Could not add the device. Check its connection and try again.",
+        ),
+        "warning.logi_long_endpoint" => (
+            "HID++ {pid}：无法确定唯一的长报文端点",
+            "HID++ {pid}: could not identify a unique long-report endpoint.",
+        ),
+        "warning.logi_device_type" => (
+            "HID++ C54D：暂时无法读取设备类型",
+            "HID++ C54D: device type unavailable.",
+        ),
+        "warning.omni_pairing_port" => (
+            "ROG Omni：无法打开配对通道",
+            "ROG Omni: could not open the pairing interface.",
+        ),
+        "warning.omni_pairing_list" => (
+            "ROG Omni：无法读取配对列表",
+            "ROG Omni: pairing list unavailable.",
+        ),
+        "warning.omni_device_endpoint" => (
+            "ROG Omni：无法确定唯一的设备端点",
+            "ROG Omni: could not identify a unique device endpoint.",
+        ),
+        "window.start_timeout" => (
+            "窗口启动超时。后台监控继续运行，可从托盘重试。",
+            "The window took too long to open. Monitoring continues. Retry from the tray.",
+        ),
+        "window.start_failed" => (
+            "无法打开窗口。后台监控继续运行。",
+            "Could not open the window. Background monitoring continues.",
+        ),
+        "window.exited" => (
+            "窗口意外关闭。后台监控继续运行，可从托盘重新打开。",
+            "The window closed unexpectedly. Monitoring continues. Reopen it from the tray.",
+        ),
         "update.modal_title" => ("发现新版本", "New Version Found"),
         "update.notes_title" => ("更新说明", "Release Notes"),
         "update.later" => ("稍后再说", "Later"),
         "update.start" => ("立即更新", "Update Now"),
         "update.cancel" => ("取消下载", "Cancel Download"),
         "update.cancelling" => ("正在取消下载...", "Cancelling download..."),
-        "update.check_failed" => ("检查更新失败：{msg}", "Check update failed: {msg}"),
+        "update.check_failed" => ("检查更新失败", "Could not check for updates."),
+        "update.download_failed" => ("下载更新失败", "Could not download the update."),
+        "update.install_failed" => ("安装更新失败", "Could not install the update."),
+        "update.handoff_failed" => (
+            "更新交接失败，当前版本继续运行。",
+            "Could not hand off the update. The current version is still running.",
+        ),
+        "update.preview_unavailable" => (
+            "预览模式不访问更新服务",
+            "Preview does not contact the update service.",
+        ),
+        "update.unavailable" => (
+            "此版本不支持自动更新，请从发布页下载。",
+            "Automatic updates are unavailable in this build. Download from the releases page.",
+        ),
+        "update.automatic_install_paused" => (
+            "上次更新启动失败，自动安装已暂停。你可以手动重试。",
+            "This update previously failed to start. Automatic installation is paused. You can retry manually.",
+        ),
         "update.latest" => (
             "当前已是最新版本 ({version})",
             "Already up to date ({version})",
@@ -195,7 +352,6 @@ pub fn label(en: bool, key: &str) -> &'static str {
             "Switched to fallback source...",
         ),
         "update.cancelled" => ("更新已取消", "Update cancelled"),
-        "update.failed" => ("更新失败：{error}", "Update failed: {error}"),
         _ => ("—", "—"),
     };
     if en { e } else { z }

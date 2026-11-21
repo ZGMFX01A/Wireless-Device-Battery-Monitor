@@ -26,6 +26,16 @@ fn asset_url(version: &str) -> String {
 }
 
 const MAX: u64 = 96 * 1024 * 1024;
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Failure {
+    Check,
+    Download,
+    Install,
+    Handoff,
+    Preview,
+    Unavailable,
+    AutomaticInstallPaused,
+}
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Status {
     #[default]
@@ -36,7 +46,7 @@ pub enum Status {
     Downloading(u64, u64),
     Ready(String),
     Cancelled,
-    Error(String),
+    Error(Failure),
 }
 #[derive(Serialize, Deserialize)]
 pub struct Envelope {
@@ -253,9 +263,11 @@ impl Updates {
         self.worker = Some(thread::spawn(move || {
             let result = (|| -> Result<Status, String> {
                 if demo {
-                    return Err("Preview is offline".into());
+                    return Ok(Status::Error(Failure::Preview));
                 }
-                let key = KEY.ok_or("Automatic updates are unavailable in this build; download from the releases page")?;
+                let Some(key) = KEY else {
+                    return Ok(Status::Error(Failure::Unavailable));
+                };
                 let transport = network::Transport::new(&mirrors)?;
                 network::run(async {
                     if !download {
@@ -273,7 +285,7 @@ impl Updates {
                                 .join(format!("failed-{}", man.sha256.to_ascii_lowercase()))
                                 .is_file()
                         {
-                            return Err("This update previously failed to start; automatic installation paused. Manual retry is available.".into());
+                            return Ok(Status::Error(Failure::AutomaticInstallPaused));
                         }
                         {
                             let mut state = st.lock().unwrap();
@@ -366,7 +378,14 @@ impl Updates {
                 state.update = if c.load(Ordering::Acquire) {
                     Status::Cancelled
                 } else {
-                    result.unwrap_or_else(Status::Error)
+                    result.unwrap_or_else(|e| {
+                        eprintln!("Update failed: {e}");
+                        Status::Error(if download {
+                            Failure::Download
+                        } else {
+                            Failure::Check
+                        })
+                    })
                 };
                 if !matches!(state.update, Status::Ready(_)) {
                     ready.lock().unwrap().take();

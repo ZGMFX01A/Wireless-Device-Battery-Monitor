@@ -20,7 +20,7 @@ fn main() {
             println!("{}", env!("APP_VERSION"));
             Ok(())
         }
-        [s] if s == "--gpui-update-worker" => swap::helper(),
+        [s] if s == "--gpui-update-worker" => swap::helper().map_err(host::AppError::UpdateWorker),
         [s] if s == "--gpui-health-start" => host::run(false),
         [s] if s == "--gui-child" => {
             view::run(true, model::Mode::Flyout);
@@ -35,15 +35,15 @@ fn main() {
             if svc.state.lock().unwrap().rows.len() == 2 {
                 Ok(())
             } else {
-                Err("smoke failed".into())
+                Err(host::AppError::SmokeTest)
             }
         }
         [s] if s == "--demo-tray" || s == "--exercise-tray" => host::run(true),
         [] => host::run(false),
-        _ => Err("Unknown option. Use --preview, --demo-tray or --smoke-test.".into()),
+        _ => Err(host::AppError::UnknownOption),
     };
     if let Err(e) = res {
-        host::report(&e);
+        host::report(e);
         std::process::exit(1)
     }
 }

@@ -29,9 +29,9 @@ fn footbtn(id: &'static str, label: &'static str, primary: bool, k: Skin) -> Sta
         ))
 }
 impl Panel {
-    pub(super) fn toast(&mut self, text: String, cx: &mut Context<Self>) {
+    pub(super) fn toast(&mut self, message: Toast, cx: &mut Context<Self>) {
         let i = token();
-        self.toast = Some((text, i));
+        self.toast = Some((message, i));
         cx.spawn(async move |e, cx| {
             Timer::after(std::time::Duration::from_millis(2600)).await;
             let _ = e.update(cx, |s, cx| {
@@ -51,12 +51,11 @@ impl Panel {
         let id = token();
         self.manual = Some((id, scan));
         self.toast(
-            self.t(if scan {
+            Toast::Label(if scan {
                 "toast.scan_started"
             } else {
                 "toast.refresh_started"
-            })
-            .into(),
+            }),
             cx,
         );
         self.issue(Command::Sync(id, scan), cx)
@@ -91,7 +90,7 @@ impl Panel {
         {
             if *binding {
                 self.modal = None;
-                self.toast(self.t("toast.bound_success").into(), cx)
+                self.toast(Toast::Label("toast.bound_success"), cx)
             } else if chosen.is_none() {
                 *chosen = self
                     .state
@@ -203,9 +202,15 @@ impl Panel {
                             .text_center(),
                         )
                     }
-                    Some(Err(e)) => {
+                    Some(Err(_)) => {
                         body = body.child(txt(
-                            self.t("toast.op_failed").replace("{msg}", e),
+                            self.t(if binding {
+                                "device.add_failed"
+                            } else if kind == Kind::Keyboard {
+                                "toast.hid_scan_failed"
+                            } else {
+                                "toast.bluetooth_scan_failed"
+                            }),
                             12.,
                             rgb(RED).into(),
                         ))
@@ -429,7 +434,9 @@ impl Panel {
                     }
                     other => {
                         let msg = match other {
-                            Status::Error(e) => self.t("update.check_failed").replace("{msg}", e),
+                            Status::Error(failure) => {
+                                strings::update_failure(english(&self.state.prefs), *failure).into()
+                            }
                             Status::Current => self
                                 .t("update.latest")
                                 .replace("{version}", env!("APP_VERSION")),

@@ -1,4 +1,4 @@
-use battery_protocol::{Charge, Descriptor, Kind, Reading};
+use battery_protocol::{Charge, Descriptor, Kind, Reading, hid::DiscoveryWarning};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -366,18 +366,37 @@ pub struct Receipt {
     pub id: u64,
     pub result: Result<(), String>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Notice {
+    HidScanComplete,
+    BluetoothScanComplete,
+    DiscoveryWarnings(Vec<DiscoveryWarning>),
+    HidScanFailed,
+    BluetoothScanFailed,
+    RefreshFailed,
+    Suspended,
+    SettingsSaveFailed,
+    KeyboardReconnected,
+    KeyboardReconnectFailed,
+    PreferencesImported(usize),
+    PreviewHardwareUnavailable,
+    AutostartStatusFailed,
+    UpdateFailed(crate::update::Failure),
+    UpdateFolderFailed,
+    OperationFailed,
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manual {
     pub id: u64,
     pub hid: bool,
     pub bt: bool,
-    pub error: Option<String>,
+    pub error: Option<Notice>,
 }
 impl Manual {
     pub fn completed(&self) -> bool {
         self.hid && self.bt
     }
-    pub fn finish(&mut self, id: u64, bt: bool, error: Option<String>) {
+    pub fn finish(&mut self, id: u64, bt: bool, error: Option<Notice>) {
         if self.id == id {
             if bt {
                 self.bt = true
@@ -402,7 +421,7 @@ pub struct State {
     pub release_notes: String,
     pub release_size: u64,
     pub bytes_per_sec: u64,
-    pub note: String,
+    pub note: Option<Notice>,
     pub demo: bool,
     pub autostart: bool,
     pub update: crate::update::Status,
@@ -462,6 +481,9 @@ impl State {
         }
     }
     pub fn finish(&mut self, j: &DeviceJob, result: Result<(), String>) {
+        if let Err(e) = &result {
+            eprintln!("{:?} device request failed: {e}", j.kind);
+        }
         let dst = if j.kind == Kind::Bluetooth {
             &mut self.bluetooth_reply
         } else {

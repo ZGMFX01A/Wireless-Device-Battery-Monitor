@@ -233,9 +233,8 @@ mod material_tests {
                 let (ink, _, _) = tone.palette(dark);
                 let a = luminance(ink);
                 let b = luminance(bg);
-                let minimum = if !dark && tone == Normal { 7.0 } else { 4.5 };
                 assert!(
-                    (a.max(b) + 0.05) / (a.min(b) + 0.05) >= minimum,
+                    (a.max(b) + 0.05) / (a.min(b) + 0.05) >= 4.5,
                     "{dark}: {tone:?}"
                 );
             }

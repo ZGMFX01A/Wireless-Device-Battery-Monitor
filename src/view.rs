@@ -163,7 +163,7 @@ struct Panel {
     focus: FocusHandle,
     edit_blur: Option<Subscription>,
     manual: Option<(u64, bool)>,
-    toast: Option<(String, u64)>,
+    toast: Option<(Toast, u64)>,
     editor: Option<(String, Entity<crate::entry::TextInput>)>,
     _sub: Option<Subscription>,
 }
@@ -208,13 +208,7 @@ impl Panel {
                 return;
             }
             if matches!(c, Command::CheckUpdate) {
-                self.state.update = crate::update::Status::Error(
-                    self.tr(
-                        "预览模式不访问更新服务",
-                        "Preview does not contact the update service",
-                    )
-                    .into(),
-                );
+                self.state.update = crate::update::Status::Error(crate::update::Failure::Preview);
                 cx.notify();
                 return;
             }
@@ -225,9 +219,7 @@ impl Panel {
             }
             let list = self.state.candidates.clone();
             if !self.state.prefs.change(&c, &list) {
-                self.state.note = self
-                    .tr("预览模式不访问外设", "Preview does not access hardware")
-                    .to_owned()
+                self.state.note = Some(Notice::PreviewHardwareUnavailable);
             }
         }
         if !self.managed {
@@ -252,21 +244,27 @@ impl Panel {
         } else {
             self.pending_rows = None;
         }
-        let note = (st.note != self.state.note && !st.note.is_empty()).then(|| st.note.clone());
+        let note = if st.note != self.state.note {
+            st.note.clone()
+        } else {
+            None
+        };
         self.state = st;
         if completed {
             let (_, scan) = self.manual.take().unwrap();
-            let note = self.state.manual.error.clone().unwrap_or_else(|| {
-                self.t(if scan {
-                    "toast.scan_completed"
-                } else {
-                    "toast.refresh_completed"
-                })
-                .into()
-            });
+            let note = self.state.manual.error.clone().map_or_else(
+                || {
+                    Toast::Label(if scan {
+                        "toast.scan_completed"
+                    } else {
+                        "toast.refresh_completed"
+                    })
+                },
+                Toast::Notice,
+            );
             self.toast(note, cx)
         } else if let Some(n) = note {
-            self.toast(n, cx)
+            self.toast(Toast::Notice(n), cx)
         }
     }
 }
@@ -281,7 +279,19 @@ mod panels;
 #[path = "ui/skin.rs"]
 pub(crate) mod skin;
 #[path = "ui/strings.rs"]
-mod strings;
+pub(crate) mod strings;
+enum Toast {
+    Label(&'static str),
+    Notice(Notice),
+}
+impl Toast {
+    fn text(&self, en: bool) -> String {
+        match self {
+            Self::Label(key) => strings::label(en, key).into(),
+            Self::Notice(notice) => strings::notice(en, notice),
+        }
+    }
+}
 #[derive(Clone)]
 enum Dialog {
     Pick {
