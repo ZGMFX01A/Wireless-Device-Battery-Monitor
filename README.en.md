@@ -27,7 +27,7 @@ Hover over the icon for a battery summary. Device names appear in bold; battery 
 
 ### All your devices together, with names you choose
 
-The device panel shows battery level, status, and the last update time. Mice are detected automatically through supported receivers; keyboards and Bluetooth devices have their own add-device options.
+The device panel shows battery level, status, and the last update time. Mice are detected automatically through supported receivers. Use “Add Keyboard” for compatible 2.4 GHz keyboards and “Add Bluetooth” for Bluetooth devices.
 
 Click the pencil on a device card to give it a familiar name such as “Office mouse” or “Travel headphones.” Aliases also appear in tray tooltips, menus, and low-battery notifications. You can currently bind one receiver-connected keyboard and add multiple Bluetooth devices.
 
@@ -64,8 +64,8 @@ Monitoring continues after you close the panel. After about 30 seconds of interf
 | --- | --- |
 | Logitech wireless mice | Selected LIGHTSPEED, Unifying, Bolt, and other receivers with compatible mice, including supported models in the G502 X, G903, and PRO X SUPERLIGHT families. |
 | Razer wireless mice | Selected HyperSpeed wireless mice, including supported models in the Basilisk, Viper, and DeathAdder families. |
-| ASUS ROG wireless peripherals | Selected wireless mice, keyboards, and Omni receiver combinations. |
-| Weikav / NUT75 and other mechanical keyboards | Selected keyboards using compatible protocols over a 2.4 GHz receiver. |
+| ASUS ROG wireless peripherals | Selected wireless mice, keyboards, and Omni receiver combinations. The pairing list may be unavailable on some Omni receivers. See [Issue #3](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues/3). |
+| Other 2.4 GHz wireless keyboards | Currently limited to models using the Huafenda wireless chipset, including some Weikav / NUT75 keyboards. |
 | Bluetooth mice, keyboards, headphones, and more | Devices paired and connected in Windows that expose a readable battery level to the system. |
 
 **Support for a brand does not mean every model is supported. Changing a device's connection mode can also affect battery availability.** For example, a keyboard's 2.4 GHz and Bluetooth modes require separate compatibility checks. Charging status and battery accuracy depend on the information provided by the device; some devices report a battery level without reporting whether they are charging.
@@ -73,7 +73,7 @@ Monitoring continues after you close the panel. After about 30 seconds of interf
 ## Getting started
 
 1. **Find the tray icon.** The app starts in the taskbar notification area. If you do not see it, check the hidden icons area and drag the icon into the visible tray if desired.
-2. **Open the panel and add devices.** Connect your mouse receiver and check automatic detection. Use “Add keyboard” for a keyboard. For Bluetooth devices, pair and connect them in Windows first, then use “Add Bluetooth device.”
+2. **Open the panel and add devices.** Connect your mouse receiver and check automatic detection. For a supported 2.4 GHz keyboard, plug in its USB receiver and select “Add Keyboard.” Pair and connect Bluetooth devices, including Bluetooth keyboards, in Windows first, then select “Add Bluetooth.”
 3. **Set your preferences.** Choose the tray style, display priority, and notification threshold. Enable “Start with Windows” in settings if desired. After moving or renaming the executable, enable it again to update the same startup entry to the current path; disabling it removes that entry.
 
 When upgrading from an older version, exit it from its tray menu before running the new version. “Import legacy settings” can read your previous preferences. Device bindings and aliases are restored only when device identity can be matched unambiguously; add unmatched devices again. Enabling startup in the new version removes the legacy startup entry only after successfully writing the new one. This also works if the old executable has already been deleted; there is no need to run it again.
