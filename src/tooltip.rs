@@ -110,6 +110,7 @@ const LABEL_OFFSET: i32 = INSET_X + GLYPH_SIZE + 10;
 const VALUE_GAP: i32 = 10;
 const CORNER_DIAMETER: i32 = 20;
 const TEXT_SIZE: i32 = 13;
+const BATTERY_TEXT_SIZE: i32 = 15;
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
 }
@@ -281,7 +282,7 @@ fn unpack(value: u64) -> (i32, i32) {
 }
 struct Font(HFONT);
 impl Font {
-    fn new(size: i32, weight: u32, dpi: u32) -> Self {
+    fn new(family: &str, size: i32, weight: u32, dpi: u32) -> Self {
         Self(unsafe {
             CreateFontW(
                 -px(size, dpi),
@@ -297,7 +298,7 @@ impl Font {
                 CLIP_DEFAULT_PRECIS as u32,
                 CLEARTYPE_QUALITY as u32,
                 DEFAULT_PITCH as u32,
-                wide("Segoe UI").as_ptr(),
+                wide(family).as_ptr(),
             )
         })
     }
@@ -306,6 +307,32 @@ impl Drop for Font {
     fn drop(&mut self) {
         unsafe {
             DeleteObject(self.0);
+        }
+    }
+}
+
+struct TooltipFonts {
+    name: Font,
+    status: Font,
+    battery: Font,
+}
+impl TooltipFonts {
+    fn new(dpi: u32) -> Self {
+        Self {
+            name: Font::new("Segoe UI", TEXT_SIZE, FW_NORMAL, dpi),
+            status: Font::new("Segoe UI", TEXT_SIZE, FW_SEMIBOLD, dpi),
+            battery: Font::new("Consolas", BATTERY_TEXT_SIZE, FW_BOLD, dpi),
+        }
+    }
+    fn value_width(&self, dc: HDC, en: bool) -> i32 {
+        unsafe {
+            let old_font = SelectObject(dc, self.status.0);
+            let status =
+                text_width(dc, if en { "Offline" } else { "离线" }).max(text_width(dc, "—"));
+            SelectObject(dc, self.battery.0);
+            let battery = text_width(dc, "100%").max(text_width(dc, "88%"));
+            SelectObject(dc, old_font);
+            status.max(battery)
         }
     }
 }
@@ -319,23 +346,14 @@ fn text_width(dc: HDC, text: &str) -> i32 {
     extent.cx
 }
 
-fn value_width(dc: HDC, en: bool) -> i32 {
-    ["100%", "88%", if en { "Offline" } else { "离线" }, "—"]
-        .into_iter()
-        .map(|value| text_width(dc, value))
-        .max()
-        .unwrap_or_default()
-}
-
 fn preferred_width(hwnd: HWND, p: &Popup) -> i32 {
     unsafe {
         let dc = GetDC(hwnd);
         if dc.is_null() {
             return px(234, p.dpi);
         }
-        let name_font = Font::new(TEXT_SIZE, FW_NORMAL, p.dpi);
-        let value_font = Font::new(TEXT_SIZE, FW_SEMIBOLD, p.dpi);
-        let old_font = SelectObject(dc, name_font.0);
+        let fonts = TooltipFonts::new(p.dpi);
+        let old_font = SelectObject(dc, fonts.name.0);
         let name = p
             .content
             .rows
@@ -344,8 +362,7 @@ fn preferred_width(hwnd: HWND, p: &Popup) -> i32 {
             .map(|row| text_width(dc, &row.name))
             .max()
             .unwrap_or_default();
-        SelectObject(dc, value_font.0);
-        let value = value_width(dc, p.content.en);
+        let value = fonts.value_width(dc, p.content.en);
         SelectObject(dc, old_font);
         ReleaseDC(hwnd, dc);
         (px(LABEL_OFFSET, p.dpi) + name + px(VALUE_GAP, p.dpi) + value + px(INSET_X, p.dpi))
@@ -510,11 +527,9 @@ fn paint(hwnd: HWND, dc: HDC) {
         );
         SelectObject(dc, GetStockObject(NULL_BRUSH));
         SetBkMode(dc, TRANSPARENT as i32);
-        let name_font = Font::new(TEXT_SIZE, FW_NORMAL, p.dpi);
-        let value_font = Font::new(TEXT_SIZE, FW_SEMIBOLD, p.dpi);
-        let old_font = SelectObject(dc, value_font.0);
-        let reserve = value_width(dc, p.content.en);
-        SelectObject(dc, name_font.0);
+        let fonts = TooltipFonts::new(p.dpi);
+        let old_font = SelectObject(dc, fonts.name.0);
+        let reserve = fonts.value_width(dc, p.content.en);
         let inset = px(INSET_X, p.dpi);
         let label_left = px(LABEL_OFFSET, p.dpi);
         let right = client.right - inset;
@@ -562,6 +577,11 @@ fn paint(hwnd: HWND, dc: HDC) {
                 right,
                 bottom: top + row_height,
             };
+            let value_font = if row.charge.is_some() {
+                &fonts.battery
+            } else {
+                &fonts.status
+            };
             SelectObject(dc, value_font.0);
             draw_text(
                 dc,
@@ -570,7 +590,7 @@ fn paint(hwnd: HWND, dc: HDC) {
                 row.tone.palette(dark).0,
                 DT_VCENTER | DT_SINGLELINE,
             );
-            SelectObject(dc, name_font.0);
+            SelectObject(dc, fonts.name.0);
         }
         if p.content.rows.len() > p.count {
             let remaining = p.content.rows.len() - p.count;

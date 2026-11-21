@@ -171,7 +171,7 @@ impl BatteryTone {
     }
     pub fn palette(self, dark: bool) -> (u32, u32, u32) {
         match (self, dark) {
-            (Self::Normal, false) => (0x08775e, 0x169976, 0x25ae88),
+            (Self::Normal, false) => (0x005b21, 0x169976, 0x25ae88),
             (Self::Normal, true) => (0x65d7b1, 0x36ab8b, 0x5bc9a5),
             (Self::Charging, false) => (0x087088, 0x1193ac, 0x27aac1),
             (Self::Charging, true) => (0x6dd2e3, 0x39aac1, 0x66c9d9),
@@ -233,8 +233,9 @@ mod material_tests {
                 let (ink, _, _) = tone.palette(dark);
                 let a = luminance(ink);
                 let b = luminance(bg);
+                let minimum = if !dark && tone == Normal { 7.0 } else { 4.5 };
                 assert!(
-                    (a.max(b) + 0.05) / (a.min(b) + 0.05) >= 4.5,
+                    (a.max(b) + 0.05) / (a.min(b) + 0.05) >= minimum,
                     "{dark}: {tone:?}"
                 );
             }
