@@ -67,7 +67,8 @@
 | 雷蛇无线鼠标 | 部分 HyperSpeed 无线鼠标，包含 Basilisk、Viper、DeathAdder 等系列中的受支持型号。 |
 | 华硕 ROG 无线外设 | 支持部分无线鼠标、键盘及 Omni 接收器组合。部分 Omni 接收器可能无法读取配对列表，见 [Issue #3](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues/3)。 |
 | 其他无线鼠标和键盘 | 支持部分迈从、狼蛛、KYSONA、Weikav / NUT75 及 ARDOR GAMING 设备，视型号和连接方式而定。 |
-| 无线耳机 | 支持部分罗技、雷蛇、华硕 ROG 和迈从型号。 |
+| 无线耳机 | 支持部分罗技、雷蛇、华硕 ROG、迈从及 HyperX 型号。HyperX 包括指定 USB 接收器上的 Cloud II / II Core、III / III S、Alpha / Alpha 2、Flight / Flight S、Stinger Core 与 Core Wireless。 |
+| HyperX 无线鼠标 | 支持指定接收器上的 Pulsefire Haste、Haste 2 / Core / Mini、Dart；初代 Haste 也支持 USB 数据线模式。 |
 | 蓝牙鼠标、键盘、耳机等 | 已在 Windows 配对并连接，且向系统提供可读取电量的设备。 |
 
 **同一品牌不代表所有型号都支持；同一设备切换连接方式，能否读取电量也可能不同。** 例如，键盘的 2.4G 模式与蓝牙模式需要分别确认兼容性。充电状态和电量精度取决于设备提供的信息，部分设备只报告电量，不报告是否正在充电。
@@ -123,3 +124,55 @@
 遇到问题时，请在 [Issues](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues) 中说明软件版本、Windows 版本、设备完整型号、连接方式和复现步骤。附上截图会更容易定位；公开截图前请遮盖个人信息。
 
 本项目采用自定义许可证，仅供个人学习和非商业使用；商业用途需事先获得著作权人的明确书面授权。完整条款见 [LICENSE](LICENSE)。
+
+## Third-party notices
+
+The following notices apply to the Cloud Flight voltage thresholds and Stinger/Core calibration data used by the HyperX adapter.
+
+### Cloud Flight calibration
+
+MIT License
+
+Copyright (c) 2023 Lennard Kittner
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+### Stinger / Core calibration
+
+MIT License
+
+Copyright (c) 2026 David Santana
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

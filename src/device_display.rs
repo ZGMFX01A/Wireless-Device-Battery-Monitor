@@ -17,6 +17,16 @@ pub enum DeviceIcon {
     Receiver24g,
 }
 
+pub fn is_hyperx(device: &Descriptor, source: Option<battery_protocol::Source>) -> bool {
+    source == Some(battery_protocol::Source::HyperX)
+        || device.identity.as_ref().is_some_and(|identity| {
+            identity.model_source == Some(battery_protocol::ModelSource::CatalogRule)
+                && identity.model_key.as_deref().is_some_and(|key| {
+                    key.starts_with("legacy:03f0:") || key.starts_with("legacy:0951:")
+                })
+        })
+}
+
 pub fn device_icon(device: &Descriptor) -> Option<DeviceIcon> {
     let Some(identity) = &device.identity else {
         return Some(match device.kind {
@@ -112,6 +122,27 @@ pub fn icon_accessible_name(locale: Locale, icon: DeviceIcon) -> &'static str {
 mod tests {
     use super::*;
     use battery_protocol::{DeviceIdentity, ModelSource};
+
+    #[test]
+    fn hyperx_badge_uses_confirmed_model_before_first_sample_not_vendor_alone() {
+        let mut device = descriptor(
+            DeviceCategory::Headset,
+            ConnectionKind::Rf24,
+            BatteryCapability::Present,
+            Some("legacy:03f0:06be"),
+        );
+        assert!(is_hyperx(&device, None));
+        device.id = "hid:03f0:unknown".into();
+        device.identity.as_mut().unwrap().model_key = None;
+        assert!(!is_hyperx(&device, None));
+        assert!(is_hyperx(&device, Some(battery_protocol::Source::HyperX)));
+        let identity = device.identity.as_mut().unwrap();
+        identity.model_key = Some("legacy:0951:1718".into());
+        identity.model_source = Some(ModelSource::ProductString);
+        assert!(!is_hyperx(&device, None));
+        device.identity.as_mut().unwrap().model_source = Some(ModelSource::CatalogRule);
+        assert!(is_hyperx(&device, None));
+    }
 
     fn descriptor(
         category: DeviceCategory,

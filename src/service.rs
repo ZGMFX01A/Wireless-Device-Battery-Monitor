@@ -126,6 +126,7 @@ fn retains_last_peripheral_sample(source: Source) -> bool {
             | Source::AulaRlw
             | Source::AulaBytech
             | Source::MchoseAudio
+            | Source::HyperX
     )
 }
 impl Slot {
@@ -1625,31 +1626,44 @@ mod tests {
 
     #[test]
     fn audio_is_monitored_and_retains_its_sample_while_asleep() {
-        let mut state = State::demo();
-        let device = Descriptor {
-            id: "hid:3837:6011:Audio:test".into(),
-            name: "MCHOSE V9 PRO 2".into(),
-            kind: Kind::Audio,
-            legacy_ids: vec![],
-            identity: None,
-            generic_name: None,
-        };
-        assert!(state.prefs.bound(&device));
-        let encoded = serde_json::to_vec(&device).unwrap();
-        assert_eq!(
-            serde_json::from_slice::<Descriptor>(&encoded).unwrap(),
-            device
-        );
-        let mut slot = Slot::new(device, 0);
-        let reading = Reading::new(73, Charge::Charging, Source::MchoseAudio).unwrap();
-        slot.apply(Ok(reading), 0, false);
-        state.rows = vec![slot.row.clone()];
-        assert_eq!(state.selected().unwrap().battery, Some(reading));
-        slot.apply(Err("MCHOSE audio device is asleep".into()), 1000, false);
-        assert_eq!(slot.row.battery, Some(reading));
-        assert!(slot.row.held);
-        state.rows = vec![slot.row];
-        assert!(state.selected().is_none());
+        for (id, name, source) in [
+            (
+                "hid:3837:6011:Audio:test",
+                "MCHOSE V9 PRO 2",
+                Source::MchoseAudio,
+            ),
+            (
+                "hid:03f0:06be:Audio:test",
+                "HyperX Cloud III S Wireless",
+                Source::HyperX,
+            ),
+        ] {
+            let mut state = State::demo();
+            let device = Descriptor {
+                id: id.into(),
+                name: name.into(),
+                kind: Kind::Audio,
+                legacy_ids: vec![],
+                identity: None,
+                generic_name: None,
+            };
+            assert!(state.prefs.bound(&device));
+            let encoded = serde_json::to_vec(&device).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Descriptor>(&encoded).unwrap(),
+                device
+            );
+            let mut slot = Slot::new(device, 0);
+            let reading = Reading::new(73, Charge::Charging, source).unwrap();
+            slot.apply(Ok(reading), 0, false);
+            state.rows = vec![slot.row.clone()];
+            assert_eq!(state.selected().unwrap().battery, Some(reading));
+            slot.apply(Err("audio device is asleep".into()), 1000, false);
+            assert_eq!(slot.row.battery, Some(reading));
+            assert!(slot.row.held);
+            state.rows = vec![slot.row];
+            assert!(state.selected().is_none());
+        }
     }
     #[test]
     fn sleeping_keyboard_switches_tray_to_remaining_mouse() {

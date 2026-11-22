@@ -247,6 +247,8 @@ impl Panel {
                 )
             } else if src == Some(Source::Rog) || id.starts_with("hid:0b05:") {
                 ("ROG", 0xff4d67, if k.dark { 0xffb0b8 } else { 0x9f3c4a })
+            } else if crate::device_display::is_hyperx(d, src) {
+                ("HyperX", 0xff4d67, if k.dark { 0xffb0b8 } else { 0x9f3c4a })
             } else if d.kind == Kind::Mouse && id.starts_with("hid:1d57:fa60:") {
                 ("Ardor", 0xf59e0b, if k.dark { 0xfcd34d } else { 0x92600a })
             } else if d.kind == Kind::Bluetooth {
