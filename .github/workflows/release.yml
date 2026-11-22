@@ -150,7 +150,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.build.outputs.tag }}
         run: |
-          $subject = git for-each-ref --format='%(contents:subject)' "refs/tags/$env:RELEASE_TAG"
-          if ($LASTEXITCODE -ne 0) { throw 'Unable to read release tag' }
-          $stage = $subject -ceq 'Stage release assets'
-          ./scripts/Publish-Release.ps1 -Tag $env:RELEASE_TAG -Repository $env:GITHUB_REPOSITORY -Dist dist -KeepDraft:$stage
+          ./scripts/Publish-Release.ps1 -Tag $env:RELEASE_TAG -Repository $env:GITHUB_REPOSITORY -Dist dist
