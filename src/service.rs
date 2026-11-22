@@ -119,6 +119,12 @@ fn retains_last_peripheral_sample(source: Source) -> bool {
             | Source::KysonaBluetooth
             | Source::MchoseQhw
             | Source::MchoseMouse
+            | Source::AulaLegacy
+            | Source::AulaYb
+            | Source::AulaVision
+            | Source::AulaYxt
+            | Source::AulaXxwd
+            | Source::AulaBytechMagnetic
             | Source::AulaHfd
             | Source::AulaSparkLink
             | Source::AulaHx
@@ -1542,6 +1548,41 @@ mod tests {
         assert_eq!(mouse.row.battery, Some(read(0)));
         mouse.apply(Err(KYSONA_SLOT_UNPAIRED.into()), 5000, false);
         assert!(mouse.row.battery.is_none() && !mouse.row.held);
+    }
+
+    #[test]
+    fn aula_protocols_preserve_offline_samples_and_resume_with_fresh_zero() {
+        for source in [
+            Source::AulaLegacy,
+            Source::AulaYb,
+            Source::AulaVision,
+            Source::AulaYxt,
+            Source::AulaXxwd,
+            Source::AulaBytechMagnetic,
+            Source::AulaHfd,
+            Source::AulaBytech,
+            Source::AulaSparkLink,
+            Source::AulaHx,
+            Source::AulaJm,
+            Source::AulaRlw,
+        ] {
+            let mut state = State::demo();
+            let mut slot = Slot::new(state.rows[0].device.clone(), 0);
+            let read = |level| Reading::new(level, Charge::Unknown, source).unwrap();
+            slot.apply(Ok(read(73)), 100, false);
+            let sampled = slot.row.sampled;
+            slot.apply(Err("device offline".into()), 1000, false);
+            assert_eq!(slot.row.battery, Some(read(73)));
+            assert_eq!(slot.row.sampled, sampled);
+            assert!(slot.row.held);
+            state.rows = vec![slot.row.clone()];
+            assert!(state.selected().is_none());
+            slot.apply(Ok(read(0)), 2000, false);
+            assert_eq!(slot.row.battery, Some(read(0)));
+            assert!(!slot.row.held && slot.row.error.is_none());
+            state.rows = vec![slot.row];
+            assert_eq!(state.selected().unwrap().battery, Some(read(0)));
+        }
     }
 
     #[test]
