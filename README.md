@@ -7,7 +7,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
 [![Latest Release](https://img.shields.io/github/v/release/ZGMFX01A/Wireless-Device-Battery-Monitor?display_name=tag&sort=semver)](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/releases)
 [![Downloads](https://img.shields.io/github/downloads/ZGMFX01A/Wireless-Device-Battery-Monitor/total?label=Downloads&logo=github)](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/releases)
-[![License: Personal / Non-Commercial](https://img.shields.io/badge/License-Personal%20%2F%20Non--Commercial-orange)](LICENSE)
+[![License: Wireless Device Battery Monitor License](https://img.shields.io/badge/License-Wireless%20Device%20Battery%20Monitor%20License-orange)](LICENSE)
 
 
 **把鼠标、键盘和蓝牙设备的电量，放在任务栏的一角。**
