@@ -60,7 +60,9 @@ impl Content {
                         value: if !online {
                             label(locale, "tray.offline").into()
                         } else {
-                            battery.map_or_else(|| "—".into(), |b| format!("{}%", b.display))
+                            battery
+                                .and_then(|b| b.percentage())
+                                .map_or_else(|| "—".into(), |p| format!("{p}%"))
                         },
                         charge: battery.map(|b| b.charge),
                         tone: BatteryTone::for_sample(
@@ -106,6 +108,24 @@ impl Content {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+#[cfg(test)]
+#[test]
+fn charging_without_percentage_is_online_without_a_zero_or_tray_selection() {
+    use battery_protocol::{Reading, Source, catalog::atk::Provider};
+    let mut state = State::demo();
+    state.rows.truncate(1);
+    let reading = Reading::charging_without_percentage(Source::Atk(Provider::Hfd));
+    state.rows[0].battery = Some(reading);
+    state.rows[0].error = None;
+    let content = Content::of(&state);
+    assert_eq!(content.rows[0].value, "—");
+    assert_eq!(content.rows[0].charge, Some(Charge::Charging));
+    assert!(state.selected().is_none());
+    state.rows[0].battery = Reading::new(0, Charge::Discharging, Source::Atk(Provider::Hfd));
+    assert_eq!(Content::of(&state).rows[0].value, "0%");
+    assert!(state.selected().is_some());
 }
 
 const ENTER: u32 = WM_APP + 1;
@@ -505,6 +525,25 @@ fn draw_device_icon(dc: HDC, icon: DeviceIcon, left: i32, top: i32, size: i32) {
                 stroke(&[(1, 8), (1, 4), (3, 1), (7, 0), (11, 1), (13, 4), (13, 8)]);
                 RoundRect(dc, x(0), y(7), x(4), y(13), x(2) - left, y(2) - top);
                 RoundRect(dc, x(10), y(7), x(14), y(13), x(2) - left, y(2) - top);
+            }
+            DeviceIcon::Gamepad => {
+                stroke(&[
+                    (1, 12),
+                    (0, 10),
+                    (2, 3),
+                    (5, 2),
+                    (9, 2),
+                    (12, 3),
+                    (14, 10),
+                    (13, 12),
+                    (10, 9),
+                    (4, 9),
+                    (1, 12),
+                ]);
+                stroke(&[(3, 5), (3, 8)]);
+                stroke(&[(2, 6), (5, 6)]);
+                stroke(&[(10, 5), (11, 5)]);
+                stroke(&[(11, 7), (12, 7)]);
             }
             DeviceIcon::Receiver24g => {
                 RoundRect(dc, x(1), y(1), x(13), y(6), x(2) - left, y(2) - top);

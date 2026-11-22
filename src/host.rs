@@ -418,7 +418,8 @@ impl TrayView {
                     "{}: {}",
                     s.prefs.name(&r.device),
                     r.battery
-                        .map_or_else(|| "—".to_owned(), |b| format!("{}%", b.display))
+                        .and_then(|b| b.percentage())
+                        .map_or_else(|| "—".to_owned(), |p| format!("{p}%"))
                 )
             })
             .collect();

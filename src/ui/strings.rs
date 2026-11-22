@@ -125,6 +125,7 @@ pub fn label(locale: Locale, key: &str) -> &'static str {
             "Connecting and reading battery. You can close this dialog.",
             "Подключение и чтение заряда. Это окно можно закрыть.",
         ),
+        "device.gamepad" => ("手柄", "Gamepad", "Геймпад"),
         "display.device.mouse" => ("鼠标", "Mouse", "Мышь"),
         "display.device.keyboard" => ("键盘", "Keyboard", "Клавиатура"),
         "display.device.headset" => ("耳机", "Headset", "Гарнитура"),

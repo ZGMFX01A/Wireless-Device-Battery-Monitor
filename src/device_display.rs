@@ -13,6 +13,7 @@ pub enum DeviceIcon {
     Mouse,
     Keyboard,
     Headset,
+    Gamepad,
     Bluetooth,
     Receiver24g,
 }
@@ -34,6 +35,7 @@ pub fn device_icon(device: &Descriptor) -> Option<DeviceIcon> {
             Kind::Keyboard => DeviceIcon::Keyboard,
             Kind::Bluetooth => DeviceIcon::Bluetooth,
             Kind::Audio => DeviceIcon::Headset,
+            Kind::Gamepad => DeviceIcon::Gamepad,
         });
     };
     if identity.battery == BatteryCapability::Absent {
@@ -58,6 +60,7 @@ fn category_icon(category: DeviceCategory) -> Option<DeviceIcon> {
         DeviceCategory::Mouse => Some(DeviceIcon::Mouse),
         DeviceCategory::Keyboard => Some(DeviceIcon::Keyboard),
         DeviceCategory::Headset => Some(DeviceIcon::Headset),
+        DeviceCategory::Gamepad => Some(DeviceIcon::Gamepad),
         DeviceCategory::Unknown => None,
     }
 }
@@ -98,7 +101,8 @@ fn receiver_name(locale: Locale, brand: Option<&str>, channel: Option<DeviceCate
     let channel = match channel {
         Some(DeviceCategory::Mouse) => Some(label(locale, "display.channel.mouse")),
         Some(DeviceCategory::Keyboard) => Some(label(locale, "display.channel.keyboard")),
-        Some(DeviceCategory::Headset | DeviceCategory::Unknown) | None => None,
+        Some(DeviceCategory::Headset | DeviceCategory::Gamepad | DeviceCategory::Unknown)
+        | None => None,
     };
     if let Some(channel) = channel {
         name.push_str(" (");
@@ -113,6 +117,7 @@ pub fn icon_accessible_name(locale: Locale, icon: DeviceIcon) -> &'static str {
         DeviceIcon::Mouse => label(locale, "display.device.mouse"),
         DeviceIcon::Keyboard => label(locale, "display.device.keyboard"),
         DeviceIcon::Headset => label(locale, "display.device.headset"),
+        DeviceIcon::Gamepad => label(locale, "device.gamepad"),
         DeviceIcon::Bluetooth => label(locale, "display.device.bluetooth"),
         DeviceIcon::Receiver24g => label(locale, "display.device.receiver24g"),
     }

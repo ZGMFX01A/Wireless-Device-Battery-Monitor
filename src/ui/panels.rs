@@ -212,7 +212,7 @@ impl Panel {
         rows.sort_by_key(|r| match r.device.kind {
             Kind::Mouse => 0,
             Kind::Keyboard => 1,
-            Kind::Bluetooth | Kind::Audio => 2,
+            Kind::Bluetooth | Kind::Audio | Kind::Gamepad => 2,
         });
         for r in rows {
             list = list.child(self.card(r, k, cx))
@@ -225,7 +225,7 @@ impl Panel {
         let name = self.state.prefs.name(d);
         let b = r.battery;
         let online = b.is_some() && r.error.is_none();
-        let show_percent = online || (r.held && b.is_some());
+        let show_percent = (online || r.held) && b.is_some_and(|b| b.percentage_known);
         let charge =
             online && b.is_some_and(|x| matches!(x.charge, Charge::Charging | Charge::Full));
         let pct = b.map_or(0, |x| x.display);
@@ -261,6 +261,8 @@ impl Panel {
                 (
                     if d.kind == Kind::Mouse {
                         self.t("device.mouse_short")
+                    } else if d.kind == Kind::Gamepad {
+                        self.t("device.gamepad")
                     } else if d.kind == Kind::Audio {
                         self.t("device.audio_short")
                     } else {
@@ -382,6 +384,7 @@ impl Panel {
             Kind::Keyboard => "device.keyboard",
             Kind::Bluetooth => "device.bluetooth",
             Kind::Audio => "device.audio",
+            Kind::Gamepad => "device.gamepad",
         });
         col()
             .id(SharedString::from(format!("card-{id}")))

@@ -123,7 +123,7 @@ impl Prefs {
     }
     pub fn bound(&self, d: &Descriptor) -> bool {
         match d.kind {
-            Kind::Mouse | Kind::Audio => true,
+            Kind::Mouse | Kind::Audio | Kind::Gamepad => true,
             Kind::Keyboard => {
                 self.keyboard.as_ref() == Some(&d.id)
                     || self.keyboard_endpoint() == Some(d.id.as_str())
@@ -669,19 +669,23 @@ impl State {
     pub fn selected(&self) -> Option<&Row> {
         self.rows
             .iter()
-            .filter(|r| self.prefs.bound(&r.device) && r.battery.is_some() && r.error.is_none())
+            .filter(|r| {
+                self.prefs.bound(&r.device)
+                    && r.battery.is_some_and(|b| b.percentage_known)
+                    && r.error.is_none()
+            })
             .min_by_key(|r| {
                 let rank = match self.prefs.priority {
                     Priority::Lowest => 0,
                     Priority::Mouse => match r.device.kind {
                         Kind::Mouse => 0,
                         Kind::Keyboard => 1,
-                        Kind::Bluetooth | Kind::Audio => 2,
+                        Kind::Bluetooth | Kind::Audio | Kind::Gamepad => 2,
                     },
                     Priority::Keyboard => match r.device.kind {
                         Kind::Keyboard => 0,
                         Kind::Mouse => 1,
-                        Kind::Bluetooth | Kind::Audio => 2,
+                        Kind::Bluetooth | Kind::Audio | Kind::Gamepad => 2,
                     },
                 };
                 (rank, r.battery.unwrap().display)

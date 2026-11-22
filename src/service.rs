@@ -114,7 +114,8 @@ struct Slot {
 fn retains_last_peripheral_sample(source: Source) -> bool {
     matches!(
         source,
-        Source::Kysona24g
+        Source::Atk(_)
+            | Source::Kysona24g
             | Source::ArdorFury
             | Source::KysonaBluetooth
             | Source::MchoseQhw
@@ -1553,6 +1554,9 @@ mod tests {
     #[test]
     fn aula_protocols_preserve_offline_samples_and_resume_with_fresh_zero() {
         for source in [
+            Source::Atk(battery_protocol::catalog::atk::Provider::BitMouse),
+            Source::Atk(battery_protocol::catalog::atk::Provider::Bolutek),
+            Source::Atk(battery_protocol::catalog::atk::Provider::KeyLinker),
             Source::AulaLegacy,
             Source::AulaYb,
             Source::AulaVision,
