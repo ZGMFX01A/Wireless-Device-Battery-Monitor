@@ -123,6 +123,8 @@
 
 遇到问题时，请在 [Issues](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues) 中说明软件版本、Windows 版本、设备完整型号、连接方式和复现步骤。附上截图会更容易定位；公开截图前请遮盖个人信息。
 
+申请设备适配，或反馈设备识别、电量、充电及连接状态问题，请使用 [中文设备适配表单](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues/new?template=device-support.zh-CN.yml)（[English](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues/new?template=device-support.en.yml) / [Русский](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues/new?template=device-support.ru.yml)），提供**品牌与完整型号**、**官方驱动下载地址或官方网页驱动地址**，并按 [设备信息采集说明](docs/device-support.md) 附上硬件识别信息、官方驱动表现和已测试的休眠/充电/连接切换结果。
+
 本项目采用自定义许可证，仅供个人学习和非商业使用；商业用途需事先获得著作权人的明确书面授权。完整条款见 [LICENSE](LICENSE)。
 
 

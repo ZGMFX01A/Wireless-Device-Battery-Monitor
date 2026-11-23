@@ -1,0 +1,150 @@
+name: 设备适配（简体中文）
+description: 申请适配具体设备，或反馈设备识别、电量、充电及连接状态问题。
+title: "[设备适配] 品牌 + 完整型号 + 连接方式"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请提供**完整型号（包含 Pro / Max / SE、代数及版本等后缀）**，并附上**官方驱动下载地址或官方网页驱动地址**。
+        同一系列、外观相同或 VID 相同，不代表使用相同的电量协议。请按实际连接方式分别描述结果。
+
+        详细步骤见 [设备信息采集说明](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/blob/main/docs/device-support.md)。
+
+  - type: input
+    id: device-model
+    attributes:
+      label: 品牌与完整型号
+      description: 请按包装、铭牌或官方产品页填写；不要只写品牌、系列名或“某某鼠标”。
+      placeholder: 品牌 + 完整型号 + 代数/版本；如有硬件修订也请注明
+    validations:
+      required: true
+
+  - type: textarea
+    id: official-driver
+    attributes:
+      label: 官方驱动下载或网页驱动地址
+      description: 至少提供一个与该型号对应的官方地址。下载需先选型号时，请注明选项；网页驱动请给出能打开设备管理界面的地址。
+      placeholder: |
+        官方驱动下载地址：
+        官方网页驱动地址：
+        页面中需要选择的型号/版本（如有）：
+    validations:
+      required: true
+
+  - type: dropdown
+    id: connection-mode
+    attributes:
+      label: 出现问题的连接方式
+      multiple: true
+      options:
+        - 2.4G USB 接收器
+        - 蓝牙
+        - USB 数据线
+        - 其他（请在问题描述中说明）
+    validations:
+      required: true
+
+  - type: input
+    id: receiver-model
+    attributes:
+      label: 接收器型号与配对情况
+      description: 使用接收器时请注明原装、替换、共享或高回报率接收器，以及配对了哪些设备；纯蓝牙或数据线连接可留空。
+      placeholder: 接收器完整型号、1K/4K/8K 等模式，以及配对设备
+
+  - type: textarea
+    id: versions
+    attributes:
+      label: 软件、系统与固件版本
+      description: 填写实际版本；查不到的固件或驱动版本请明确写“未知”，不要猜测。
+      placeholder: |
+        本软件版本：
+        Windows 版本与系统内部版本号（运行 winver 查看）：
+        设备固件版本：
+        接收器固件版本（不适用请注明）：
+        官方驱动名称与版本（网页驱动请注明）：
+    validations:
+      required: true
+
+  - type: textarea
+    id: symptoms
+    attributes:
+      label: 当前表现与复现步骤
+      description: 说明是完全未发现、名称错误、电量不准、不更新，还是充电/在线状态异常；写明实际结果、预期结果和操作顺序。
+      placeholder: |
+        复现步骤：
+        实际结果：
+        预期结果：
+    validations:
+      required: true
+
+  - type: textarea
+    id: official-driver-behavior
+    attributes:
+      label: 官方驱动中的表现
+      description: 官方驱动是否识别设备、能否显示电量百分比与充电状态？记录同一时间的本软件/官方读数。还请说明官方驱动运行、退出时的结果；未测试请注明。
+      placeholder: |
+        官方驱动识别结果、电量与充电状态：
+        同一时间本软件的读数：
+        官方驱动运行时：
+        官方驱动退出后（网页驱动需关闭相关标签页）：
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ### 采集设备识别信息
+
+        连接并唤醒目标设备，在 **Windows PowerShell** 中完整运行下面的命令。无需填写 VID/PID；命令只读取当前存在的 USB、HID 和常见蓝牙设备节点，不发送电量查询或配置命令。
+
+        ```powershell
+        Get-CimInstance -ClassName Win32_PnPEntity -Filter 'Present = True' -ErrorAction Stop |
+          Where-Object { $_.PNPDeviceID -match '^(USB|HID|BTHENUM|BTHLEDEVICE|BTHLE)\\' } |
+          Sort-Object PNPClass, Name, PNPDeviceID |
+          Format-List Name, Manufacturer, PNPClass, Status, ConfigManagerErrorCode, PNPDeviceID,
+            @{Name='HardwareID'; Expression={$_.HardwareID -join "`n"}},
+            @{Name='CompatibleID'; Expression={$_.CompatibleID -join "`n"}}
+        ```
+
+        USB / 2.4G 设备请在**插入接收器或数据线时、拔出后**各运行一次，对比新增或消失的条目，贴出目标设备的**全部相关条目**，包括同 VID/PID 下不同 `MI_XX` / `COLXX` 的条目。
+        仅关闭无线设备通常不会让仍插着的接收器条目消失。蓝牙设备断开后也可能保留配对节点，请注明连接状态，不要仅靠条目是否存在判断在线。
+
+        公开前可遮盖 `PNPDeviceID` 实例路径末段的序列号或蓝牙地址；请保留硬件标识中的 VID、PID、REV、MI、COL、UP、U 等字段。
+
+  - type: textarea
+    id: device-identification
+    attributes:
+      label: 设备识别命令输出
+      description: 粘贴上述命令中目标设备的全部相关条目，不要只截取第一条 HID。若命令报错或没有结果，请原样说明，并附设备管理器中的硬件 ID。
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: state-changes
+    attributes:
+      label: 休眠、充电与连接切换
+      description: 按已实际测试的情况填写，未测试请注明。留意是否存在休眠后不恢复、关机后仍在线、充电误判、电量停滞或切换连接方式后失效。
+      placeholder: |
+        唤醒后刷新：
+        休眠/关机后：
+        插入/拔出充电线后：
+        切换 2.4G / 蓝牙 / USB 后：
+        插拔接收器后：
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图与补充信息
+      description: 可附本软件、官方驱动的同一时间截图，以及其他异常或错误原文。截图请标明连接方式。
+
+  - type: markdown
+    attributes:
+      value: |
+        ### 适配中可能遇到的问题
+
+        - 同型号不同固件、接收器或连接方式可能使用不同协议；一个模式可用不代表其他模式也可用。
+        - 接收器仍连接不代表外设在线；休眠、关机或共享接收器可能使在线状态和设备归属难以确认。
+        - 厂商驱动或网页驱动可能占用通信接口；请如实记录其运行与退出时的差异。
+        - 部分设备只上报分档电量，不提供充电状态，或在充电/休眠时返回旧值。
+        - 此命令提供设备身份与接口线索，**不包含完整 HID 报告描述符或电量通信协议**；后续可能需要补充官方驱动行为、协议资料或进行实机验证，提交信息不代表已完成适配。

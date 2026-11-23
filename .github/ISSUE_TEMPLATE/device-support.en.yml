@@ -1,0 +1,150 @@
+name: Device support (English)
+description: Request support for a specific device or report identification, battery, charging, and connection problems.
+title: "[Device support] Brand + exact model + connection mode"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Include the **exact model, including suffixes such as Pro / Max / SE, generation, and variant**, and an **official driver download or official web driver URL**.
+        Devices in the same series, with the same appearance, or sharing a VID do not necessarily use the same battery protocol. Describe results for each connection mode separately.
+
+        See the [device information collection guide](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/blob/main/docs/device-support.md#english).
+
+  - type: input
+    id: device-model
+    attributes:
+      label: Brand and exact device model
+      description: Use the model printed on the packaging, label, or official product page; do not provide only a brand, family name, or generic description.
+      placeholder: Brand + exact model + generation/variant; include the hardware revision if known
+    validations:
+      required: true
+
+  - type: textarea
+    id: official-driver
+    attributes:
+      label: Official driver download or web driver URL
+      description: Provide at least one official URL for this model. If you must select a model/version on the download page, specify the selection. For web drivers, link to the device management page.
+      placeholder: |
+        Official driver download URL:
+        Official web driver URL:
+        Model/version to select on the page, if applicable:
+    validations:
+      required: true
+
+  - type: dropdown
+    id: connection-mode
+    attributes:
+      label: Affected connection modes
+      multiple: true
+      options:
+        - 2.4 GHz USB receiver
+        - Bluetooth
+        - USB cable
+        - Other (describe in the symptoms field)
+    validations:
+      required: true
+
+  - type: input
+    id: receiver-model
+    attributes:
+      label: Receiver model and paired devices
+      description: Specify whether the receiver is original, replacement, shared, or a high-polling-rate version, and list paired devices. Leave blank for Bluetooth-only or cable-only connections.
+      placeholder: Exact receiver model, 1K/4K/8K or other mode, and paired devices
+
+  - type: textarea
+    id: versions
+    attributes:
+      label: App, Windows, and firmware versions
+      description: Provide actual versions. Write "unknown" if you cannot find a firmware or driver version; do not guess.
+      placeholder: |
+        App version:
+        Windows version and OS build (run winver):
+        Device firmware version:
+        Receiver firmware version (mark if not applicable):
+        Official utility name and version (specify if it is a web driver):
+    validations:
+      required: true
+
+  - type: textarea
+    id: symptoms
+    attributes:
+      label: Current behavior and reproduction steps
+      description: Describe missing devices, incorrect names or battery readings, stale readings, or incorrect charging/connection status. Include the action sequence, actual result, and expected result.
+      placeholder: |
+        Steps to reproduce:
+        Actual result:
+        Expected result:
+    validations:
+      required: true
+
+  - type: textarea
+    id: official-driver-behavior
+    attributes:
+      label: Behavior in the official driver
+      description: Does the official driver identify the device and show a battery percentage and charging state? Compare both apps at the same time. Describe results with the official driver running and exited; mark untested cases.
+      placeholder: |
+        Official driver identification, battery level, and charging state:
+        This app's reading at the same time:
+        With the official driver running:
+        After exiting the official driver (close its browser tabs for web drivers):
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ### Collect device identification
+
+        Connect and wake the device, then run the entire command below in **Windows PowerShell**. No VID/PID is required. The command only reads currently present USB, HID, and common Bluetooth device nodes; it does not send battery queries or configuration commands.
+
+        ```powershell
+        Get-CimInstance -ClassName Win32_PnPEntity -Filter 'Present = True' -ErrorAction Stop |
+          Where-Object { $_.PNPDeviceID -match '^(USB|HID|BTHENUM|BTHLEDEVICE|BTHLE)\\' } |
+          Sort-Object PNPClass, Name, PNPDeviceID |
+          Format-List Name, Manufacturer, PNPClass, Status, ConfigManagerErrorCode, PNPDeviceID,
+            @{Name='HardwareID'; Expression={$_.HardwareID -join "`n"}},
+            @{Name='CompatibleID'; Expression={$_.CompatibleID -join "`n"}}
+        ```
+
+        For USB / 2.4 GHz devices, run it **with the receiver/cable plugged in and again after unplugging it**. Compare added or removed entries and include **all entries for the target device**, including different `MI_XX` / `COLXX` interfaces sharing the same VID/PID.
+        Turning off the wireless peripheral usually leaves its receiver present. Bluetooth pairing nodes can remain after disconnection; report the connection state rather than inferring it from the presence of a node.
+
+        Before posting publicly, you may redact serial numbers or Bluetooth addresses in the final segment of the `PNPDeviceID` instance path. Preserve VID, PID, REV, MI, COL, UP, and U fields in hardware identifiers.
+
+  - type: textarea
+    id: device-identification
+    attributes:
+      label: Device identification command output
+      description: Paste all related entries for the target device, not just the first HID entry. If the command fails or returns nothing, include the error or state that the output was empty, and attach the hardware IDs from Device Manager.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: state-changes
+    attributes:
+      label: Sleep, charging, and connection changes
+      description: Report only tested cases and mark untested ones. Note failures to recover after sleep, devices appearing online after shutdown, incorrect charging states, stale readings, or failures after changing connection modes.
+      placeholder: |
+        Refresh after waking:
+        After sleep/power-off:
+        After connecting/disconnecting a charging cable:
+        After switching between 2.4 GHz / Bluetooth / USB:
+        After unplugging/reconnecting the receiver:
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots and additional details
+      description: Attach screenshots of this app and the official driver taken at the same time, plus any other symptoms or exact error messages. Label screenshots with the connection mode.
+
+  - type: markdown
+    attributes:
+      value: |
+        ### Possible compatibility issues
+
+        - Different firmware, receivers, or connection modes can use different protocols, even for the same model. Support in one mode does not guarantee support in another.
+        - A connected receiver does not prove that the peripheral is online. Sleep, power-off, and shared receivers can complicate connection status and device identification.
+        - Vendor utilities or web drivers may compete for a communication interface. Report differences with them running and exited.
+        - Some devices report only coarse battery steps, omit charging status, or return old readings while charging or asleep.
+        - This command provides identity and interface clues, **not a complete HID report descriptor or battery protocol**. Driver behavior, protocol information, or device-owner validation may still be needed; submitting information does not mean support is complete.

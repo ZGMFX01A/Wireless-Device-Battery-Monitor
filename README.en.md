@@ -122,6 +122,8 @@ Wallpaper, Windows version, system transparency settings, display scaling, and g
 
 When reporting an [issue](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues), include the app version, Windows version, full device model, connection mode, and steps to reproduce. Screenshots can help; cover personal information before posting them publicly.
 
+For new device requests or identification, battery, charging, and connection problems, use the [English device support form](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues/new?template=device-support.en.yml) ([简体中文](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues/new?template=device-support.zh-CN.yml) / [Русский](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues/new?template=device-support.ru.yml)). Include the **exact brand and model**, an **official driver download or official web driver URL**, and the hardware identification output, official-driver behavior, and tested sleep/charging/connection changes described in the [collection guide](docs/device-support.md#english).
+
 This project uses a custom license for personal learning and non-commercial use only. Commercial use requires prior explicit written permission from the copyright owner. See [LICENSE](LICENSE) for the full terms.
 
 
