@@ -134,6 +134,8 @@ fn retains_last_peripheral_sample(source: Source) -> bool {
             | Source::AulaBytech
             | Source::MchoseAudio
             | Source::HyperX
+            | Source::TurtleBeach
+            | Source::Scyrox
     )
 }
 impl Slot {
@@ -347,6 +349,13 @@ impl Target {
             _ => (),
         }
     }
+    fn association_changed_from(&self, prior: &Self) -> bool {
+        match (self, prior) {
+            (Self::H(t, _), Self::H(old, _)) => t.association_changed_from(old),
+            (Self::B(t), Self::B(old)) => !t.same_endpoint(old),
+            _ => true,
+        }
+    }
     fn read(&mut self, ms: u64, reset: bool) -> TargetSample {
         let mut association_changed = false;
         let reading = match self {
@@ -377,26 +386,22 @@ impl Target {
             association_changed,
         }
     }
-    /// The result marks whether reopening found a physically different endpoint.
-    fn reopen_one(&mut self) -> Option<bool> {
-        let Self::H(t, session) = self else {
-            return None;
+    /// The result reports identity/sample transitions for reopened HID targets.
+    fn reopen_one(&mut self) -> Option<TargetTransition> {
+        let rediscovered = {
+            let Self::H(t, session) = self else {
+                return None;
+            };
+            *session = None;
+            if let Ok(s) = t.open() {
+                *session = Some(Box::new(s));
+                return Some(TargetTransition::unchanged());
+            }
+            let fresh = t.rediscover().ok()??;
+            let s = fresh.open().ok()?;
+            Self::H(fresh, Some(Box::new(s)))
         };
-        *session = None;
-        if let Ok(s) = t.open() {
-            *session = Some(Box::new(s));
-            return Some(false);
-        }
-        if let Ok(Some(mut fresh)) = t.rediscover()
-            && let Ok(s) = fresh.open()
-        {
-            let replaced = !fresh.same_endpoint(t);
-            fresh.retain_identity(t);
-            *t = fresh;
-            *session = Some(Box::new(s));
-            return Some(replaced);
-        }
-        None
+        Some(replace_with_reopened(self, rediscovered))
     }
     fn close(&mut self) {
         if let Self::H(_, s) = self {
@@ -404,6 +409,113 @@ impl Target {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TargetTransition {
+    identity_updated: bool,
+    clear_sample: bool,
+}
+
+impl TargetTransition {
+    const fn unchanged() -> Self {
+        Self {
+            identity_updated: false,
+            clear_sample: false,
+        }
+    }
+}
+
+trait EndpointReconcile {
+    fn descriptor(&self) -> &Descriptor;
+    fn same_endpoint(&self, prior: &Self) -> bool;
+    fn retain_identity(&mut self, prior: &Self);
+    fn association_changed_from(&self, prior: &Self) -> bool;
+}
+
+impl EndpointReconcile for Target {
+    fn descriptor(&self) -> &Descriptor {
+        self.data()
+    }
+
+    fn same_endpoint(&self, prior: &Self) -> bool {
+        Self::same_endpoint(self, prior)
+    }
+
+    fn retain_identity(&mut self, prior: &Self) {
+        Self::retain_identity(self, prior);
+    }
+
+    fn association_changed_from(&self, prior: &Self) -> bool {
+        Self::association_changed_from(self, prior)
+    }
+}
+
+fn reconcile_same_endpoint<T: EndpointReconcile>(new: &mut T, prior: &T) -> TargetTransition {
+    new.retain_identity(prior);
+    let clear_sample = new.association_changed_from(prior);
+    let identity_updated = clear_sample || new.descriptor() != prior.descriptor();
+    TargetTransition {
+        identity_updated,
+        clear_sample,
+    }
+}
+
+fn merge_discovered_target<T: EndpointReconcile>(
+    mut new: T,
+    old: &mut Vec<T>,
+    slots: &mut HashMap<String, Slot>,
+    recover_only: bool,
+) -> T {
+    if let Some(i) = old.iter().position(|prior| new.same_endpoint(prior)) {
+        let mut prior = old.swap_remove(i);
+        let transition = reconcile_same_endpoint(&mut new, &prior);
+        if recover_only
+            && !transition.identity_updated
+            && slots.get(&new.descriptor().id).is_some_and(|s| s.fail < 3)
+        {
+            // 保留已打开句柄时仍同步首次观测到的无描述符变化证据（如目录外 395A:000F）。
+            prior.retain_identity(&new);
+            return prior;
+        }
+        if transition.clear_sample {
+            slots.remove(&new.descriptor().id);
+        } else if transition.identity_updated
+            && let Some(slot) = slots.get_mut(&new.descriptor().id)
+        {
+            slot.row.device = new.descriptor().clone();
+        }
+    } else {
+        slots.remove(&new.descriptor().id);
+    }
+    new
+}
+
+fn replace_with_reopened<T: EndpointReconcile>(
+    current: &mut T,
+    mut candidate: T,
+) -> TargetTransition {
+    let transition = if candidate.same_endpoint(current) {
+        reconcile_same_endpoint(&mut candidate, current)
+    } else {
+        TargetTransition {
+            identity_updated: true,
+            clear_sample: true,
+        }
+    };
+    *current = candidate;
+    transition
+}
+
+fn apply_reopened_target(device: &Descriptor, slot: &mut Slot, transition: TargetTransition) {
+    slot.rebaseline = true;
+    if transition.clear_sample {
+        slot.clear_sample();
+    }
+    if transition.identity_updated {
+        slot.row.device = device.clone();
+    }
+}
+
 fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn() + Send + Sync>) {
     let (_apartment, bluetooth_initialization_error) = if bt {
         match bluetooth::Apartment::enter() {
@@ -586,20 +698,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                     let mut old = std::mem::take(&mut devices);
                     devices = v
                         .into_iter()
-                        .map(|mut new| {
-                            if let Some(i) = old.iter().position(|prior| new.same_endpoint(prior)) {
-                                let prior = old.swap_remove(i);
-                                if recover_only
-                                    && slots.get(&new.data().id).is_some_and(|s| s.fail < 3)
-                                {
-                                    return prior;
-                                }
-                                new.retain_identity(&prior);
-                            } else {
-                                slots.remove(&new.data().id);
-                            }
-                            new
-                        })
+                        .map(|new| merge_discovered_target(new, &mut old, &mut slots, recover_only))
                         .collect();
                     if recover_only {
                         // Recovery enumeration can be incomplete during login. Keep
@@ -890,12 +989,8 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                     .is_none_or(|prior| now.saturating_sub(*prior) >= 60_000)
             {
                 recovered.insert(key.clone(), now);
-                if let Some(replaced) = t.reopen_one() {
-                    slot.rebaseline = true;
-                    if replaced {
-                        slot.clear_sample();
-                        slot.row.device = t.data().clone();
-                    }
+                if let Some(transition) = t.reopen_one() {
+                    apply_reopened_target(t.data(), slot, transition);
                     failed_reopens.remove(&key);
                 } else {
                     failed_reopens.insert(key);
@@ -1670,6 +1765,204 @@ mod tests {
     }
 
     #[test]
+    fn scyrox_mouse_retains_last_sample_while_asleep() {
+        let device = Descriptor {
+            id: "hid:395a:0002:Mouse:test".into(),
+            name: "Scyrox V8S".into(),
+            kind: Kind::Mouse,
+            legacy_ids: vec![],
+            identity: Some(battery_protocol::DeviceIdentity {
+                model_key: Some("scyrox:395a:000d".into()),
+                category: battery_protocol::DeviceCategory::Mouse,
+                connection: battery_protocol::ConnectionKind::Rf24,
+                battery: battery_protocol::BatteryCapability::Present,
+                model_source: Some(battery_protocol::ModelSource::ProtocolIdentity),
+            }),
+            generic_name: None,
+        };
+        let mut slot = Slot::new(device, 0);
+        let sample = Reading::new(73, Charge::Discharging, Source::Scyrox).unwrap();
+        slot.apply(Ok(sample), 0, false);
+        slot.apply(Err("Scyrox mouse is offline".into()), 1000, false);
+        assert_eq!(slot.row.battery, Some(sample));
+        assert!(slot.row.held && slot.row.error.is_some());
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct FakeEndpoint {
+        path: &'static str,
+        info: Descriptor,
+        observed: Option<battery_protocol::IdentityEvidence>,
+        tag: &'static str,
+    }
+
+    impl FakeEndpoint {
+        fn new(tag: &'static str, name: &str, pid: Option<u16>, model_key: Option<&str>) -> Self {
+            Self {
+                path: r"\\?\hid#vid_395a&pid_0002#1",
+                info: Descriptor {
+                    id: "hid:395a:0002:Mouse:test".into(),
+                    name: name.into(),
+                    kind: Kind::Mouse,
+                    legacy_ids: vec![],
+                    identity: Some(battery_protocol::DeviceIdentity {
+                        model_key: model_key.map(str::to_owned),
+                        category: battery_protocol::DeviceCategory::Mouse,
+                        connection: battery_protocol::ConnectionKind::Rf24,
+                        battery: battery_protocol::BatteryCapability::Present,
+                        model_source: model_key
+                            .map(|_| battery_protocol::ModelSource::ProtocolIdentity),
+                    }),
+                    generic_name: None,
+                },
+                observed: pid.map(|pid| battery_protocol::IdentityEvidence::PeripheralIds {
+                    vid: 0x395a,
+                    pid,
+                }),
+                tag,
+            }
+        }
+    }
+
+    impl EndpointReconcile for FakeEndpoint {
+        fn descriptor(&self) -> &Descriptor {
+            &self.info
+        }
+
+        fn same_endpoint(&self, prior: &Self) -> bool {
+            self.info.id == prior.info.id && self.path == prior.path
+        }
+
+        fn retain_identity(&mut self, prior: &Self) {
+            if !self.same_endpoint(prior) || self.observed.is_some() {
+                return;
+            }
+            self.observed = prior.observed.clone();
+            if self.observed.is_some() {
+                self.info = prior.info.clone();
+            }
+        }
+
+        fn association_changed_from(&self, prior: &Self) -> bool {
+            if !self.same_endpoint(prior) {
+                return true;
+            }
+            fn model(d: &Descriptor) -> Option<&str> {
+                d.identity
+                    .as_ref()
+                    .and_then(|identity| identity.model_key.as_deref())
+            }
+            let replaced = self.observed.is_some()
+                && prior.observed.is_some()
+                && self.observed != prior.observed;
+            replaced || (model(&prior.info).is_some() && model(&prior.info) != model(&self.info))
+        }
+    }
+
+    #[test]
+    fn recovery_scan_and_reopen_reconcile_first_model_and_switched_models_uniformly() {
+        let generic = FakeEndpoint::new("prior-generic", "Scyrox 2.4G Receiver", None, None);
+        let first_v8s = FakeEndpoint::new(
+            "fresh-v8s",
+            "Scyrox V8S",
+            Some(0x000d),
+            Some("scyrox:395a:000d"),
+        );
+        let switched_v6s = FakeEndpoint::new(
+            "fresh-v6s",
+            "Scyrox V6S",
+            Some(0x000b),
+            Some("scyrox:395a:000b"),
+        );
+        let uncatalogued_0f =
+            FakeEndpoint::new("fresh-0f", "Scyrox 2.4G Receiver", Some(0x000f), None);
+        let reading = Reading::new(73, Charge::Discharging, Source::Scyrox).unwrap();
+
+        // 1) recover_only 下且 fail < 3：旧端点无型号，新探针首次确认 V8S -> 采纳新目标、刷新名称且保留电量。
+        let mut slots = HashMap::new();
+        let mut slot = Slot::new(generic.info.clone(), 0);
+        slot.apply(Ok(reading), 0, false);
+        slot.fail = 1;
+        slots.insert(generic.info.id.clone(), slot);
+        let mut old = vec![generic.clone()];
+        let merged = merge_discovered_target(first_v8s.clone(), &mut old, &mut slots, true);
+        assert_eq!(merged.tag, "fresh-v8s");
+        let kept_slot = slots.get(&generic.info.id).unwrap();
+        assert_eq!(kept_slot.row.battery, Some(reading));
+        assert_eq!(kept_slot.row.device.name, "Scyrox V8S");
+
+        // 2) recover_only 下且 fail < 3：已识别为 V8S，重扫探测到 V6S -> 采纳新目标并清除旧 V8S 缓存。
+        let prior_v8s = FakeEndpoint::new(
+            "prior-v8s",
+            "Scyrox V8S",
+            Some(0x000d),
+            Some("scyrox:395a:000d"),
+        );
+        let mut slot = Slot::new(prior_v8s.info.clone(), 0);
+        slot.apply(Ok(reading), 0, false);
+        slot.fail = 2;
+        slots.insert(prior_v8s.info.id.clone(), slot);
+        let mut old = vec![prior_v8s.clone()];
+        let merged = merge_discovered_target(switched_v6s.clone(), &mut old, &mut slots, true);
+        assert_eq!(merged.tag, "fresh-v6s");
+        assert!(!slots.contains_key(&prior_v8s.info.id));
+
+        // 3) recover_only 下且 fail < 3：单端点未重测无新证据 -> 保留原端点句柄与身份。
+        let sleeping_rescan = FakeEndpoint::new("rescan-sleep", "Scyrox 2.4G Receiver", None, None);
+        let mut slot = Slot::new(prior_v8s.info.clone(), 0);
+        slot.apply(Ok(reading), 0, false);
+        slot.fail = 1;
+        slots.insert(prior_v8s.info.id.clone(), slot);
+        let mut old = vec![prior_v8s.clone()];
+        let merged = merge_discovered_target(sleeping_rescan, &mut old, &mut slots, true);
+        assert_eq!(merged.tag, "prior-v8s");
+        assert_eq!(
+            slots.get(&prior_v8s.info.id).unwrap().row.battery,
+            Some(reading)
+        );
+
+        // 4) 自动重开：同路径 V8S -> V6S 与 V8S -> 目录外 395A:000F 均须清除旧电量并刷新设备信息；
+        //    无型号 -> 首获 V8S 则刷新设备信息且保留缓存电量。
+        for (mut current, fresh, expect_name, expect_cleared) in [
+            (generic.clone(), first_v8s.clone(), "Scyrox V8S", false),
+            (prior_v8s.clone(), switched_v6s, "Scyrox V6S", true),
+            (
+                prior_v8s,
+                uncatalogued_0f.clone(),
+                "Scyrox 2.4G Receiver",
+                true,
+            ),
+        ] {
+            let mut slot = Slot::new(current.info.clone(), 0);
+            slot.apply(Ok(reading), 0, false);
+            let transition = replace_with_reopened(&mut current, fresh);
+            apply_reopened_target(current.descriptor(), &mut slot, transition);
+            assert_eq!(slot.row.device.name, expect_name);
+            assert_eq!(slot.row.battery.is_none(), expect_cleared);
+        }
+
+        // 5) recover_only 下：无有效 ID -> 首次观测到 395A:000F（复用旧句柄并同步新证据）->
+        //    后续再观测到 V8S 时，必须判定关联发生变更并清除旧鼠标缓存。
+        let mut slot = Slot::new(generic.info.clone(), 0);
+        slot.apply(Ok(reading), 0, false);
+        slot.fail = 1;
+        slots.insert(generic.info.id.clone(), slot);
+        let mut old = vec![generic];
+        let after_0f = merge_discovered_target(uncatalogued_0f, &mut old, &mut slots, true);
+        assert_eq!(after_0f.tag, "prior-generic");
+        assert!(after_0f.observed.is_some());
+        assert_eq!(
+            slots.get(&after_0f.info.id).unwrap().row.battery,
+            Some(reading)
+        );
+
+        let mut old = vec![after_0f];
+        let after_v8s = merge_discovered_target(first_v8s, &mut old, &mut slots, true);
+        assert_eq!(after_v8s.tag, "fresh-v8s");
+        assert!(!slots.contains_key(&after_v8s.info.id));
+    }
+
+    #[test]
     fn audio_is_monitored_and_retains_its_sample_while_asleep() {
         for (id, name, source) in [
             (
@@ -1681,6 +1974,11 @@ mod tests {
                 "hid:03f0:06be:Audio:test",
                 "HyperX Cloud III S Wireless",
                 Source::HyperX,
+            ),
+            (
+                "hid:10f5:2256:Audio:test",
+                "Turtle Beach Stealth 700P Gen 3",
+                Source::TurtleBeach,
             ),
         ] {
             let mut state = State::demo();

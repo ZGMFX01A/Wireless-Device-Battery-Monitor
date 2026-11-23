@@ -249,6 +249,14 @@ impl Panel {
                 ("ROG", 0xff4d67, if k.dark { 0xffb0b8 } else { 0x9f3c4a })
             } else if crate::device_display::is_hyperx(d, src) {
                 ("HyperX", 0xff4d67, if k.dark { 0xffb0b8 } else { 0x9f3c4a })
+            } else if crate::device_display::is_turtle_beach(d, src) {
+                (
+                    "Turtle Beach",
+                    0x10b981,
+                    if k.dark { 0x6ee7b7 } else { 0x047857 },
+                )
+            } else if crate::device_display::is_scyrox(d, src) {
+                ("Scyrox", 0x06b6d4, if k.dark { 0x67e8f9 } else { 0x0e7490 })
             } else if d.kind == Kind::Mouse && id.starts_with("hid:1d57:fa60:") {
                 ("Ardor", 0xf59e0b, if k.dark { 0xfcd34d } else { 0x92600a })
             } else if d.kind == Kind::Bluetooth {
