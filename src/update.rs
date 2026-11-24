@@ -20,6 +20,9 @@ use std::{
 const ROOT: &str = "https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/releases";
 const LATEST: &str =
     "https://api.github.com/repos/ZGMFX01A/Wireless-Device-Battery-Monitor/releases/latest";
+const RELEASE_BY_TAG_PREFIX: &str =
+    "https://api.github.com/repos/ZGMFX01A/Wireless-Device-Battery-Monitor/releases/tags/v";
+const NOTES_FILE_LIMIT: u64 = 256 * 1024;
 pub(crate) const KEY: Option<&str> = option_env!("GPUI_UPDATE_PUBLIC_KEY");
 fn asset_url(version: &str) -> String {
     format!("{ROOT}/download/v{version}/WirelessDeviceBatteryMonitor-v{version}.exe")
@@ -159,8 +162,8 @@ pub(crate) fn verified(p: &Path, m: &Manifest) -> Result<(), String> {
         |_| {},
     )
 }
-/// Verified decoded metadata together with the signed bytes used by the independent swap helper.
-type SignedManifestCache = Arc<Mutex<Option<(Manifest, Vec<u8>, usize)>>>;
+/// Verified decoded metadata together with the signed bytes and parsed bilingual notes.
+type SignedManifestCache = Arc<Mutex<Option<(Manifest, Vec<u8>, usize, String, String)>>>;
 
 fn signed_release(data: &[u8], key: &str, current: &str) -> Result<(Manifest, Vec<u8>), String> {
     let envelope = release_envelope(data)?;
@@ -174,6 +177,272 @@ fn signed_release(data: &[u8], key: &str, current: &str) -> Result<(Manifest, Ve
         return Err("Release identity does not match its signed metadata".into());
     }
     Ok((manifest, envelope))
+}
+
+fn is_placeholder_notes(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.is_empty()
+        || trimmed == "详情请查看该版本的发布说明。"
+        || trimmed == "See the release notes for details."
+}
+
+fn clean_notes_section(raw: &str) -> String {
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut start = 0;
+    let mut end = lines.len();
+    while start < end && (lines[start].trim().is_empty() || lines[start].trim() == "---") {
+        start += 1;
+    }
+    while end > start && (lines[end - 1].trim().is_empty() || lines[end - 1].trim() == "---") {
+        end -= 1;
+    }
+    lines[start..end].join("\n")
+}
+
+fn strip_manifest_comment(body: &str) -> String {
+    let normalized = body.replace("\r\n", "\n");
+    if let Some((before, rest)) = normalized.split_once("<!-- gpui-update-manifest\n")
+        && let Some((_, after)) = rest.split_once("\n-->")
+    {
+        format!("{before}{after}")
+    } else {
+        normalized
+    }
+}
+
+/// 从 GitHub Release 正文中解析中英双语发布说明，剥离更新清单注释并处理缺省回退。
+pub(crate) fn extract_release_notes(
+    body: &str,
+    fallback_zh: &str,
+    fallback_en: &str,
+) -> (String, String) {
+    let stripped = strip_manifest_comment(body);
+    let mut zh_buf = Vec::new();
+    let mut en_buf = Vec::new();
+    enum LangSection {
+        None,
+        Zh,
+        En,
+    }
+    let mut current = LangSection::None;
+    let mut saw_marker = false;
+    for line in stripped.lines() {
+        let trimmed = line.trim();
+        if trimmed == "<!-- lang:zh -->" {
+            current = LangSection::Zh;
+            saw_marker = true;
+            continue;
+        }
+        if trimmed == "<!-- lang:en -->" {
+            current = LangSection::En;
+            saw_marker = true;
+            continue;
+        }
+        match current {
+            LangSection::Zh => zh_buf.push(line),
+            LangSection::En => en_buf.push(line),
+            LangSection::None => {}
+        }
+    }
+    let mut zh = if saw_marker {
+        clean_notes_section(&zh_buf.join("\n"))
+    } else {
+        clean_notes_section(&stripped)
+    };
+    let mut en = if saw_marker {
+        clean_notes_section(&en_buf.join("\n"))
+    } else {
+        zh.clone()
+    };
+    if is_placeholder_notes(&zh) {
+        zh.clear();
+    }
+    if is_placeholder_notes(&en) {
+        en.clear();
+    }
+    if zh.is_empty() && !is_placeholder_notes(fallback_zh) {
+        zh = clean_notes_section(fallback_zh);
+    }
+    if en.is_empty() && !is_placeholder_notes(fallback_en) {
+        en = clean_notes_section(fallback_en);
+    }
+    if zh.is_empty() && !en.is_empty() {
+        zh = en.clone();
+    }
+    if en.is_empty() && !zh.is_empty() {
+        en = zh.clone();
+    }
+    (zh, en)
+}
+
+fn signed_release_with_notes(
+    data: &[u8],
+    key: &str,
+    current: &str,
+) -> Result<(Manifest, Vec<u8>, String, String), String> {
+    let (manifest, envelope) = signed_release(data, key, current)?;
+    let release: serde_json::Value = serde_json::from_slice(data).map_err(|e| e.to_string())?;
+    let body = release["body"].as_str().unwrap_or("");
+    let (notes_zh, notes_en) = extract_release_notes(body, &manifest.notes, &manifest.notes_en);
+    Ok((manifest, envelope, notes_zh, notes_en))
+}
+
+fn release_notes_without_key(
+    data: &[u8],
+    expected_version: &str,
+) -> Result<crate::model::InstalledReleaseNotes, String> {
+    let release: serde_json::Value = serde_json::from_slice(data).map_err(|e| e.to_string())?;
+    if release["tag_name"].as_str() != Some(&format!("v{expected_version}"))
+        || release["draft"].as_bool() == Some(true)
+        || release["prerelease"].as_bool() == Some(true)
+    {
+        return Err("Release identity does not match expected version".into());
+    }
+    let body = release["body"].as_str().unwrap_or("");
+    let (notes_zh, notes_en) = extract_release_notes(body, "", "");
+    Ok(crate::model::InstalledReleaseNotes {
+        version: expected_version.to_string(),
+        notes_zh,
+        notes_en,
+    })
+}
+
+/// 比较两个语义化版本号，仅当 `current` 严格大于 `previous` 时返回 `true`。
+pub(crate) fn is_newer_version(current: &str, previous: &str) -> bool {
+    match (Version::parse(current), Version::parse(previous)) {
+        (Ok(cur), Ok(prev)) => cur > prev,
+        _ => false,
+    }
+}
+
+/// 检查更新缓存目录中是否存在指定版本的升级落盘记录。
+pub(crate) fn has_installed_update_record(version: &str) -> bool {
+    let Ok(root) = base() else {
+        return false;
+    };
+    let dir = root.join(version);
+    dir.join("notes.json").is_file() || dir.join("signed.json").is_file()
+}
+
+fn write_notes_file_to_dir(
+    dir: &Path,
+    notes: &crate::model::InstalledReleaseNotes,
+) -> Result<(), String> {
+    if !notes.has_content() {
+        return Ok(());
+    }
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| e.to_string())?;
+    serde_json::to_writer_pretty(&mut tmp, notes).map_err(|e| e.to_string())?;
+    tmp.as_file().sync_all().map_err(|e| e.to_string())?;
+    tmp.persist(dir.join("notes.json"))
+        .map_err(|e| e.error.to_string())?;
+    Ok(())
+}
+
+fn load_installed_release_notes_from_dir(
+    dir: &Path,
+    version: &str,
+) -> Option<crate::model::InstalledReleaseNotes> {
+    let notes_path = dir.join("notes.json");
+    if let Ok(meta) = fs::metadata(&notes_path)
+        && meta.len() <= NOTES_FILE_LIMIT
+        && let Ok(bytes) = fs::read(&notes_path)
+        && let Ok(notes) = serde_json::from_slice::<crate::model::InstalledReleaseNotes>(&bytes)
+        && notes.version == version
+        && notes.has_content()
+    {
+        return Some(notes);
+    }
+    let signed_path = dir.join("signed.json");
+    let meta = fs::metadata(&signed_path).ok()?;
+    if meta.len() > 65536 {
+        return None;
+    }
+    let envelope: Envelope = serde_json::from_slice(&fs::read(&signed_path).ok()?).ok()?;
+    let manifest: Manifest = serde_json::from_str(&envelope.manifest).ok()?;
+    if manifest.version != version {
+        return None;
+    }
+    let (notes_zh, notes_en) = extract_release_notes("", &manifest.notes, &manifest.notes_en);
+    let notes = crate::model::InstalledReleaseNotes {
+        version: version.to_string(),
+        notes_zh,
+        notes_en,
+    };
+    notes.has_content().then_some(notes)
+}
+
+/// 从本地更新缓存加载指定版本的双语更新说明（优先 `notes.json`，其次过滤占位符后的 `signed.json`）。
+pub(crate) fn load_installed_release_notes(
+    version: &str,
+) -> Option<crate::model::InstalledReleaseNotes> {
+    let dir = base().ok()?.join(version);
+    load_installed_release_notes_from_dir(&dir, version)
+}
+
+/// 在后台静默补拉指定已安装版本的 GitHub Release 说明（用于本地无有效缓存或从旧版首次升级场景）。
+pub(crate) fn fetch_installed_release_notes_async(
+    version: String,
+    state: Arc<Mutex<State>>,
+    wake: impl Fn() + Send + Sync + 'static,
+) {
+    let mirrors = state.lock().unwrap().prefs.update_mirrors.clone();
+    thread::spawn(move || {
+        let Ok(transport) = network::Transport::new(&mirrors) else {
+            return;
+        };
+        let url = format!("{RELEASE_BY_TAG_PREFIX}{version}");
+        let cancel = AtomicBool::new(false);
+        let version_ref = version.as_str();
+        let fetched = network::run(async {
+            let (notes, _) = transport
+                .metadata(&url, &cancel, |data| {
+                    if let Some(key) = KEY {
+                        let (man, _, notes_zh, notes_en) =
+                            signed_release_with_notes(data, key, version_ref)?;
+                        if man.version != version_ref {
+                            return Err("release version mismatch".into());
+                        }
+                        Ok(crate::model::InstalledReleaseNotes {
+                            version: man.version,
+                            notes_zh,
+                            notes_en,
+                        })
+                    } else {
+                        release_notes_without_key(data, version_ref)
+                    }
+                })
+                .await?;
+            Ok(notes)
+        });
+        let Ok(notes) = fetched else {
+            // 静默补拉失败不影响正常使用，弹窗中仍提供手动跳转发布页按钮。
+            return;
+        };
+        if !notes.has_content() {
+            return;
+        }
+        if let Ok(dir) = base().map(|root| root.join(&version)) {
+            let _ = write_notes_file_to_dir(&dir, &notes);
+        }
+        let mut updated = false;
+        {
+            let mut st = state.lock().unwrap();
+            if st.prefs.last_seen_release_notes_version != version
+                && st
+                    .installed_release_notes
+                    .as_ref()
+                    .is_some_and(|existing| existing.version == version)
+            {
+                st.installed_release_notes = Some(notes);
+                updated = true;
+            }
+        }
+        if updated {
+            wake();
+        }
+    });
 }
 
 pub(crate) fn record_failed(man: &Manifest) -> Result<(), String> {
@@ -246,6 +515,7 @@ impl Updates {
             };
             if !download {
                 state.release_notes.clear();
+                state.release_notes_en.clear();
                 state.release_size = 0;
             }
             state.prefs.update_mirrors.clone()
@@ -271,9 +541,9 @@ impl Updates {
                 let transport = network::Transport::new(&mirrors)?;
                 network::run(async {
                     if !download {
-                        let ((man, envelope), route) = transport
+                        let ((man, envelope, notes_zh, notes_en), route) = transport
                             .metadata(LATEST, &c, |data| {
-                                signed_release(data, key, env!("APP_VERSION"))
+                                signed_release_with_notes(data, key, env!("APP_VERSION"))
                             })
                             .await?;
                         if man.version == env!("APP_VERSION") {
@@ -290,18 +560,14 @@ impl Updates {
                         {
                             let mut state = st.lock().unwrap();
                             state.release_size = man.size;
-                            state.release_notes =
-                                if crate::view::english(&state.prefs) && !man.notes_en.is_empty() {
-                                    man.notes_en.clone()
-                                } else {
-                                    man.notes.clone()
-                                };
+                            state.release_notes = notes_zh.clone();
+                            state.release_notes_en = notes_en.clone();
                         }
                         let version = man.version.clone();
-                        *m.lock().unwrap() = Some((man, envelope, route));
+                        *m.lock().unwrap() = Some((man, envelope, route, notes_zh, notes_en));
                         return Ok(Status::Available(version));
                     }
-                    let (man, envelope, preferred) = m
+                    let (man, envelope, preferred, notes_zh, notes_en) = m
                         .lock()
                         .unwrap()
                         .clone()
@@ -368,6 +634,14 @@ impl Updates {
                         .map_err(|e| e.to_string())?;
                     tmp.persist(dir.join("signed.json"))
                         .map_err(|e| e.error.to_string())?;
+                    let notes = crate::model::InstalledReleaseNotes {
+                        version: man.version.clone(),
+                        notes_zh,
+                        notes_en,
+                    };
+                    if let Err(e) = write_notes_file_to_dir(&dir, &notes) {
+                        eprintln!("Failed to save release notes: {e}");
+                    }
                     let version = man.version.clone();
                     *ready.lock().unwrap() = Some((exe, man));
                     Ok(Status::Ready(version))
@@ -567,5 +841,90 @@ mod formal_release_tests {
         u.cancel();
         assert!(u.staged.lock().unwrap().is_none());
         assert!(u.install_input().is_err());
+    }
+
+    #[test]
+    fn extract_release_notes_parses_bilingual_body_and_strips_manifest() {
+        let body = concat!(
+            "<!-- lang:zh -->\r\n\r\n",
+            "## 新增功能\r\n\r\n",
+            "- **兼容模式**：支持更多设备。\r\n\r\n",
+            "---\r\n\r\n",
+            "<!-- lang:en -->\r\n\r\n",
+            "## New Features\r\n\r\n",
+            "- **Compatible mode**: Supports more devices.\r\n\r\n",
+            "<!-- gpui-update-manifest\r\n",
+            "{\"manifest\":\"{}\",\"signature\":\"00\"}\r\n",
+            "-->\r\n"
+        );
+        let (zh, en) = extract_release_notes(
+            body,
+            "详情请查看该版本的发布说明。",
+            "See the release notes for details.",
+        );
+        assert!(zh.contains("## 新增功能"));
+        assert!(!zh.contains("New Features"));
+        assert!(!zh.contains("gpui-update-manifest"));
+        assert!(en.contains("## New Features"));
+        assert!(!en.contains("新增功能"));
+        assert!(!en.contains("gpui-update-manifest"));
+
+        // 无语言标记时同时填充中英两份，且过滤占位符回退。
+        let (single_zh, single_en) = extract_release_notes(
+            "## Fixes\n- Fixed bug\n<!-- gpui-update-manifest\n{}\n-->\n",
+            "详情请查看该版本的发布说明。",
+            "See the release notes for details.",
+        );
+        assert_eq!(single_zh, "## Fixes\n- Fixed bug");
+        assert_eq!(single_en, "## Fixes\n- Fixed bug");
+
+        let (empty_zh, empty_en) = extract_release_notes(
+            "",
+            "详情请查看该版本的发布说明。",
+            "See the release notes for details.",
+        );
+        assert!(empty_zh.is_empty());
+        assert!(empty_en.is_empty());
+    }
+
+    #[test]
+    fn installed_release_notes_round_trip_and_version_checks() {
+        assert!(is_newer_version("3.1.1", "3.1.0"));
+        assert!(!is_newer_version("3.1.0", "3.1.0"));
+        assert!(!is_newer_version("3.0.9", "3.1.0"));
+
+        let dir = tempfile::tempdir().unwrap();
+        // signed.json 仅含占位符时不返回有效内容。
+        let m = Manifest {
+            version: "3.1.0".into(),
+            size: 3,
+            sha256: "00".repeat(32),
+            target: "x86_64-pc-windows-msvc".into(),
+            notes: "详情请查看该版本的发布说明。".into(),
+            notes_en: "See the release notes for details.".into(),
+        };
+        let envelope = Envelope {
+            manifest: serde_json::to_string(&m).unwrap(),
+            signature: "00".repeat(64),
+        };
+        fs::write(
+            dir.path().join("signed.json"),
+            serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap();
+        assert!(load_installed_release_notes_from_dir(dir.path(), "3.1.0").is_none());
+
+        // 写入 notes.json 后按精确版本读取，不匹配的版本拒绝加载。
+        let notes = crate::model::InstalledReleaseNotes {
+            version: "3.1.0".into(),
+            notes_zh: "## 新增\n- 功能 A".into(),
+            notes_en: "## Added\n- Feature A".into(),
+        };
+        write_notes_file_to_dir(dir.path(), &notes).unwrap();
+        assert_eq!(
+            load_installed_release_notes_from_dir(dir.path(), "3.1.0"),
+            Some(notes)
+        );
+        assert!(load_installed_release_notes_from_dir(dir.path(), "3.2.0").is_none());
     }
 }

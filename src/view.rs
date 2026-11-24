@@ -15,6 +15,189 @@ use windows_sys::Win32::{
     UI::{HiDpi::GetDpiForWindow, WindowsAndMessaging::*},
 };
 const PROJECT_HOME_URL: &str = "https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor";
+/// 触发兼容模式提示弹窗的连续无果操作统计窗口（60 秒）。
+const COMPATIBLE_HINT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+/// 短时间窗口内连续未发现新设备的最小触发次数。
+const COMPATIBLE_HINT_THRESHOLD: usize = 2;
+
+/// “添加键盘”弹窗追踪状态。
+enum KeyboardPickAttempt {
+    /// 正在等待本次候选扫描结果。
+    Scanning(u64),
+    /// 已有未绑定候选设备展示给用户，等待绑定或取消关闭。
+    AwaitingBind,
+    /// 本次候选扫描已因无候选被计入，避免重复推送同一回执导致重复计数。
+    Counted,
+}
+
+/// 追踪短时间内的扫描设备与添加键盘操作，在连续无新增设备时提示开启兼容模式。
+#[derive(Default)]
+struct CompatibleHintTracker {
+    /// 最近在有效时间窗口内完成但未新增设备的尝试时间戳。
+    empty_attempts: Vec<std::time::Instant>,
+    /// 正在进行的扫描请求及其扫描前已存在的设备 ID 集合。
+    pending_scan: Option<(u64, std::collections::BTreeSet<String>)>,
+    /// 正在追踪的“添加键盘”弹窗状态。
+    pending_keyboard_pick: Option<KeyboardPickAttempt>,
+    /// 本次普通模式会话内用户是否已主动拒绝或关闭过提示弹窗。
+    dismissed: bool,
+}
+
+impl CompatibleHintTracker {
+    /// 截取当前面板设备 ID 集合，用于严格比较扫描前后是否出现新增设备。
+    fn snapshot_row_ids(rows: &[Row]) -> std::collections::BTreeSet<String> {
+        rows.iter().map(|r| r.device.id.clone()).collect()
+    }
+
+    /// 对比快照判断本次扫描是否发现了扫描前不存在的新设备 ID。
+    fn has_new_device(before: &std::collections::BTreeSet<String>, after: &[Row]) -> bool {
+        after.iter().any(|r| !before.contains(&r.device.id))
+    }
+
+    /// 记录一次扫描设备请求的起点与扫描前已有设备 ID 集合。
+    fn begin_scan(&mut self, id: u64, rows: &[Row]) {
+        self.pending_scan = Some((id, Self::snapshot_row_ids(rows)));
+    }
+
+    /// 记录一次“添加键盘”候选扫描请求。
+    fn begin_keyboard_pick(&mut self, id: u64) {
+        self.pending_keyboard_pick = Some(KeyboardPickAttempt::Scanning(id));
+    }
+
+    /// 取消尚未完成的键盘候选扫描追踪（如重新打开面板）。
+    fn cancel_keyboard_pick(&mut self) {
+        self.pending_keyboard_pick = None;
+    }
+
+    /// 仅清空已累计的无新增尝试次数，保留正在进行的扫描或弹窗追踪。
+    fn clear_attempts(&mut self) {
+        self.empty_attempts.clear();
+    }
+
+    /// 清空全部计数与进行中的追踪状态。
+    fn reset_all(&mut self) {
+        self.empty_attempts.clear();
+        self.pending_scan = None;
+        self.pending_keyboard_pick = None;
+    }
+
+    /// 成功绑定设备后清空尝试计数与键盘弹窗状态。
+    fn on_device_bound(&mut self) {
+        self.clear_attempts();
+        self.pending_keyboard_pick = None;
+    }
+
+    /// 识别模式切换离开普通模式时重置计数并解除拒绝锁定，便于后续切回普通模式重新提示。
+    fn on_mode_changed(&mut self, mode: EngineMode) {
+        if mode != EngineMode::Normal {
+            self.reset_all();
+            self.dismissed = false;
+        }
+    }
+
+    /// 用户确认开启兼容模式后重置追踪状态。
+    fn on_accepted(&mut self) {
+        self.reset_all();
+        self.dismissed = false;
+    }
+
+    /// 用户主动关闭提示弹窗后标记本次会话已拒绝，避免反复打扰。
+    fn on_dismissed(&mut self) {
+        self.reset_all();
+        self.dismissed = true;
+    }
+
+    /// 记录一次未新增设备的尝试，达到阈值且未被拒绝时返回 `true`。
+    fn record_empty_attempt(&mut self, mode: EngineMode, now: std::time::Instant) -> bool {
+        if mode != EngineMode::Normal || self.dismissed {
+            return false;
+        }
+        self.empty_attempts
+            .retain(|ts| now.saturating_duration_since(*ts) <= COMPATIBLE_HINT_WINDOW);
+        self.empty_attempts.push(now);
+        if self.empty_attempts.len() >= COMPATIBLE_HINT_THRESHOLD {
+            self.empty_attempts.clear();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 完成一次手动扫描并判定是否触发兼容模式提示（严格检查是否新增设备 ID）。
+    fn complete_scan(
+        &mut self,
+        id: u64,
+        succeeded: bool,
+        rows: &[Row],
+        mode: EngineMode,
+        now: std::time::Instant,
+    ) -> bool {
+        let Some((pending_id, before)) = self.pending_scan.take() else {
+            return false;
+        };
+        if pending_id != id {
+            self.pending_scan = Some((pending_id, before));
+            return false;
+        }
+        if mode != EngineMode::Normal {
+            self.on_mode_changed(mode);
+            return false;
+        }
+        if !succeeded {
+            return false;
+        }
+        if Self::has_new_device(&before, rows) {
+            self.clear_attempts();
+            false
+        } else {
+            self.record_empty_attempt(mode, now)
+        }
+    }
+
+    /// 完成一次“添加键盘”候选扫描：无未绑定新键盘立即计数；有候选则等待用户是否绑定。
+    fn complete_keyboard_pick(
+        &mut self,
+        id: u64,
+        succeeded: bool,
+        has_unbound_candidate: bool,
+        mode: EngineMode,
+        now: std::time::Instant,
+    ) -> bool {
+        if !matches!(
+            self.pending_keyboard_pick,
+            Some(KeyboardPickAttempt::Scanning(pending_id)) if pending_id == id
+        ) {
+            return false;
+        }
+        if mode != EngineMode::Normal {
+            self.on_mode_changed(mode);
+            return false;
+        }
+        if !succeeded {
+            self.pending_keyboard_pick = None;
+            return false;
+        }
+        if has_unbound_candidate {
+            self.pending_keyboard_pick = Some(KeyboardPickAttempt::AwaitingBind);
+            false
+        } else {
+            self.pending_keyboard_pick = Some(KeyboardPickAttempt::Counted);
+            self.record_empty_attempt(mode, now)
+        }
+    }
+
+    /// 当用户关闭“添加键盘”弹窗且未绑定任何设备时，将待绑定状态计入无新增尝试。
+    fn finish_cancelled_keyboard_pick(
+        &mut self,
+        mode: EngineMode,
+        now: std::time::Instant,
+    ) -> bool {
+        match self.pending_keyboard_pick.take() {
+            Some(KeyboardPickAttempt::AwaitingBind) => self.record_empty_attempt(mode, now),
+            Some(KeyboardPickAttempt::Scanning(_) | KeyboardPickAttempt::Counted) | None => false,
+        }
+    }
+}
 /// 返回当前系统时间对应的 Unix 秒时间戳；系统时钟异常时返回 0。
 fn unix_now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -178,11 +361,11 @@ struct Panel {
     last_scroll: (i32, i32),
     popup: bool,
     modal: Option<Dialog>,
+    modal_subs: Vec<Subscription>,
     focus: FocusHandle,
-    edit_blur: Option<Subscription>,
     manual: Option<(u64, bool)>,
     toast: Option<(Toast, u64)>,
-    editor: Option<(String, Entity<crate::entry::TextInput>)>,
+    compat_hint: CompatibleHintTracker,
     _sub: Option<Subscription>,
 }
 impl Panel {
@@ -251,6 +434,13 @@ impl Panel {
             .is_some_and(|(id, _)| st.manual.id == id && st.manual.completed());
         let members_changed = st.prefs.keyboard != self.state.prefs.keyboard
             || st.prefs.bluetooth != self.state.prefs.bluetooth;
+        let had_new_row = st.rows.iter().any(|row| {
+            !self
+                .state
+                .rows
+                .iter()
+                .any(|old| old.device.id == row.device.id)
+        });
         if !self.live && !completed && !members_changed {
             self.pending_rows = Some(std::mem::replace(
                 &mut st.rows,
@@ -265,8 +455,19 @@ impl Panel {
             None
         };
         self.state = st;
+        if self.state.prefs.engine_mode != EngineMode::Normal {
+            self.compat_hint
+                .on_mode_changed(self.state.prefs.engine_mode);
+            if matches!(self.modal, Some(Dialog::SuggestCompatibleMode)) {
+                self.modal = None;
+            }
+        }
         if completed {
-            let (_, scan) = self.manual.take().unwrap();
+            let (id, scan) = self.manual.take().unwrap();
+            let scan_aborted = matches!(
+                self.state.manual.error,
+                Some(Notice::OperationFailed | Notice::Suspended)
+            );
             let note = self.state.manual.error.clone().map_or_else(
                 || {
                     Toast::Label(if scan {
@@ -277,9 +478,34 @@ impl Panel {
                 },
                 Toast::Notice,
             );
-            self.toast(note, cx)
-        } else if let Some(n) = note {
-            self.toast(Toast::Notice(n), cx)
+            self.toast(note, cx);
+            if scan
+                && self.compat_hint.complete_scan(
+                    id,
+                    !scan_aborted,
+                    &self.state.rows,
+                    self.state.prefs.engine_mode,
+                    std::time::Instant::now(),
+                )
+            {
+                self.maybe_open_compatible_hint(cx);
+            }
+        } else {
+            if had_new_row {
+                self.compat_hint.clear_attempts();
+            }
+            if let Some(n) = note {
+                self.toast(Toast::Notice(n), cx)
+            }
+        }
+    }
+
+    /// 关闭升级内容弹窗时将当前版本标记为已读并通知服务层持久化。
+    pub(super) fn dismiss_whats_new(&mut self, cx: &mut Context<Self>) {
+        if let Some(notes) = self.state.installed_release_notes.take() {
+            let version = notes.version;
+            self.state.prefs.last_seen_release_notes_version = version.clone();
+            self.issue(Command::MarkReleaseNotesSeen(version), cx);
         }
     }
 }
@@ -315,10 +541,21 @@ enum Dialog {
         chosen: Option<String>,
         binding: bool,
     },
+    EditDevice {
+        id: String,
+        initial_name: String,
+        had_alias: bool,
+        auto_icon: crate::device_display::DeviceIcon,
+        icon: Option<crate::device_display::DeviceIcon>,
+        name_input: Entity<crate::entry::TextInput>,
+        color_input: Entity<crate::entry::TextInput>,
+    },
     Remove(String, Kind, String),
     ConfirmCompatibleMode,
+    SuggestCompatibleMode,
     ConfirmUnknownProbe,
     Update,
+    WhatsNew,
     SupportStar,
 }
 /// Reader never waits on the drawing thread. One latest snapshot plus one latest
@@ -432,11 +669,11 @@ pub fn run(managed: bool, initial: Mode) {
                             last_scroll: (0, 0),
                             popup: false,
                             modal: None,
+                            modal_subs: Vec::new(),
                             focus,
-                            edit_blur: None,
                             manual: None,
                             toast: None,
-                            editor: None,
+                            compat_hint: Default::default(),
                             _sub: Some(sub),
                         }
                     })
@@ -480,17 +717,31 @@ pub fn run(managed: bool, initial: Mode) {
                                         s.mode = m;
                                         s.settings_open = m == Mode::Settings;
                                         s.modal = None;
-                                        if m == Mode::Flyout && !s.state.demo {
-                                            let now = unix_now_secs();
-                                            if s.state.prefs.should_show_star_prompt(now) {
-                                                s.modal = Some(Dialog::SupportStar);
-                                                s.state.prefs.last_star_prompt_at = now;
-                                                s.issue(Command::RecordStarPrompt(now), cx);
+                                        s.modal_subs.clear();
+                                        s.compat_hint.cancel_keyboard_pick();
+                                        if !s.state.demo {
+                                            if s.state.prefs.show_release_notes_on_update
+                                                && s.state
+                                                    .installed_release_notes
+                                                    .as_ref()
+                                                    .is_some_and(|notes| {
+                                                        notes.version
+                                                            != s.state
+                                                                .prefs
+                                                                .last_seen_release_notes_version
+                                                    })
+                                            {
+                                                s.modal = Some(Dialog::WhatsNew);
+                                            } else if m == Mode::Flyout {
+                                                let now = unix_now_secs();
+                                                if s.state.prefs.should_show_star_prompt(now) {
+                                                    s.modal = Some(Dialog::SupportStar);
+                                                    s.state.prefs.last_star_prompt_at = now;
+                                                    s.issue(Command::RecordStarPrompt(now), cx);
+                                                }
                                             }
                                         }
                                         s.popup = false;
-                                        s.editor = None;
-                                        s.edit_blur = None;
                                         w.focus(&s.focus);
                                         s.dark_auto = apps_use_dark_theme();
                                         s.visible = true;
@@ -538,7 +789,7 @@ pub fn run(managed: bool, initial: Mode) {
 
 #[cfg(test)]
 mod audit_child_mail {
-    use super::UiInbox;
+    use super::{COMPATIBLE_HINT_WINDOW, CompatibleHintTracker, EngineMode, Row, UiInbox};
     use crate::model::{Event, Mode, State};
     #[test]
     fn last_state_and_intent_before_terminal_exit() {
@@ -561,5 +812,266 @@ mod audit_child_mail {
         q.push(Event::Exit);
         q.push(Event::State(Box::default()));
         assert!(matches!(&q.drain()[..], [Event::Exit]));
+    }
+
+    fn make_row(id: &str, with_battery: bool) -> Row {
+        use battery_protocol::{Charge, Descriptor, Kind, Reading, Source};
+        Row {
+            device: Descriptor {
+                id: id.into(),
+                name: id.into(),
+                kind: Kind::Mouse,
+                legacy_ids: vec![],
+                identity: None,
+                generic_name: None,
+            },
+            battery: with_battery
+                .then(|| Reading::new(80, Charge::Discharging, Source::Hidpp(1)))
+                .flatten(),
+            error: None,
+            sampled: 0,
+            held: false,
+        }
+    }
+
+    #[test]
+    fn compatible_hint_triggers_across_all_scan_and_keyboard_combinations() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let two = vec![make_row("mouse-1", true), make_row("kb-1", false)];
+        let two_recovered = vec![make_row("mouse-1", true), make_row("kb-1", true)];
+
+        // 0 -> 0：原来 0 台设备，连续只点击扫描 2 次仍为 0 台时触发
+        let mut tracker = CompatibleHintTracker::default();
+        tracker.begin_scan(1, &[]);
+        assert!(!tracker.complete_scan(1, true, &[], EngineMode::Normal, t0));
+        tracker.begin_scan(2, &[]);
+        assert!(tracker.complete_scan(
+            2,
+            true,
+            &[],
+            EngineMode::Normal,
+            t0 + Duration::from_secs(5)
+        ));
+
+        // 2 -> 2：原来 2 台设备，连续扫描仍为这 2 台（即使其中 1 台离线恢复读数）时触发
+        let mut tracker = CompatibleHintTracker::default();
+        tracker.begin_scan(1, &two);
+        assert!(!tracker.complete_scan(1, true, &two_recovered, EngineMode::Normal, t0));
+        tracker.begin_scan(2, &two_recovered);
+        assert!(tracker.complete_scan(
+            2,
+            true,
+            &two_recovered,
+            EngineMode::Normal,
+            t0 + Duration::from_secs(10)
+        ));
+
+        // 连续只点 2 次添加键盘（无候选）
+        let mut tracker = CompatibleHintTracker::default();
+        tracker.begin_keyboard_pick(1);
+        assert!(!tracker.complete_keyboard_pick(1, true, false, EngineMode::Normal, t0));
+        tracker.begin_keyboard_pick(2);
+        assert!(tracker.complete_keyboard_pick(
+            2,
+            true,
+            false,
+            EngineMode::Normal,
+            t0 + Duration::from_secs(10)
+        ));
+
+        // 连续添加键盘：有候选但用户取消未绑定算 1 次，再次点击无候选或再次取消即触发
+        let mut tracker = CompatibleHintTracker::default();
+        tracker.begin_keyboard_pick(1);
+        assert!(!tracker.complete_keyboard_pick(1, true, true, EngineMode::Normal, t0));
+        assert!(
+            !tracker
+                .finish_cancelled_keyboard_pick(EngineMode::Normal, t0 + Duration::from_secs(2))
+        );
+        tracker.begin_keyboard_pick(2);
+        assert!(!tracker.complete_keyboard_pick(
+            2,
+            true,
+            true,
+            EngineMode::Normal,
+            t0 + Duration::from_secs(4)
+        ));
+        assert!(
+            tracker.finish_cancelled_keyboard_pick(EngineMode::Normal, t0 + Duration::from_secs(6))
+        );
+
+        // 扫描 <-> 添加键盘 交替触发
+        let mut tracker = CompatibleHintTracker::default();
+        tracker.begin_scan(1, &two);
+        assert!(!tracker.complete_scan(1, true, &two, EngineMode::Normal, t0));
+        tracker.begin_keyboard_pick(2);
+        assert!(tracker.complete_keyboard_pick(
+            2,
+            true,
+            false,
+            EngineMode::Normal,
+            t0 + Duration::from_secs(5)
+        ));
+
+        let mut tracker = CompatibleHintTracker::default();
+        tracker.begin_keyboard_pick(1);
+        assert!(!tracker.complete_keyboard_pick(1, true, false, EngineMode::Normal, t0));
+        tracker.begin_scan(2, &two);
+        assert!(tracker.complete_scan(
+            2,
+            true,
+            &two,
+            EngineMode::Normal,
+            t0 + Duration::from_secs(10)
+        ));
+    }
+
+    #[test]
+    fn compatible_hint_respects_mode_dismissal_and_time_window() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let initial = vec![make_row("mouse-1", true)];
+
+        // 兼容模式下不触发；切回普通模式后允许重新触发
+        let mut tracker = CompatibleHintTracker::default();
+        tracker.begin_scan(1, &initial);
+        assert!(!tracker.complete_scan(1, true, &initial, EngineMode::Compatible, t0));
+        tracker.begin_keyboard_pick(2);
+        assert!(!tracker.complete_keyboard_pick(
+            2,
+            true,
+            false,
+            EngineMode::Compatible,
+            t0 + Duration::from_secs(5)
+        ));
+
+        // 用户关闭弹窗后在本次普通模式会话不再重复触发
+        let mut tracker = CompatibleHintTracker::default();
+        tracker.on_dismissed();
+        tracker.begin_scan(1, &initial);
+        assert!(!tracker.complete_scan(1, true, &initial, EngineMode::Normal, t0));
+        tracker.begin_keyboard_pick(2);
+        assert!(!tracker.complete_keyboard_pick(
+            2,
+            true,
+            false,
+            EngineMode::Normal,
+            t0 + Duration::from_secs(5)
+        ));
+        // 切换模式后再切回普通模式解除拒绝锁定
+        tracker.on_mode_changed(EngineMode::Compatible);
+        tracker.begin_scan(3, &initial);
+        assert!(!tracker.complete_scan(
+            3,
+            true,
+            &initial,
+            EngineMode::Normal,
+            t0 + Duration::from_secs(10)
+        ));
+        tracker.begin_scan(4, &initial);
+        assert!(tracker.complete_scan(
+            4,
+            true,
+            &initial,
+            EngineMode::Normal,
+            t0 + Duration::from_secs(12)
+        ));
+
+        // 超过 60s 窗口后旧记录过期，不触发
+        let mut tracker = CompatibleHintTracker::default();
+        tracker.begin_scan(1, &initial);
+        assert!(!tracker.complete_scan(1, true, &initial, EngineMode::Normal, t0));
+        tracker.begin_keyboard_pick(2);
+        assert!(!tracker.complete_keyboard_pick(
+            2,
+            true,
+            false,
+            EngineMode::Normal,
+            t0 + COMPATIBLE_HINT_WINDOW + Duration::from_secs(1),
+        ));
+    }
+
+    #[test]
+    fn compatible_hint_resets_on_new_device_or_bind_and_ignores_duplicate_receipts() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let one = vec![make_row("mouse-1", true)];
+        let two = vec![make_row("mouse-1", true), make_row("mouse-2", true)];
+        let three = vec![
+            make_row("mouse-1", true),
+            make_row("mouse-2", true),
+            make_row("kb-3", true),
+        ];
+
+        // 0 -> 1 或 2 -> 3 真正新增设备 ID 时重置计数，不误触发
+        let mut tracker = CompatibleHintTracker::default();
+        tracker.begin_scan(1, &[]);
+        assert!(!tracker.complete_scan(1, true, &[], EngineMode::Normal, t0));
+        tracker.begin_scan(2, &[]);
+        assert!(!tracker.complete_scan(
+            2,
+            true,
+            &one,
+            EngineMode::Normal,
+            t0 + Duration::from_secs(5)
+        ));
+        tracker.begin_scan(3, &two);
+        assert!(!tracker.complete_scan(
+            3,
+            true,
+            &two,
+            EngineMode::Normal,
+            t0 + Duration::from_secs(6)
+        ));
+        tracker.begin_scan(4, &two);
+        assert!(!tracker.complete_scan(
+            4,
+            true,
+            &three,
+            EngineMode::Normal,
+            t0 + Duration::from_secs(8)
+        ));
+
+        // 成功绑定设备后清空历史计数
+        let mut tracker = CompatibleHintTracker::default();
+        tracker.begin_scan(1, &one);
+        assert!(!tracker.complete_scan(1, true, &one, EngineMode::Normal, t0));
+        tracker.begin_keyboard_pick(2);
+        assert!(!tracker.complete_keyboard_pick(
+            2,
+            true,
+            true,
+            EngineMode::Normal,
+            t0 + Duration::from_secs(2)
+        ));
+        tracker.on_device_bound();
+        tracker.begin_scan(3, &two);
+        assert!(!tracker.complete_scan(
+            3,
+            true,
+            &two,
+            EngineMode::Normal,
+            t0 + Duration::from_secs(5)
+        ));
+
+        // 键盘扫描失败或重复收到同一 ID 回执时不误计数
+        let mut tracker = CompatibleHintTracker::default();
+        tracker.begin_keyboard_pick(1);
+        assert!(!tracker.complete_keyboard_pick(1, false, false, EngineMode::Normal, t0));
+        tracker.begin_keyboard_pick(2);
+        assert!(!tracker.complete_keyboard_pick(
+            2,
+            true,
+            false,
+            EngineMode::Normal,
+            t0 + Duration::from_secs(2)
+        ));
+        assert!(!tracker.complete_keyboard_pick(
+            2,
+            true,
+            false,
+            EngineMode::Normal,
+            t0 + Duration::from_secs(3)
+        ));
     }
 }

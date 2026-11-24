@@ -25,26 +25,132 @@ impl Panel {
             glass: self.state.prefs.glass,
         }
     }
-    pub(super) fn finish_edit(&mut self, save: bool, cx: &mut Context<Self>) {
-        if let Some((id, ed)) = self.editor.take() {
-            self.edit_blur = None;
-            if save {
-                let n = ed.read(cx).content.trim().to_owned();
-                if n.encode_utf16().count() <= 32 {
-                    self.issue(Command::Alias(id, n), cx)
-                }
+    /// 关闭当前弹窗并释放其输入框订阅。
+    pub(super) fn close_modal(&mut self, cx: &mut Context<Self>) {
+        let mut trigger_compatible_hint = false;
+        match self.modal.take() {
+            Some(Dialog::SuggestCompatibleMode) => self.compat_hint.on_dismissed(),
+            Some(Dialog::WhatsNew) => self.dismiss_whats_new(cx),
+            Some(Dialog::Pick {
+                kind: Kind::Keyboard,
+                ..
+            }) => {
+                trigger_compatible_hint = self.compat_hint.finish_cancelled_keyboard_pick(
+                    self.state.prefs.engine_mode,
+                    std::time::Instant::now(),
+                );
             }
-            cx.notify()
+            _ => {}
         }
+        self.modal_subs.clear();
+        if trigger_compatible_hint {
+            self.maybe_open_compatible_hint(cx);
+        }
+        cx.notify();
     }
-    fn edit(&mut self, id: String, name: String, w: &mut Window, cx: &mut Context<Self>) {
-        self.finish_edit(true, cx);
-        let ed = cx.new(|cx| crate::entry::TextInput::new(name, cx));
-        let h = ed.read(cx).focus_handle(cx);
-        self.editor = Some((id, ed));
-        self.edit_blur = Some(cx.on_blur(&h, w, |s, _, cx| s.finish_edit(true, cx)));
-        w.focus(&h);
-        cx.notify()
+
+    /// 打开统一设备编辑弹窗，支持同时修改设备名称、内置图标与图标 RGB 颜色。
+    fn open_edit_dialog(
+        &mut self,
+        device: battery_protocol::Descriptor,
+        display_name: String,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::device_display::{DeviceIcon, device_icon_in_mode, format_rgb_color};
+        self.modal = None;
+        self.modal_subs.clear();
+        let had_alias = self.state.prefs.aliases.contains_key(&device.id);
+        let appearance = self
+            .state
+            .prefs
+            .device_appearance(&device)
+            .cloned()
+            .unwrap_or_default();
+        let auto_icon = device_icon_in_mode(&device, self.state.prefs.engine_mode).unwrap_or(
+            match device.kind {
+                Kind::Mouse => DeviceIcon::Mouse,
+                Kind::Keyboard => DeviceIcon::Keyboard,
+                Kind::Audio => DeviceIcon::Headset,
+                Kind::Gamepad => DeviceIcon::Gamepad,
+                Kind::Bluetooth => DeviceIcon::Bluetooth,
+            },
+        );
+        let name_input = cx.new(|cx| {
+            crate::entry::TextInput::with_placeholder(
+                display_name.clone(),
+                self.t("device.edit.name_placeholder"),
+                true,
+                cx,
+            )
+        });
+        let color_value = appearance.color.map(format_rgb_color).unwrap_or_default();
+        let color_input = cx.new(|cx| {
+            crate::entry::TextInput::with_placeholder(
+                color_value,
+                self.t("device.edit.color_placeholder"),
+                false,
+                cx,
+            )
+        });
+        let name_focus = name_input.read(cx).focus_handle(cx);
+        self.modal_subs = vec![
+            cx.observe(&name_input, |_, _, cx| cx.notify()),
+            cx.observe(&color_input, |_, _, cx| cx.notify()),
+        ];
+        self.modal = Some(Dialog::EditDevice {
+            id: device.id,
+            initial_name: display_name,
+            had_alias,
+            auto_icon,
+            icon: appearance.icon,
+            name_input,
+            color_input,
+        });
+        w.focus(&name_focus);
+        cx.notify();
+    }
+
+    /// 校验并保存编辑弹窗中的设备别名、图标与 RGB 颜色。
+    pub(super) fn submit_edit_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(Dialog::EditDevice {
+            id,
+            initial_name,
+            had_alias,
+            icon,
+            name_input,
+            color_input,
+            ..
+        }) = self.modal.clone()
+        else {
+            return;
+        };
+        let trimmed_name = name_input.read(cx).content.trim().to_owned();
+        if trimmed_name.encode_utf16().count() > 32 {
+            return;
+        }
+        let Ok(color) =
+            crate::device_display::parse_rgb_color(color_input.read(cx).content.as_ref())
+        else {
+            return;
+        };
+        let alias = if trimmed_name.is_empty() {
+            Some(String::new())
+        } else if !had_alias && trimmed_name == initial_name {
+            None
+        } else {
+            Some(trimmed_name)
+        };
+        self.issue(
+            Command::UpdateDeviceDisplay {
+                id,
+                alias,
+                icon,
+                color,
+            },
+            cx,
+        );
+        self.close_modal(cx);
     }
     fn header(&self, k: Skin, cx: &mut Context<Self>) -> Div {
         let icon_btn = |id: &'static str, glyph: &'static str, col: Hsla| {
@@ -123,11 +229,9 @@ impl Panel {
                             },
                         )
                         .on_click(cx.listener(|s, _, _, cx| {
-                            s.finish_edit(true, cx);
                             s.settings_open = !s.settings_open;
                             s.popup = false;
-                            s.modal = None;
-                            cx.notify()
+                            s.close_modal(cx);
                         })),
                     )
                     .child(
@@ -319,7 +423,7 @@ impl Panel {
                     .min_w_0()
                     .child(txt(st, 11., k.card_secondary()).whitespace_normal()),
             );
-        let edit_id = id.clone();
+        let edit_device = d.clone();
         let pin_id = id.clone();
         let pinned = self.state.prefs.taskbar_pinned(&id);
         let display = name.clone();
@@ -356,7 +460,7 @@ impl Panel {
                     .hover(|e| e.bg(rgba(0x10b98128)))
                     .child(icon("edit", 13., k.dim()))
                     .on_click(cx.listener(move |s, _, w, cx| {
-                        s.edit(edit_id.clone(), display.clone(), w, cx)
+                        s.open_edit_dialog(edit_device.clone(), display.clone(), w, cx)
                     })),
             );
         if matches!(d.kind, Kind::Keyboard | Kind::Bluetooth) {
@@ -370,27 +474,17 @@ impl Panel {
                     .hover(|e| e.bg(rgba(0xef444426)))
                     .child(icon("close", 13., k.dim()))
                     .on_click(cx.listener(move |s, _, _, cx| {
+                        s.modal_subs.clear();
                         s.modal = Some(Dialog::Remove(remove_id.clone(), kind, title.clone()));
                         cx.notify()
                     })),
             )
         }
-        let title = if let Some((eid, edit)) = &self.editor
-            && eid == &id
-        {
-            div()
-                .w(px(170.))
-                .min_w_0()
-                .child(edit.clone())
-                .into_any_element()
-        } else {
-            txt(name, 15.5, k.text())
-                .font_weight(FontWeight::SEMIBOLD)
-                .truncate()
-                .min_w_0()
-                .max_w(px(200.))
-                .into_any_element()
-        };
+        let title = txt(name, 15.5, k.text())
+            .font_weight(FontWeight::SEMIBOLD)
+            .truncate()
+            .min_w_0()
+            .max_w(px(200.));
         let mut numbers = row().items_baseline().gap(px(3.)).flex_none().child(
             txt(
                 if show_percent {
@@ -850,6 +944,13 @@ impl Panel {
         for (key, on, cmd) in [
             ("auto_refresh", self.live, None),
             ("auto_update", p.auto_update, Some(Command::AutoUpdate)),
+            (
+                "release_notes_prompt",
+                p.show_release_notes_on_update,
+                Some(Command::SetShowReleaseNotesOnUpdate(
+                    !p.show_release_notes_on_update,
+                )),
+            ),
             ("autostart", self.state.autostart, Some(Command::Autostart)),
         ] {
             group = group.child(self.group(key, k, false, self.switch(key, on, cmd, k, cx)))
@@ -1180,17 +1281,17 @@ impl Render for Panel {
         }
         root.on_key_down(cx.listener(|s, e: &KeyDownEvent, w, cx| {
             if e.keystroke.key == "escape" {
-                if s.editor.is_some() {
-                    s.finish_edit(false, cx)
-                } else if s.modal.take().is_some() || s.popup {
+                if s.modal.is_some() || s.popup {
                     s.popup = false;
-                    cx.notify()
+                    s.close_modal(cx);
                 } else {
                     s.hide(w, cx)
                 }
                 cx.stop_propagation()
-            } else if e.keystroke.key == "enter" && s.editor.is_some() {
-                s.finish_edit(true, cx);
+            } else if e.keystroke.key == "enter"
+                && matches!(s.modal, Some(Dialog::EditDevice { .. }))
+            {
+                s.submit_edit_dialog(cx);
                 cx.stop_propagation()
             }
         }))

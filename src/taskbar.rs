@@ -4,7 +4,7 @@
 
 //! 纯 Win32 分层窗口实现的任务栏多设备电量小组件，避免在后台常驻 GPUI/D3D 上下文。
 use crate::{
-    device_display::{DeviceIcon, device_icon_in_mode},
+    device_display::DeviceIcon,
     model::{State, TaskbarLayout, TaskbarPosition},
     tooltip::Target as TooltipTarget,
     view::{
@@ -68,6 +68,8 @@ pub struct TaskbarItem {
     pub id: String,
     pub name: String,
     pub icon: DeviceIcon,
+    /// 用户自定义的 24-bit RGB 图标颜色（`None` 时沿用电池状态默认配色）。
+    pub icon_color: Option<u32>,
     pub percent: Option<u8>,
     pub charge: Charge,
     pub low_threshold: u8,
@@ -87,36 +89,37 @@ pub struct Content {
 impl Content {
     /// 从当前应用状态提取任务栏展示快照，离线或休眠设备自动隐藏。
     pub fn of(state: &State, dark_taskbar: bool) -> Self {
-        let items =
-            state
-                .prefs
-                .taskbar_devices
-                .iter()
-                .filter_map(|id| {
-                    let row = state.rows.iter().find(|r| &r.device.id == id)?;
-                    if !state.prefs.bound(&row.device) || row.error.is_some() {
-                        return None;
-                    }
-                    let battery = row.battery?;
-                    let icon = device_icon_in_mode(&row.device, state.prefs.engine_mode).unwrap_or(
-                        match row.device.kind {
-                            Kind::Mouse => DeviceIcon::Mouse,
-                            Kind::Keyboard => DeviceIcon::Keyboard,
-                            Kind::Audio => DeviceIcon::Headset,
-                            Kind::Gamepad => DeviceIcon::Gamepad,
-                            Kind::Bluetooth => DeviceIcon::Bluetooth,
-                        },
-                    );
-                    Some(TaskbarItem {
-                        id: row.device.id.clone(),
-                        name: state.row_name(row),
-                        icon,
-                        percent: battery.percentage(),
-                        charge: battery.charge,
-                        low_threshold: state.prefs.low,
-                    })
+        let items = state
+            .prefs
+            .taskbar_devices
+            .iter()
+            .filter_map(|id| {
+                let row = state.rows.iter().find(|r| &r.device.id == id)?;
+                if !state.prefs.bound(&row.device) || row.error.is_some() {
+                    return None;
+                }
+                let battery = row.battery?;
+                let icon = state
+                    .prefs
+                    .device_icon(&row.device)
+                    .unwrap_or(match row.device.kind {
+                        Kind::Mouse => DeviceIcon::Mouse,
+                        Kind::Keyboard => DeviceIcon::Keyboard,
+                        Kind::Audio => DeviceIcon::Headset,
+                        Kind::Gamepad => DeviceIcon::Gamepad,
+                        Kind::Bluetooth => DeviceIcon::Bluetooth,
+                    });
+                Some(TaskbarItem {
+                    id: row.device.id.clone(),
+                    name: state.row_name(row),
+                    icon,
+                    icon_color: state.prefs.device_icon_color(&row.device),
+                    percent: battery.percentage(),
+                    charge: battery.charge,
+                    low_threshold: state.prefs.low,
                 })
-                .collect();
+            })
+            .collect();
         Self {
             items,
             position: state.prefs.taskbar_position.clone(),
@@ -1762,6 +1765,8 @@ pub(crate) fn render_content(content: &Content, dpi: u32, tb_height: i32) -> Can
     let mut cursor_x = pad_x;
     for (item, text, item_w) in metrics {
         let color = item_color(item, content.dark_taskbar);
+        // 自定义 RGB 颜色仅用于设备图标本身；百分比与充电闪电继续沿用状态配色以保留低电/充电提示。
+        let icon_color = item.icon_color.unwrap_or(color);
         match content.layout {
             TaskbarLayout::Stacked => {
                 let icon_top = px(3, dpi).max((widget_h - icon_sz - text_font_px - px(2, dpi)) / 2);
@@ -1771,7 +1776,7 @@ pub(crate) fn render_content(content: &Content, dpi: u32, tb_height: i32) -> Can
                     icon_left,
                     icon_top as f32,
                     icon_sz as f32,
-                    color,
+                    icon_color,
                 );
                 if item.charge == Charge::Charging {
                     canvas.draw_charging_bolt(
@@ -1792,7 +1797,7 @@ pub(crate) fn render_content(content: &Content, dpi: u32, tb_height: i32) -> Can
             TaskbarLayout::Inline => {
                 let icon_left = cursor_x as f32 + px(2, dpi) as f32;
                 let icon_top = ((widget_h - icon_sz) as f32 * 0.5).max(1.0);
-                canvas.draw_device_icon(item.icon, icon_left, icon_top, icon_sz as f32, color);
+                canvas.draw_device_icon(item.icon, icon_left, icon_top, icon_sz as f32, icon_color);
                 let bolt_extra = if item.charge == Charge::Charging {
                     px(10, dpi)
                 } else {
@@ -2220,6 +2225,7 @@ mod tests {
                 id: "m".into(),
                 name: "Mouse".into(),
                 icon: DeviceIcon::Mouse,
+                icon_color: None,
                 percent: Some(55),
                 charge: Charge::Discharging,
                 low_threshold: 20,
@@ -2228,6 +2234,7 @@ mod tests {
                 id: "k".into(),
                 name: "Keyboard".into(),
                 icon: DeviceIcon::Keyboard,
+                icon_color: None,
                 percent: Some(60),
                 charge: Charge::Charging,
                 low_threshold: 20,
@@ -2255,5 +2262,36 @@ mod tests {
         let inline_canvas = render_content(&inline, 96, 48);
         assert!(inline_canvas.height < plain.height);
         assert!(inline_canvas.pixels.iter().any(|p| (p >> 24) > 200));
+    }
+
+    #[test]
+    fn custom_device_icon_and_color_apply_only_to_icon_preserving_battery_text_color() {
+        let mut st = State::demo();
+        let id = st.rows[0].device.id.clone();
+        st.prefs.taskbar_devices.push(id.clone());
+        st.prefs.device_appearances.insert(
+            id,
+            crate::model::DeviceAppearance {
+                icon: Some(DeviceIcon::Gamepad),
+                color: Some(0x3b82f6),
+            },
+        );
+        let content = Content::of(&st, true);
+        assert_eq!(content.items.len(), 1);
+        assert_eq!(content.items[0].icon, DeviceIcon::Gamepad);
+        assert_eq!(content.items[0].icon_color, Some(0x3b82f6));
+
+        let mut default_content = content.clone();
+        default_content.items[0].icon_color = None;
+        let colored = render_content(&content, 96, 48);
+        let default = render_content(&default_content, 96, 48);
+        assert_ne!(colored.pixels, default.pixels);
+        // 只有顶部图标区域的像素颜色不同，底部百分比文字保持一致的电池状态色。
+        let mid_row = (colored.height / 2) as usize;
+        let stride = colored.width as usize;
+        assert_eq!(
+            colored.pixels[mid_row * stride..],
+            default.pixels[mid_row * stride..]
+        );
     }
 }

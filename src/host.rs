@@ -581,6 +581,55 @@ pub fn run(demo: bool) -> Result<(), AppError> {
     let bus = Bus(tx, tid);
     let b = bus.clone();
     let svc = Service::start(p, demo, move || b.post(Msg::Data));
+    let health_start = !demo && std::env::args().any(|s| s == "--gpui-health-start");
+    let current_version = env!("APP_VERSION");
+    let should_show_whats_new = if !demo {
+        let (show_notes_enabled, seen) = {
+            let st = svc.state.lock().unwrap();
+            (
+                st.prefs.show_release_notes_on_update,
+                st.prefs.last_seen_release_notes_version.clone(),
+            )
+        };
+        if !show_notes_enabled {
+            if seen != current_version
+                && let Err(e) = svc.command(Command::MarkReleaseNotesSeen(current_version.into()))
+            {
+                eprintln!("Unable to record release notes version: {e}");
+            }
+            false
+        } else if seen == current_version {
+            false
+        } else if health_start
+            || crate::update::has_installed_update_record(current_version)
+            || (!seen.is_empty() && crate::update::is_newer_version(current_version, &seen))
+        {
+            if let Some(notes) = crate::update::load_installed_release_notes(current_version) {
+                svc.state.lock().unwrap().installed_release_notes = Some(notes);
+            } else {
+                svc.state.lock().unwrap().installed_release_notes = Some(InstalledReleaseNotes {
+                    version: current_version.into(),
+                    ..Default::default()
+                });
+                let wb = bus.clone();
+                crate::update::fetch_installed_release_notes_async(
+                    current_version.into(),
+                    svc.state.clone(),
+                    move || wb.post(Msg::Data),
+                );
+            }
+            true
+        } else {
+            if seen.is_empty()
+                && let Err(e) = svc.command(Command::MarkReleaseNotesSeen(current_version.into()))
+            {
+                eprintln!("Unable to record initial release notes version: {e}");
+            }
+            false
+        }
+    } else {
+        false
+    };
     if !demo {
         match crate::startup::enabled() {
             Ok(v) => svc.state.lock().unwrap().autostart = v,
@@ -710,9 +759,16 @@ pub fn run(demo: bool) -> Result<(), AppError> {
             b.post(Msg::Quit);
         });
     }
-    if !demo && std::env::args().any(|s| s == "--gpui-health-start") {
+    if health_start {
         println!("GPUI-HEALTH/1");
         let _ = std::io::stdout().flush();
+        if should_show_whats_new {
+            let prefs = svc.state.lock().unwrap().prefs.clone();
+            let loc = locale(&prefs);
+            let title = label(loc, "update.whats_new_title").replace("{version}", current_version);
+            let body = label(loc, "update.whats_new_balloon").replace("{version}", current_version);
+            balloon(&tray, &title, &body);
+        }
     }
     let probe_mode = demo && std::env::args().any(|s| s == "--exercise-tray");
     let mut handing_off = false;
@@ -1182,6 +1238,21 @@ mod audit_tray {
         assert_eq!(after_pin.menu, before_pin.menu);
         assert_ne!(after_pin.taskbar, before_pin.taskbar);
         assert_eq!(after_pin.taskbar.items.len(), 1);
+
+        assert!(st.prefs.change(
+            &Command::UpdateDeviceDisplay {
+                id: st.rows[0].device.id.clone(),
+                alias: None,
+                icon: Some(crate::device_display::DeviceIcon::Gamepad),
+                color: Some(0x3b82f6),
+            },
+            &st.candidates
+        ));
+        let after_appearance = TrayView::of(&st, a);
+        assert_eq!(after_appearance.icon, after_pin.icon);
+        assert_eq!(after_appearance.menu, after_pin.menu);
+        assert_ne!(after_appearance.tip, after_pin.tip);
+        assert_ne!(after_appearance.taskbar, after_pin.taskbar);
     }
     #[test]
     fn unread_pipe_does_not_block_state_or_exit_producer() {

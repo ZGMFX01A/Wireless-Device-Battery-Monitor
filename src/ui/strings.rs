@@ -108,6 +108,21 @@ pub fn label(locale: Locale, key: &str) -> &'static str {
             "Enable compatible mode",
             "Включить совместимость",
         ),
+        "dialog.suggest_compatible.title" => (
+            "未发现新设备，尝试兼容模式？",
+            "No new devices found. Try compatible mode?",
+            "Новые устройства не найдены. Включить режим совместимости?",
+        ),
+        "dialog.suggest_compatible.message" => (
+            "连续扫描或添加键盘均未发现新设备。开启兼容模式可扩展已支持接收器的识别范围；若仍无法识别，可前往「设置」进一步开启「探测未知设备」。",
+            "Repeated scans or keyboard searches found no new devices. Enabling Compatible mode expands recognition for supported receivers; if your device is still missing, you can also enable Probe unknown devices in Settings.",
+            "Повторное сканирование и поиск клавиатуры не обнаружили новых устройств. Режим совместимости расширяет распознавание поддерживаемых приёмников; при необходимости в настройках можно также включить «Поиск неизвестных устройств».",
+        ),
+        "dialog.suggest_compatible.confirm" => (
+            "开启兼容模式",
+            "Enable compatible mode",
+            "Включить совместимость",
+        ),
         "settings.unknown_probe.title" => (
             "探测未知设备（实验性）",
             "Probe unknown devices (Experimental)",
@@ -375,6 +390,16 @@ pub fn label(locale: Locale, key: &str) -> &'static str {
             "Automatically check updates at startup",
             "Проверять обновления при запуске",
         ),
+        "settings.release_notes_prompt.title" => (
+            "更新内容提醒",
+            "What's New Notifications",
+            "Уведомления об обновлениях",
+        ),
+        "settings.release_notes_prompt.subtitle" => (
+            "版本更新后提示并展示新功能与修复说明",
+            "Notify and show release notes after an update",
+            "Показывать список изменений после обновления",
+        ),
         "settings.autostart.title" => ("开机自启动", "Launch at Startup", "Запуск с Windows"),
         "settings.autostart.subtitle" => (
             "开机后在后台静默运行",
@@ -392,9 +417,36 @@ pub fn label(locale: Locale, key: &str) -> &'static str {
         "settings.theme.dark" => ("暗夜", "Dark", "Тёмное"),
         "dialog.ok" => ("确定", "OK", "ОК"),
         "dialog.cancel" => ("取消", "Cancel", "Отмена"),
+        "dialog.save" => ("保存", "Save", "Сохранить"),
         "dialog.connect" => ("连接", "Connect", "Подключить"),
         "dialog.add" => ("添加", "Add", "Добавить"),
         "dialog.remove" => ("确认移除", "Remove", "Удалить"),
+        "device.edit.title" => ("编辑设备", "Edit device", "Изменить устройство"),
+        "device.edit.name" => ("设备名称", "Device name", "Название устройства"),
+        "device.edit.name_placeholder" => (
+            "留空恢复默认名称",
+            "Leave empty for default",
+            "Оставьте пустым для названия по умолчанию",
+        ),
+        "device.edit.icon" => ("设备图标", "Device icon", "Значок устройства"),
+        "device.edit.icon_auto" => ("自动", "Auto", "Авто"),
+        "device.edit.color" => ("图标颜色 (RGB)", "Icon color (RGB)", "Цвет значка (RGB)"),
+        "device.edit.color_placeholder" => (
+            "#3B82F6 或 59, 130, 246",
+            "#3B82F6 or 59, 130, 246",
+            "#3B82F6 или 59, 130, 246",
+        ),
+        "device.edit.color_hint" => (
+            "支持 #RRGGBB 或 R, G, B，留空使用默认颜色",
+            "Supports #RRGGBB or R, G, B. Leave empty for default.",
+            "Поддерживаются #RRGGBB и R, G, B. Пустое поле — цвет по умолчанию.",
+        ),
+        "device.edit.color_invalid" => (
+            "颜色格式无效，请输入 #RRGGBB 或 R, G, B",
+            "Invalid color. Use #RRGGBB or R, G, B.",
+            "Неверный формат цвета. Используйте #RRGGBB или R, G, B.",
+        ),
+        "device.edit.color_clear" => ("恢复默认", "Reset", "Сбросить"),
         "dialog.star.title" => (
             "喜欢这款小工具吗？",
             "Enjoying this app?",
@@ -468,6 +520,11 @@ pub fn label(locale: Locale, key: &str) -> &'static str {
             "硬件设备扫描完成",
             "Hardware scan completed",
             "Сканирование устройств завершено",
+        ),
+        "toast.compatible_mode_enabled" => (
+            "已开启兼容模式，正在重新扫描...",
+            "Compatible mode enabled. Rescanning...",
+            "Режим совместимости включён, повторное сканирование...",
         ),
         "toast.hid_scan_completed" => (
             "接收器扫描完成",
@@ -598,6 +655,27 @@ pub fn label(locale: Locale, key: &str) -> &'static str {
         ),
         "update.modal_title" => ("发现新版本", "New Version Found", "Найдена новая версия"),
         "update.notes_title" => ("更新说明", "Release Notes", "Примечания к выпуску"),
+        "update.whats_new_title" => (
+            "已更新至 v{version}",
+            "Updated to v{version}",
+            "Обновлено до v{version}",
+        ),
+        "update.whats_new_subtitle" => (
+            "本次更新内容",
+            "What's New in This Version",
+            "Что нового в этой версии",
+        ),
+        "update.whats_new_balloon" => (
+            "已自动更新至 v{version}，点击托盘图标可查看新功能与更新说明。",
+            "Updated to v{version}. Click the tray icon to see what's new.",
+            "Обновлено до v{version}. Нажмите на значок в трее, чтобы посмотреть изменения.",
+        ),
+        "update.whats_new_loading" => (
+            "正在获取本次更新说明，你也可以直接点击下方按钮查看完整发布页。",
+            "Loading release notes, or open the release page below for full details.",
+            "Загрузка описания обновления. Вы также можете открыть страницу релиза ниже.",
+        ),
+        "update.view_release" => ("查看发布页 ↗", "View Release ↗", "Страница релиза ↗"),
         "update.later" => ("稍后再说", "Later", "Позже"),
         "update.start" => ("立即更新", "Update Now", "Обновить сейчас"),
         "update.cancel" => ("取消下载", "Cancel Download", "Отменить загрузку"),

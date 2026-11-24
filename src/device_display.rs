@@ -9,7 +9,7 @@ use battery_protocol::{
     engine::NamingPolicy,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DeviceIcon {
     Mouse,
     Keyboard,
@@ -17,6 +17,72 @@ pub enum DeviceIcon {
     Gamepad,
     Bluetooth,
     Receiver24g,
+}
+
+impl DeviceIcon {
+    /// 软件内置的全部 6 个设备图标（按展示顺序排列）。
+    pub const ALL: [Self; 6] = [
+        Self::Mouse,
+        Self::Keyboard,
+        Self::Headset,
+        Self::Gamepad,
+        Self::Bluetooth,
+        Self::Receiver24g,
+    ];
+
+    /// 返回对应 GPUI 矢量图标资源的路径键。
+    pub fn asset_name(self) -> &'static str {
+        match self {
+            Self::Mouse => "mouse",
+            Self::Keyboard => "keyboard",
+            Self::Headset => "headset",
+            Self::Gamepad => "gamepad",
+            Self::Bluetooth => "bluetooth",
+            Self::Receiver24g => "receiver24g",
+        }
+    }
+}
+
+/// 解析用户输入的 RGB 颜色字符串。
+/// 留空返回 `Ok(None)` 表示恢复默认颜色；支持 `#RRGGBB` / `RRGGBB` 或 `R, G, B` / `R G B` / `rgb(R, G, B)`。
+pub fn parse_rgb_color(input: &str) -> Result<Option<u32>, ()> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let hex_body = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    if hex_body.len() == 6 && hex_body.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return u32::from_str_radix(hex_body, 16).map(Some).map_err(|_| ());
+    }
+    if trimmed.starts_with('#') {
+        return Err(());
+    }
+    let inner = trimmed
+        .strip_prefix("rgb(")
+        .or_else(|| trimmed.strip_prefix("RGB("))
+        .or_else(|| trimmed.strip_prefix("Rgb("))
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or(trimmed);
+    let mut channels = inner
+        .split(|c: char| c == ',' || c == '，' || c.is_whitespace())
+        .filter(|part| !part.is_empty());
+    let (Some(r), Some(g), Some(b), None) = (
+        channels.next(),
+        channels.next(),
+        channels.next(),
+        channels.next(),
+    ) else {
+        return Err(());
+    };
+    let r = r.parse::<u8>().map_err(|_| ())?;
+    let g = g.parse::<u8>().map_err(|_| ())?;
+    let b = b.parse::<u8>().map_err(|_| ())?;
+    Ok(Some(((r as u32) << 16) | ((g as u32) << 8) | (b as u32)))
+}
+
+/// 将 24-bit RGB 颜色格式化为 `#RRGGBB`。
+pub fn format_rgb_color(rgb: u32) -> String {
+    format!("#{:06X}", rgb & 0x00ff_ffff)
 }
 
 pub fn is_hyperx(device: &Descriptor, source: Option<battery_protocol::Source>) -> bool {
@@ -567,5 +633,33 @@ mod tests {
             display_name(&device, Locale::Ru),
             "MCHOSE Приёмник 2,4 ГГц (Канал клавиатуры)"
         );
+    }
+
+    #[test]
+    fn rgb_color_parsing_and_formatting_cover_valid_and_invalid_inputs() {
+        assert_eq!(parse_rgb_color(""), Ok(None));
+        assert_eq!(parse_rgb_color("   "), Ok(None));
+        assert_eq!(parse_rgb_color("#3b82f6"), Ok(Some(0x3b82f6)));
+        assert_eq!(parse_rgb_color("00FF7F"), Ok(Some(0x00ff7f)));
+        assert_eq!(parse_rgb_color("59, 130, 246"), Ok(Some(0x3b82f6)));
+        assert_eq!(parse_rgb_color("59，130，246"), Ok(Some(0x3b82f6)));
+        assert_eq!(parse_rgb_color("59 130 246"), Ok(Some(0x3b82f6)));
+        assert_eq!(parse_rgb_color("rgb(255, 0, 128)"), Ok(Some(0xff0080)));
+        assert_eq!(parse_rgb_color("RGB(0, 0, 0)"), Ok(Some(0x000000)));
+        assert_eq!(format_rgb_color(0x3b82f6), "#3B82F6");
+        assert_eq!(format_rgb_color(0xff123456), "#123456");
+
+        for bad in [
+            "#fff",
+            "fff",
+            "#12345g",
+            "256, 0, 0",
+            "-1, 0, 0",
+            "10, 20",
+            "10, 20, 30, 40",
+            "not-a-color",
+        ] {
+            assert!(parse_rgb_color(bad).is_err(), "expected error for {bad:?}");
+        }
     }
 }

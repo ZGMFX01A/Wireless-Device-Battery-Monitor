@@ -87,6 +87,60 @@ pub struct CachedDeviceIdentity {
     probed_route: Option<battery_protocol::ProbedRoute>,
 }
 
+/// 已安装版本的双语更新说明（用于升级后首次打开面板时展示）。
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstalledReleaseNotes {
+    pub version: String,
+    #[serde(default)]
+    pub notes_zh: String,
+    #[serde(default)]
+    pub notes_en: String,
+}
+
+/// 根据当前语言选择更新说明文本：中文优先中文，英文和俄语均优先英文。
+pub fn select_release_notes<'a>(english: bool, zh: &'a str, en: &'a str) -> &'a str {
+    let (primary, fallback) = if english { (en, zh) } else { (zh, en) };
+    if !primary.trim().is_empty() {
+        primary
+    } else {
+        fallback
+    }
+}
+
+impl InstalledReleaseNotes {
+    /// 判断是否包含任一语言的非空更新说明正文。
+    pub fn has_content(&self) -> bool {
+        !self.notes_zh.trim().is_empty() || !self.notes_en.trim().is_empty()
+    }
+
+    /// 按界面语言返回展示文本（英文/俄语返回英文，中文返回中文，缺失时自动回退）。
+    pub fn text_for(&self, english: bool) -> &str {
+        select_release_notes(english, &self.notes_zh, &self.notes_en)
+    }
+}
+
+/// 用户为单个设备自定义的图标与图标 RGB 颜色。
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeviceAppearance {
+    /// 手动指定的设备图标；为 `None` 时沿用自动识别结果。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<crate::device_display::DeviceIcon>,
+    /// 手动指定的 24-bit RGB 图标颜色（`0x00RRGGBB`）；为 `None` 时跟随默认配色。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<u32>,
+}
+
+impl DeviceAppearance {
+    /// 判断是否未设置任何自定义外观项。
+    pub fn is_empty(&self) -> bool {
+        self.icon.is_none() && self.color.is_none()
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Prefs {
@@ -110,6 +164,9 @@ pub struct Prefs {
     pub keyboard_connection: Option<KeyboardConnection>,
     pub bluetooth: BTreeSet<String>,
     pub aliases: BTreeMap<String, String>,
+    /// 按设备逻辑 ID 保存的自定义图标与图标颜色配置。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub device_appearances: BTreeMap<String, DeviceAppearance>,
     pub bound_names: BTreeMap<String, String>,
     pub bound_identity: BTreeMap<String, CachedDeviceIdentity>,
     /// 固定到任务栏显示的设备 ID 列表（按固定顺序保存）。
@@ -127,6 +184,12 @@ pub struct Prefs {
     /// 上次展示 GitHub Star 支持提示的时间戳（Unix 秒；0 表示尚未展示过）。
     #[serde(default)]
     pub last_star_prompt_at: u64,
+    /// 用户已确认查阅过更新说明的版本号（用于升级后首次打开面板弹一次 What's New）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub last_seen_release_notes_version: String,
+    /// 版本更新后是否在托盘和主面板提示更新内容（默认开启）。
+    #[serde(default = "default_true")]
+    pub show_release_notes_on_update: bool,
 }
 impl Default for Prefs {
     fn default() -> Self {
@@ -146,6 +209,7 @@ impl Default for Prefs {
             keyboard_connection: None,
             bluetooth: Default::default(),
             aliases: Default::default(),
+            device_appearances: Default::default(),
             bound_names: Default::default(),
             bound_identity: Default::default(),
             taskbar_devices: Vec::new(),
@@ -153,6 +217,8 @@ impl Default for Prefs {
             taskbar_layout: Default::default(),
             taskbar_backdrop: false,
             last_star_prompt_at: 0,
+            last_seen_release_notes_version: String::new(),
+            show_release_notes_on_update: true,
         }
     }
 }
@@ -236,6 +302,22 @@ impl Prefs {
                 || crate::device_display::display_name(d, crate::view::locale(self)),
                 str::to_owned,
             )
+    }
+    /// 获取设备对应的自定义图标与颜色配置（按逻辑键索引）。
+    pub fn device_appearance(&self, d: &Descriptor) -> Option<&DeviceAppearance> {
+        self.device_appearances.get(self.name_key(d))
+    }
+    /// 获取设备最终展示的图标，优先采用用户手动指定的图标，否则回落到自动识别。
+    pub fn device_icon(&self, d: &Descriptor) -> Option<crate::device_display::DeviceIcon> {
+        self.device_appearance(d)
+            .and_then(|appearance| appearance.icon)
+            .or_else(|| crate::device_display::device_icon_in_mode(d, self.engine_mode))
+    }
+    /// 获取设备自定义的 24-bit RGB 图标颜色（未设置则返回 `None`）。
+    pub fn device_icon_color(&self, d: &Descriptor) -> Option<u32> {
+        self.device_appearance(d)
+            .and_then(|appearance| appearance.color)
+            .map(|c| c & 0x00ff_ffff)
     }
     /// 在有效回包到达前，使用绑定端点已确认的型号身份和图标。
     pub fn retain_bound_identity(&self, d: &mut Descriptor) {
@@ -469,6 +551,19 @@ impl Prefs {
                 remapped = true;
             }
         }
+        for (old, appearance) in self.device_appearances.clone() {
+            if old.starts_with("hid:")
+                && !(self.keyboard_connection.is_some() && self.keyboard.as_ref() == Some(&old))
+                && let Some(d) = exact(list, std::slice::from_ref(&old), None)
+                && d.id != old
+            {
+                self.device_appearances
+                    .entry(d.id.clone())
+                    .or_insert(appearance);
+                self.device_appearances.remove(&old);
+                remapped = true;
+            }
+        }
         let mut seen = BTreeSet::new();
         let mut next_taskbar = Vec::with_capacity(self.taskbar_devices.len());
         for old in std::mem::take(&mut self.taskbar_devices) {
@@ -510,6 +605,10 @@ impl Prefs {
                 if v.glass > 100
                     || ![0, 10, 20, 30].contains(&v.low)
                     || !POLL_INTERVALS.contains(&v.poll_interval_secs)
+                    || !v
+                        .device_appearances
+                        .values()
+                        .all(|a| a.color.is_none_or(|c| c <= 0x00ff_ffff))
                 {
                     return Err("invalid preference range".into());
                 }
@@ -679,12 +778,18 @@ pub struct State {
     pub keyboard_reply: Option<Receipt>,
     pub bluetooth_reply: Option<Receipt>,
     pub release_notes: String,
+    /// 英文版新版本发布说明（供非中文界面在检查更新弹窗中展示）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub release_notes_en: String,
     pub release_size: u64,
     pub bytes_per_sec: u64,
     pub note: Option<Notice>,
     pub demo: bool,
     pub autostart: bool,
     pub update: crate::update::Status,
+    /// 刚升级到当前版本但用户尚未阅读的更新说明。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_release_notes: Option<InstalledReleaseNotes>,
 }
 impl State {
     fn numbered_generic_name<'a>(
@@ -746,12 +851,14 @@ impl State {
             keyboard_reply,
             bluetooth_reply,
             release_notes,
+            release_notes_en,
             release_size,
             bytes_per_sec,
             note,
             demo,
             autostart,
             update,
+            installed_release_notes,
         } = self;
         prefs == &o.prefs
             && candidates == &o.candidates
@@ -760,12 +867,14 @@ impl State {
             && keyboard_reply == &o.keyboard_reply
             && bluetooth_reply == &o.bluetooth_reply
             && release_notes == &o.release_notes
+            && release_notes_en == &o.release_notes_en
             && release_size == &o.release_size
             && bytes_per_sec == &o.bytes_per_sec
             && note == &o.note
             && demo == &o.demo
             && autostart == &o.autostart
             && update == &o.update
+            && installed_release_notes == &o.installed_release_notes
             && rows.len() == o.rows.len()
             && rows.iter().zip(&o.rows).all(|(r, b)| {
                 let Row {
@@ -966,6 +1075,16 @@ pub enum Command {
     DeviceRequest(DeviceJob),
     Low,
     Alias(String, String),
+    /// 一次性更新设备的自定义别名、图标与图标 RGB 颜色。
+    UpdateDeviceDisplay {
+        id: String,
+        /// `None` 保持别名不变；`Some("")` 清除别名；`Some(non_empty)` 设置别名。
+        alias: Option<String>,
+        /// `None` 恢复自动识别图标；`Some(icon)` 指定内置图标。
+        icon: Option<crate::device_display::DeviceIcon>,
+        /// `None` 恢复默认配色；`Some(rgb)` 指定 24-bit RGB 图标颜色。
+        color: Option<u32>,
+    },
     Presented(u64),
     Hidden(u64),
     Ready,
@@ -985,6 +1104,10 @@ pub enum Command {
     SetTaskbarBackdrop(bool),
     /// 记录已展示 GitHub Star 支持提示的 Unix 时间戳（秒）。
     RecordStarPrompt(u64),
+    /// 标记用户已查阅过指定版本的更新说明，防止再次弹出。
+    MarkReleaseNotesSeen(String),
+    /// 控制版本更新后是否自动提醒并展示更新说明。
+    SetShowReleaseNotesOnUpdate(bool),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
@@ -994,6 +1117,13 @@ pub enum Event {
     Exit,
 }
 impl Prefs {
+    /// 判断指定设备 ID 是否指向当前已知候选、已保存绑定名称或已绑定外设。
+    fn known_device_id(&self, id: &str, list: &[Descriptor]) -> bool {
+        list.iter().any(|d| d.id == id)
+            || self.bound_names.contains_key(id)
+            || self.keyboard.as_deref() == Some(id)
+            || self.bluetooth.contains(id)
+    }
     pub fn change(&mut self, c: &Command, list: &[Descriptor]) -> bool {
         match c {
             Command::SetLanguage(v) => self.lang = v.clone(),
@@ -1064,6 +1194,7 @@ impl Prefs {
                         if let Some(old) = self.keyboard.replace(id.clone()).filter(|old| old != id)
                         {
                             self.bound_identity.remove(&old);
+                            self.device_appearances.remove(&old);
                             self.unpin_taskbar_device(&old);
                         }
                         self.keyboard_connection = None;
@@ -1080,16 +1211,13 @@ impl Prefs {
                 self.bluetooth.remove(id);
                 self.bound_names.remove(id);
                 self.bound_identity.remove(id);
+                self.device_appearances.remove(id);
                 self.unpin_taskbar_device(id);
             }
             Command::ToggleTaskbarDevice(id) => {
                 if self.taskbar_pinned(id) {
                     self.unpin_taskbar_device(id);
-                } else if list.iter().any(|d| d.id == *id)
-                    || self.bound_names.contains_key(id)
-                    || self.keyboard.as_deref() == Some(id.as_str())
-                    || self.bluetooth.contains(id)
-                {
+                } else if self.known_device_id(id, list) {
                     self.taskbar_devices.push(id.clone());
                 } else {
                     return false;
@@ -1102,6 +1230,12 @@ impl Prefs {
             Command::RecordStarPrompt(ts) if *ts > 0 => {
                 self.last_star_prompt_at = self.last_star_prompt_at.max(*ts);
             }
+            Command::MarkReleaseNotesSeen(v) if !v.is_empty() && v.len() <= 32 => {
+                self.last_seen_release_notes_version = v.clone();
+            }
+            Command::SetShowReleaseNotesOnUpdate(v) => {
+                self.show_release_notes_on_update = *v;
+            }
             Command::Alias(id, name)
                 if (list.iter().any(|d| d.id == *id) || self.bound_names.contains_key(id))
                     && name.encode_utf16().count() <= 32 =>
@@ -1110,6 +1244,34 @@ impl Prefs {
                     self.aliases.remove(id);
                 } else {
                     self.aliases.insert(id.clone(), name.trim().into());
+                }
+            }
+            Command::UpdateDeviceDisplay {
+                id,
+                alias,
+                icon,
+                color,
+            } if self.known_device_id(id, list)
+                && alias
+                    .as_ref()
+                    .is_none_or(|name| name.encode_utf16().count() <= 32)
+                && color.is_none_or(|rgb| rgb <= 0x00ff_ffff) =>
+            {
+                if let Some(name) = alias {
+                    if name.trim().is_empty() {
+                        self.aliases.remove(id);
+                    } else {
+                        self.aliases.insert(id.clone(), name.trim().into());
+                    }
+                }
+                let appearance = DeviceAppearance {
+                    icon: *icon,
+                    color: *color,
+                };
+                if appearance.is_empty() {
+                    self.device_appearances.remove(id);
+                } else {
+                    self.device_appearances.insert(id.clone(), appearance);
                 }
             }
             _ => return false,
@@ -1826,5 +1988,148 @@ mod formal_review_tests {
         assert_eq!(loaded, prefs);
         assert!(prefs.change(&Command::ClearTaskbarDevices, &[]));
         assert!(prefs.taskbar_devices.is_empty());
+    }
+
+    #[test]
+    fn device_appearance_updates_persist_resolve_and_clean_on_unbind() {
+        use crate::device_display::DeviceIcon;
+        let demo = State::demo();
+        let mouse = demo.rows[0].device.clone();
+        let kb = demo.rows[1].device.clone();
+        let mut prefs = demo.prefs.clone();
+
+        // 仅设置图标和颜色、未修改别名时不得写入 aliases。
+        assert!(prefs.change(
+            &Command::UpdateDeviceDisplay {
+                id: mouse.id.clone(),
+                alias: None,
+                icon: Some(DeviceIcon::Gamepad),
+                color: Some(0x3b82f6),
+            },
+            &demo.candidates
+        ));
+        assert!(!prefs.aliases.contains_key(&mouse.id));
+        assert_eq!(prefs.device_icon(&mouse), Some(DeviceIcon::Gamepad));
+        assert_eq!(prefs.device_icon_color(&mouse), Some(0x3b82f6));
+
+        // 越界 RGB 颜色与超长别名必须拒绝。
+        assert!(!prefs.change(
+            &Command::UpdateDeviceDisplay {
+                id: mouse.id.clone(),
+                alias: None,
+                icon: None,
+                color: Some(0x0100_0000),
+            },
+            &demo.candidates
+        ));
+        assert!(!prefs.change(
+            &Command::UpdateDeviceDisplay {
+                id: mouse.id.clone(),
+                alias: Some("a".repeat(33)),
+                icon: None,
+                color: None,
+            },
+            &demo.candidates
+        ));
+
+        // 同时修改键盘别名、图标与颜色后，落盘与加载应完整保留。
+        assert!(prefs.change(
+            &Command::UpdateDeviceDisplay {
+                id: kb.id.clone(),
+                alias: Some("工作键盘".into()),
+                icon: Some(DeviceIcon::Headset),
+                color: Some(0x10b981),
+            },
+            &demo.candidates
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences-v2.json");
+        prefs.save(&path).unwrap();
+        let mut loaded = Prefs::load(&path).unwrap();
+        assert_eq!(loaded, prefs);
+        assert_eq!(
+            loaded.aliases.get(&kb.id).map(String::as_str),
+            Some("工作键盘")
+        );
+        assert_eq!(loaded.device_icon(&kb), Some(DeviceIcon::Headset));
+        assert_eq!(loaded.device_icon_color(&kb), Some(0x10b981));
+
+        // 旧配置缺失 device_appearances 时应默认空，越界颜色文件加载应被拒绝。
+        let legacy: Prefs = serde_json::from_str(r#"{"glass":20}"#).unwrap();
+        assert!(legacy.device_appearances.is_empty());
+        let bad_path = dir.path().join("bad-color.json");
+        std::fs::write(
+            &bad_path,
+            r#"{"device_appearances":{"m":{"color":16777216}}}"#,
+        )
+        .unwrap();
+        assert!(Prefs::load(&bad_path).is_err());
+
+        // 清空外观配置、解绑键盘时应清理残留记录。
+        assert!(loaded.change(
+            &Command::UpdateDeviceDisplay {
+                id: mouse.id.clone(),
+                alias: Some(String::new()),
+                icon: None,
+                color: None,
+            },
+            &demo.candidates
+        ));
+        assert!(!loaded.device_appearances.contains_key(&mouse.id));
+        assert!(loaded.change(&Command::Unbind(kb.id.clone()), &demo.candidates));
+        assert!(!loaded.device_appearances.contains_key(&kb.id));
+
+        // HID 键迁移时应同步迁移 device_appearances。
+        let mut migrating = Prefs::default();
+        migrating.device_appearances.insert(
+            "hid:old".into(),
+            DeviceAppearance {
+                icon: Some(DeviceIcon::Gamepad),
+                color: Some(0xff6600),
+            },
+        );
+        let new_desc = Descriptor {
+            id: "hid:new".into(),
+            name: "Xbox Controller".into(),
+            kind: Kind::Mouse,
+            legacy_ids: vec!["hid:old".into()],
+            identity: None,
+            generic_name: None,
+        };
+        assert!(migrating.resolve(std::slice::from_ref(&new_desc)));
+        assert!(!migrating.device_appearances.contains_key("hid:old"));
+        assert_eq!(migrating.device_icon(&new_desc), Some(DeviceIcon::Gamepad));
+        assert_eq!(migrating.device_icon_color(&new_desc), Some(0xff6600));
+    }
+
+    #[test]
+    fn release_notes_preferences_and_language_selection() {
+        let legacy: Prefs = serde_json::from_str(r#"{"glass":20}"#).unwrap();
+        assert!(legacy.last_seen_release_notes_version.is_empty());
+        assert!(legacy.show_release_notes_on_update);
+
+        let mut prefs = Prefs::default();
+        assert!(prefs.show_release_notes_on_update);
+        assert!(prefs.change(&Command::SetShowReleaseNotesOnUpdate(false), &[]));
+        assert!(!prefs.show_release_notes_on_update);
+        assert!(prefs.change(&Command::SetShowReleaseNotesOnUpdate(true), &[]));
+        assert!(prefs.show_release_notes_on_update);
+        assert!(!prefs.change(&Command::MarkReleaseNotesSeen(String::new()), &[]));
+        assert!(prefs.change(&Command::MarkReleaseNotesSeen("3.2.0".into()), &[]));
+        assert_eq!(prefs.last_seen_release_notes_version, "3.2.0");
+
+        let notes = InstalledReleaseNotes {
+            version: "3.2.0".into(),
+            notes_zh: "中文说明".into(),
+            notes_en: "English notes".into(),
+        };
+        assert_eq!(notes.text_for(false), "中文说明");
+        assert_eq!(notes.text_for(true), "English notes");
+
+        assert_eq!(
+            select_release_notes(false, "", "English only"),
+            "English only"
+        );
+        assert_eq!(select_release_notes(true, "仅中文", "   "), "仅中文");
     }
 }

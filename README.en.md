@@ -13,7 +13,7 @@ No more opening driver apps one by one, or remembering to charge only after a pe
 [![Latest Release](https://img.shields.io/github/v/release/ZGMFX01A/Wireless-Device-Battery-Monitor?display_name=tag&sort=semver&style=flat-square)](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/releases)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)](https://www.microsoft.com/windows)
 [![Downloads](https://img.shields.io/github/downloads/ZGMFX01A/Wireless-Device-Battery-Monitor/total?label=Downloads&logo=github&style=flat-square)](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/releases)
-[![License: Wireless Device Battery Monitor License](https://img.shields.io/badge/License-Wireless%20Device%20Battery%20Monitor%20License-orange?style=flat-square)](LICENSE)
+[![License: Non-Commercial](https://img.shields.io/badge/License-Non--Commercial-orange?style=flat-square)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/ZGMFX01A/Wireless-Device-Battery-Monitor?style=flat-square&logo=github)](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/stargazers)
 <br/>
 [![Rust](https://img.shields.io/badge/Rust-1.85%2B-DEA584?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)

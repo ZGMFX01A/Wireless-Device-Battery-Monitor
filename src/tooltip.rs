@@ -5,7 +5,8 @@
 //! A small, nonactivating tray tooltip. It lives on the host message-pump thread
 //! and uses GDI only; hovering never starts the GPUI child or touches devices.
 use crate::{
-    device_display::{DeviceIcon, device_icon_in_mode, icon_accessible_name},
+    device_display::DeviceIcon,
+    device_display::icon_accessible_name,
     model::{State, Theme},
     view::{
         apps_use_dark_theme, locale,
@@ -27,6 +28,7 @@ use windows_sys::Win32::{
 struct Device {
     name: String,
     icon: Option<DeviceIcon>,
+    icon_color: Option<u32>,
     value: String,
     charge: Option<Charge>,
     tone: BatteryTone,
@@ -55,7 +57,8 @@ impl Content {
                             .take(180)
                             .map(|c| if c.is_control() { ' ' } else { c })
                             .collect(),
-                        icon: device_icon_in_mode(&r.device, state.prefs.engine_mode),
+                        icon: state.prefs.device_icon(&r.device),
+                        icon_color: state.prefs.device_icon_color(&r.device),
                         value: if !online {
                             label(locale, "tray.offline").into()
                         } else {
@@ -630,7 +633,7 @@ fn paint(hwnd: HWND, dc: HDC) {
                 MoveToEx(dc, label_left, top, std::ptr::null_mut());
                 LineTo(dc, right, top);
             }
-            SetDCPenColor(dc, rgb(skin.dim_rgb()));
+            SetDCPenColor(dc, rgb(row.icon_color.unwrap_or_else(|| skin.dim_rgb())));
             if let Some(icon) = row.icon {
                 draw_device_icon(dc, icon, inset, top + (row_height - glyph) / 2, glyph);
             }
@@ -1106,5 +1109,23 @@ mod tests {
         drop(tooltip);
         assert_eq!(unsafe { IsWindow(hwnd) }, 0);
         assert!(snapshot(hwnd).is_none());
+    }
+
+    #[test]
+    fn custom_icon_and_color_propagate_to_tooltip_content() {
+        let mut state = State::demo();
+        state.prefs.lang = crate::model::Language::En;
+        let id = state.rows[0].device.id.clone();
+        state.prefs.device_appearances.insert(
+            id,
+            crate::model::DeviceAppearance {
+                icon: Some(DeviceIcon::Gamepad),
+                color: Some(0xff5500),
+            },
+        );
+        let content = Content::of(&state);
+        assert_eq!(content.rows[0].icon, Some(DeviceIcon::Gamepad));
+        assert_eq!(content.rows[0].icon_color, Some(0xff5500));
+        assert!(content.accessible_text().contains("(Gamepad)"));
     }
 }

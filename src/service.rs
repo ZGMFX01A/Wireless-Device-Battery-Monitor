@@ -2107,6 +2107,16 @@ impl Service {
                     p.save(&Prefs::path()?)?
                 }
                 s.prefs = p;
+                if let Command::MarkReleaseNotesSeen(ref version) = c
+                    && s.installed_release_notes
+                        .as_ref()
+                        .is_some_and(|n| n.version == *version)
+                {
+                    s.installed_release_notes = None;
+                }
+                if matches!(c, Command::SetShowReleaseNotesOnUpdate(false)) {
+                    s.installed_release_notes = None;
+                }
                 s.prune_unbound();
                 s.demo_reconcile();
                 drop(s);
@@ -2119,6 +2129,10 @@ impl Service {
                         | Command::SetTaskbarPosition(_)
                         | Command::SetTaskbarLayout(_)
                         | Command::SetTaskbarBackdrop(_)
+                        | Command::RecordStarPrompt(_)
+                        | Command::MarkReleaseNotesSeen(_)
+                        | Command::SetShowReleaseNotesOnUpdate(_)
+                        | Command::UpdateDeviceDisplay { .. }
                 ) {
                     self.signals.both(PREFS)
                 }

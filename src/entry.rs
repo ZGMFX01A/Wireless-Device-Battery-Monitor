@@ -5,7 +5,7 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
-    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, hsla,
+    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill,
     point, prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::*;
@@ -479,7 +479,7 @@ impl Element for TextElement {
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), hsla(0., 0., 0., 0.2))
+            (input.placeholder.clone(), style.color.opacity(0.42))
         } else {
             (content, style.color)
         };
@@ -663,19 +663,36 @@ pub fn register(cx: &mut App) {
     ]);
 }
 impl TextInput {
-    pub fn new(value: String, cx: &mut Context<Self>) -> Self {
+    /// 创建支持自定义占位提示文本与初始选区策略的文本输入框。
+    pub fn with_placeholder(
+        value: String,
+        placeholder: impl Into<SharedString>,
+        select_all: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let len = value.len();
         Self {
             focus_handle: cx.focus_handle(),
             content: value.into(),
-            placeholder: "…".into(),
-            selected_range: 0..len,
+            placeholder: placeholder.into(),
+            selected_range: if select_all { 0..len } else { len..len },
             selection_reversed: false,
             marked_range: None,
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
         }
+    }
+
+    /// 以代码方式更新当前文本内容并重置光标至末尾。
+    pub fn set_content(&mut self, value: impl Into<String>, cx: &mut Context<Self>) {
+        let value = value.into();
+        let len = value.len();
+        self.content = value.into();
+        self.selected_range = len..len;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
     }
 }
 
