@@ -1,9 +1,9 @@
+# SPDX-FileCopyrightText: 2026 ZGMFX01A
+# SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+# See LICENSE in the repository root for the full terms.
+
 name: Application checks
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read

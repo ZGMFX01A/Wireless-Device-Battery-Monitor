@@ -7,18 +7,24 @@ name: Build and Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing stable tag (e.g. v3.1.0); leave empty when running directly from a v* tag ref'
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   build:
     name: Verify and sign Windows release
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    if: (github.event_name == 'push' && github.ref_type == 'tag') || github.event_name == 'workflow_dispatch'
     runs-on: windows-2022
     timeout-minutes: 60
     outputs:
@@ -31,14 +37,24 @@ jobs:
       - name: Resolve and validate explicit release identity
         id: identity
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.release_tag }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           PRIVATE_CORE_ACCESS_TOKEN: ${{ secrets.PRIVATE_CORE_ACCESS_TOKEN }}
           GPUI_UPDATE_SIGNING_KEY: ${{ secrets.GPUI_UPDATE_SIGNING_KEY }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:REF_TYPE -cne 'tag') { throw 'Only an explicit tag push may build a release' }
-          $tag = $env:REF_NAME
+          if ($env:EVENT_NAME -ceq 'push') {
+            if ($env:REF_TYPE -cne 'tag') { throw 'Only an explicit tag push may build a release' }
+            $tag = $env:REF_NAME
+          } elseif ($env:EVENT_NAME -ceq 'workflow_dispatch') {
+            $tag = if ($null -ne $env:INPUT_TAG) { $env:INPUT_TAG.Trim() } else { '' }
+            if ([string]::IsNullOrEmpty($tag) -and $env:REF_TYPE -ceq 'tag') { $tag = $env:REF_NAME }
+            if ([string]::IsNullOrEmpty($tag)) { throw 'Provide release_tag (vMAJOR.MINOR.PATCH) or run workflow_dispatch from a v* tag' }
+          } else {
+            throw 'Only an explicit tag push or manual workflow_dispatch may build a release'
+          }
           if ($tag -cnotmatch '^v(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})$') { throw 'An existing stable vMAJOR.MINOR.PATCH tag is required' }
           $version = $tag.Substring(1)
           foreach ($part in $version.Split('.')) { if ([uint32]$part -gt 65535) { throw 'Version field overflow' } }
