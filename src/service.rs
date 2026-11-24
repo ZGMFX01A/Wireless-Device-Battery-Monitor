@@ -72,6 +72,8 @@ pub struct Signals {
     probe_results_hid: Mutex<VecDeque<ProbeBatchResult>>,
     probe_results_bt: Mutex<VecDeque<ProbeBatchResult>>,
     probe_control: Mutex<Option<ProbeControl>>,
+    bt_xbox_gamepad_active: std::sync::atomic::AtomicBool,
+    bt_gamesir_cyclone_active: std::sync::atomic::AtomicBool,
 }
 /// One recovery per wake cycle. A late user-input notification after automatic resume
 /// is not a second wake. A fresh suspend always rearms recovery, even inside 10 s.
@@ -234,6 +236,22 @@ fn retains_last_peripheral_sample(source: Source) -> bool {
             | Source::Valkyrie
             | Source::Hecate
             | Source::Xctech
+            | Source::DriverCore
+            | Source::Evision
+            | Source::Sonix
+            | Source::Semico
+            | Source::MchoseGlw
+            | Source::AulaSc580
+            | Source::SteelSeries
+            | Source::Corsair
+            | Source::Keychron
+            | Source::ViaKeyboard
+            | Source::Rapoo
+            | Source::Zowie
+            | Source::Xenta
+            | Source::VendorMouse
+            | Source::VendorAudio
+            | Source::Gamepad
     )
 }
 impl Slot {
@@ -324,8 +342,9 @@ impl Slot {
     }
 }
 enum Target {
-    H(hid::Target, Option<Box<hid::Session>>),
-    B(bluetooth::BtTarget),
+    H(Box<hid::Target>, Option<Box<hid::Session>>),
+    B(Box<bluetooth::BtTarget>),
+    X(Box<battery_protocol::xinput::XInputTarget>),
 }
 struct TargetSample {
     reading: Result<Reading, String>,
@@ -434,7 +453,7 @@ impl Target {
     fn probed_route(&self) -> Option<ProbedRoute> {
         match self {
             Self::H(t, _) => t.probed_route(),
-            Self::B(_) => None,
+            Self::B(_) | Self::X(_) => None,
         }
     }
 
@@ -442,12 +461,14 @@ impl Target {
         match self {
             Self::H(t, _) => &t.info,
             Self::B(t) => &t.info,
+            Self::X(t) => &t.info,
         }
     }
     fn same_endpoint(&self, prior: &Self) -> bool {
         match (self, prior) {
             (Self::H(t, _), Self::H(old, _)) => t.same_endpoint(old),
             (Self::B(t), Self::B(old)) => t.same_endpoint(old),
+            (Self::X(t), Self::X(old)) => t.same_endpoint(old),
             _ => false,
         }
     }
@@ -457,6 +478,9 @@ impl Target {
             (Self::B(t), Self::B(old)) if t.same_endpoint(old) => {
                 t.info.identity.clone_from(&old.info.identity);
             }
+            (Self::X(t), Self::X(old)) if t.same_endpoint(old) => {
+                t.info.identity.clone_from(&old.info.identity);
+            }
             _ => (),
         }
     }
@@ -464,6 +488,7 @@ impl Target {
         match (self, prior) {
             (Self::H(t, _), Self::H(old, _)) => t.association_changed_from(old),
             (Self::B(t), Self::B(old)) => !t.same_endpoint(old),
+            (Self::X(t), Self::X(old)) => !t.same_endpoint(old),
             _ => true,
         }
     }
@@ -491,6 +516,7 @@ impl Target {
                 reading
             })(),
             Self::B(t) => t.read(),
+            Self::X(t) => t.read(),
         };
         TargetSample {
             reading,
@@ -510,7 +536,7 @@ impl Target {
             }
             let fresh = t.rediscover().ok()??;
             let s = fresh.open().ok()?;
-            Self::H(fresh, Some(Box::new(s)))
+            Self::H(Box::new(fresh), Some(Box::new(s)))
         };
         Some(replace_with_reopened(self, rediscovered))
     }
@@ -1092,7 +1118,7 @@ fn run(
                 let prefs = &state.lock().unwrap().prefs;
                 for target in batch.targets {
                     let target = merge_discovered_target(
-                        Target::H(target, None),
+                        Target::H(Box::new(target), None),
                         &mut devices,
                         &mut slots,
                         true,
@@ -1186,9 +1212,8 @@ fn run(
                 } else {
                     match bluetooth_initialization_error.as_ref() {
                         Some(error) => Err(error.clone()),
-                        None => {
-                            bluetooth::discover().map(|ds| ds.into_iter().map(Target::B).collect())
-                        }
+                        None => bluetooth::discover()
+                            .map(|ds| ds.into_iter().map(|t| Target::B(Box::new(t))).collect()),
                     }
                 };
                 let private = if let Some(p) = compatible.as_mut() {
@@ -1205,7 +1230,11 @@ fn run(
                 } else {
                     hid::discover_private_bluetooth_in_mode(mode)
                 }
-                .map(|ds| ds.into_iter().map(|t| Target::H(t, None)).collect());
+                .map(|ds| {
+                    ds.into_iter()
+                        .map(|t| Target::H(Box::new(t), None))
+                        .collect()
+                });
                 let (targets, partial_error) = merge_bluetooth_discovery(standard, private);
                 if let Some(error) = partial_error {
                     recover_only = true;
@@ -1232,11 +1261,33 @@ fn run(
                     warnings = found.warnings;
                     keyboard_inventory = Some(Ok(found.keyboards));
                     unpaired = found.unpaired;
-                    found
+                    let mut claimed: std::collections::HashSet<(u16, u16)> = found
+                        .targets
+                        .iter()
+                        .filter_map(hid::Target::usb_vid_pid)
+                        .collect();
+                    if sig
+                        .bt_gamesir_cyclone_active
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        claimed.insert(battery_protocol::xinput::GAMESIR_CYCLONE_PRO_VID_PID);
+                    }
+                    let skip_xbox = sig
+                        .bt_xbox_gamepad_active
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let mut out: Vec<Target> = found
                         .targets
                         .into_iter()
-                        .map(|d| Target::H(d, None))
-                        .collect()
+                        .map(|d| Target::H(Box::new(d), None))
+                        .collect();
+                    if !continuation {
+                        out.extend(
+                            battery_protocol::xinput::discover(&claimed, skip_xbox)
+                                .into_iter()
+                                .map(|t| Target::X(Box::new(t))),
+                        );
+                    }
+                    out
                 })
             };
             let scan_result = list.as_ref().map(|_| ()).map_err(Clone::clone);
@@ -1269,6 +1320,18 @@ fn run(
                                 devices.push(old_device);
                             }
                         }
+                    }
+                    if bt {
+                        let has_xbox = devices
+                            .iter()
+                            .any(|t| bluetooth::is_xbox_controller_name(&t.data().name));
+                        let has_gamesir = devices
+                            .iter()
+                            .any(|t| bluetooth::is_gamesir_cyclone_name(&t.data().name));
+                        sig.bt_xbox_gamepad_active
+                            .store(has_xbox, std::sync::atomic::Ordering::Relaxed);
+                        sig.bt_gamesir_cyclone_active
+                            .store(has_gamesir, std::sync::atomic::Ordering::Relaxed);
                     }
                     if recover_only {
                         slots.retain(|id, _| devices.iter().any(|t| t.data().id == *id));
@@ -1512,7 +1575,7 @@ fn run(
                     if prefs.bound(&t.info)
                         && (force || slots.get(&t.info.id).is_none_or(|s| s.due <= due_at)) =>
                 {
-                    Some(t)
+                    Some(t.as_ref())
                 }
                 _ => None,
             }))
