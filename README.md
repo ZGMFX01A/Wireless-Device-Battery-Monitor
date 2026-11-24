@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/app.ico" width="96" height="96" alt="无线设备电量监控" />
+<img src="assets/logo.png" width="96" height="96" alt="无线设备电量监控" />
 
 # 无线设备电量监控
 

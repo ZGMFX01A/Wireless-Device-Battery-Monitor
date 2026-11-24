@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/app.ico" width="96" height="96" alt="Wireless Device Battery Monitor" />
+<img src="assets/logo.png" width="96" height="96" alt="Wireless Device Battery Monitor" />
 
 # Wireless Device Battery Monitor
 
