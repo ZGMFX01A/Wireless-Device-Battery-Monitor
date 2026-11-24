@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 ZGMFX01A
+# SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
+# See LICENSE in the repository root for the full terms.
+
 param([string]$OutDir, [switch]$Ui)
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/Common.ps1"
@@ -42,6 +46,7 @@ try {
     $exe = Join-Path $metadata.target_directory 'release/mouse-battery-gpui.exe'
     if ((Step 'version-check' $exe @('--version') 30).Trim() -cne $version) { throw 'Executable version mismatch' }
     Step 'smoke' $exe @('--smoke-test') 30 | Out-Null
+    Step 'smoke-compat' $exe @('--smoke-test','compat') 30 | Out-Null
     $tree = Step 'deps' 'cargo' @('tree','--locked','-p','mouse-battery-gpui','-e','normal')
     if ($tree -match '\b(?:tauri|wry|webview2-com|pyo3|pythonnet) v\d') { throw 'Unexpected runtime dependency' }
     if ($Ui) {

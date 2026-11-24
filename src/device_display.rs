@@ -5,7 +5,8 @@
 //! Pure presentation decisions shared by native UI surfaces.
 use crate::view::strings::{Locale, label};
 use battery_protocol::{
-    BatteryCapability, ConnectionKind, Descriptor, DeviceCategory, GenericName, Kind,
+    BatteryCapability, ConnectionKind, Descriptor, DeviceCategory, EngineMode, GenericName, Kind,
+    engine::NamingPolicy,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,7 +69,18 @@ pub fn is_scyrox(device: &Descriptor, source: Option<battery_protocol::Source>) 
     confirmed_model || scyrox_receiver || own_vid_sample
 }
 
+/// 默认沿用标准设备图标策略；兼容模式请使用 `device_icon_in_mode`。
+#[cfg(test)]
 pub fn device_icon(device: &Descriptor) -> Option<DeviceIcon> {
+    device_icon_with_policy(device, NamingPolicy::Standard)
+}
+
+/// 普通模式保持原有接收器图标，兼容模式优先显示通用设备品类。
+pub fn device_icon_in_mode(device: &Descriptor, mode: EngineMode) -> Option<DeviceIcon> {
+    device_icon_with_policy(device, mode.naming_policy())
+}
+
+fn device_icon_with_policy(device: &Descriptor, policy: NamingPolicy) -> Option<DeviceIcon> {
     let Some(identity) = &device.identity else {
         return Some(match device.kind {
             Kind::Mouse => DeviceIcon::Mouse,
@@ -81,7 +93,12 @@ pub fn device_icon(device: &Descriptor) -> Option<DeviceIcon> {
     if identity.battery == BatteryCapability::Absent {
         return None;
     }
-    if identity.model_key.is_some()
+    if (identity.model_key.is_some()
+        || (policy == NamingPolicy::Compatible
+            && matches!(
+                device.generic_name,
+                Some(GenericName::UnknownDevice | GenericName::Receiver24g { brand: None, .. })
+            )))
         && let Some(icon) = category_icon(identity.category)
     {
         return Some(icon);
@@ -167,6 +184,106 @@ pub fn icon_accessible_name(locale: Locale, icon: DeviceIcon) -> &'static str {
 mod tests {
     use super::*;
     use battery_protocol::{DeviceIdentity, ModelSource};
+
+    #[test]
+    fn recognition_modes_keep_exact_names_icons_and_badges() {
+        let cases = [
+            (
+                "Logitech G Pro X Superlight",
+                "legacy:046d:c547",
+                DeviceCategory::Mouse,
+                DeviceIcon::Mouse,
+                (false, false, false),
+            ),
+            (
+                "Razer Viper V3 Pro",
+                "legacy:1532:00c0",
+                DeviceCategory::Mouse,
+                DeviceIcon::Mouse,
+                (false, false, false),
+            ),
+            (
+                "ROG Harpe Ace",
+                "legacy:0b05:1ac6",
+                DeviceCategory::Mouse,
+                DeviceIcon::Mouse,
+                (false, false, false),
+            ),
+            (
+                "HyperX Cloud II",
+                "legacy:03f0:06be",
+                DeviceCategory::Headset,
+                DeviceIcon::Headset,
+                (true, false, false),
+            ),
+            (
+                "Turtle Beach Stealth",
+                "legacy:10f5:2256",
+                DeviceCategory::Headset,
+                DeviceIcon::Headset,
+                (false, true, false),
+            ),
+            (
+                "Scyrox V8S",
+                "scyrox:395a:000d",
+                DeviceCategory::Mouse,
+                DeviceIcon::Mouse,
+                (false, false, true),
+            ),
+            (
+                "AULA F87 Pro V2",
+                "aula_f87_pro_v2_z",
+                DeviceCategory::Keyboard,
+                DeviceIcon::Keyboard,
+                (false, false, false),
+            ),
+        ];
+        for (name, key, category, icon, badges) in cases {
+            let mut d = descriptor(
+                category,
+                ConnectionKind::Rf24,
+                BatteryCapability::Present,
+                Some(key),
+            );
+            d.name = name.into();
+            for mode in [EngineMode::Normal, EngineMode::Compatible] {
+                assert_eq!(display_name(&d, Locale::Zh), name);
+                assert_eq!(device_icon_in_mode(&d, mode), Some(icon));
+                assert_eq!(
+                    (
+                        is_hyperx(&d, None),
+                        is_turtle_beach(&d, None),
+                        is_scyrox(&d, None)
+                    ),
+                    badges
+                );
+            }
+        }
+
+        let mut d = descriptor(
+            DeviceCategory::Mouse,
+            ConnectionKind::Rf24,
+            BatteryCapability::Present,
+            None,
+        );
+        d.generic_name = Some(GenericName::Receiver24g {
+            brand: None,
+            channel: None,
+        });
+        assert_eq!(
+            device_icon_in_mode(&d, EngineMode::Normal),
+            Some(DeviceIcon::Receiver24g)
+        );
+        assert_eq!(
+            device_icon_in_mode(&d, EngineMode::Compatible),
+            Some(DeviceIcon::Mouse)
+        );
+        d.identity.as_mut().unwrap().category = DeviceCategory::Unknown;
+        assert_eq!(
+            device_icon_in_mode(&d, EngineMode::Compatible),
+            Some(DeviceIcon::Receiver24g)
+        );
+    }
 
     #[test]
     fn hyperx_badge_uses_confirmed_model_before_first_sample_not_vendor_alone() {

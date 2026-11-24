@@ -5,7 +5,7 @@
 //! A small, nonactivating tray tooltip. It lives on the host message-pump thread
 //! and uses GDI only; hovering never starts the GPUI child or touches devices.
 use crate::{
-    device_display::{DeviceIcon, device_icon, icon_accessible_name},
+    device_display::{DeviceIcon, device_icon_in_mode, icon_accessible_name},
     model::{State, Theme},
     view::{
         apps_use_dark_theme, locale,
@@ -50,13 +50,12 @@ impl Content {
                     let battery = r.battery.filter(|_| online);
                     Device {
                         name: state
-                            .prefs
-                            .name(&r.device)
+                            .row_name(r)
                             .chars()
                             .take(180)
                             .map(|c| if c.is_control() { ' ' } else { c })
                             .collect(),
-                        icon: device_icon(&r.device),
+                        icon: device_icon_in_mode(&r.device, state.prefs.engine_mode),
                         value: if !online {
                             label(locale, "tray.offline").into()
                         } else {

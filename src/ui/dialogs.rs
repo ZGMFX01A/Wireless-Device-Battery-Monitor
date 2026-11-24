@@ -245,7 +245,7 @@ impl Panel {
                                 })
                                 .child(
                                     col()
-                                        .child(txt(self.state.prefs.name(dev), 12., k.text()))
+                                        .child(txt(self.state.candidate_name(dev), 12., k.text()))
                                         .child(txt(
                                             if bound {
                                                 self.t("device.bound")
@@ -322,6 +322,40 @@ impl Panel {
                         }),
                     ),
                 )
+            }
+            Dialog::ConfirmCompatibleMode => {
+                title = self.t("dialog.compatible.title").into();
+                sub = self.t("dialog.compatible.message").into();
+                footer = footer.child(close(self.t("dialog.cancel"))).child(
+                    footbtn(
+                        "dialog-confirm",
+                        self.t("dialog.compatible.confirm"),
+                        true,
+                        k,
+                    )
+                    .on_click(cx.listener(|s, _, _, cx| {
+                        s.modal = None;
+                        s.issue(Command::SetEngineMode(EngineMode::Compatible), cx);
+                        cx.notify();
+                    })),
+                );
+            }
+            Dialog::ConfirmUnknownProbe => {
+                title = self.t("dialog.unknown_probe.title").into();
+                sub = self.t("dialog.unknown_probe.message").into();
+                footer = footer.child(close(self.t("dialog.cancel"))).child(
+                    footbtn(
+                        "dialog-confirm",
+                        self.t("dialog.unknown_probe.confirm"),
+                        true,
+                        k,
+                    )
+                    .on_click(cx.listener(|s, _, _, cx| {
+                        s.modal = None;
+                        s.issue(Command::SetUnknownProbe(true), cx);
+                        cx.notify();
+                    })),
+                );
             }
             Dialog::Update => {
                 width = 320.;

@@ -5,7 +5,7 @@
 //! Only this process starts GPUI/Direct3D. No HID, GATT, updater or web engine here.
 use crate::model::Style;
 use crate::model::*;
-use battery_protocol::{Charge, Kind};
+use battery_protocol::{Charge, EngineMode, Kind};
 use gpui::{MouseButton as Button, prelude::*, *};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::io::{BufRead, Write};
@@ -309,6 +309,8 @@ enum Dialog {
         binding: bool,
     },
     Remove(String, Kind, String),
+    ConfirmCompatibleMode,
+    ConfirmUnknownProbe,
     Update,
 }
 /// Reader never waits on the drawing thread. One latest snapshot plus one latest

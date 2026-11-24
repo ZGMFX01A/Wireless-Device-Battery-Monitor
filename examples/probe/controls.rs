@@ -121,7 +121,75 @@ pub fn run(exe: &Path, out: &Path) -> Result<Value> {
         a.open("Settings")?;
         native::wheel(a.hwnd, -360, 9)?;
         a.photo("Settings-bottom")?;
-        a.exact(220., 610., json!("CheckUpdate"))?;
+        a.click(390., 553.)?;
+        a.photo("Recognition-mode-confirm")?;
+        a.key(27)?;
+        require(
+            a.p.lines.try_recv().is_err(),
+            "cancelling the mode change sent a command",
+        )?;
+        a.click(390., 553.)?;
+        a.primary("Recognition-mode-confirm")?;
+        a.p.json(|v| v == &json!({"SetEngineMode":"Compatible"}))?;
+        a.state["prefs"]["engine_mode"] = json!("Compatible");
+        a.update()?;
+        a.photo("Recognition-mode-compatible")?;
+        // The scroll offset stays at the previous bottom. The new switch is
+        // centered in the 57 px row below the mode group and its 12 px gap.
+        let unknown_probe = (475., 620.);
+        a.click(unknown_probe.0, unknown_probe.1)?;
+        a.photo("Unknown-probe-cancel")?;
+        a.key(27)?;
+        require(
+            a.p.lines.try_recv().is_err(),
+            "cancelling unknown device probing sent a command",
+        )?;
+        a.click(unknown_probe.0, unknown_probe.1)?;
+        a.primary("Unknown-probe-confirm")?;
+        a.p.json(|v| v == &json!({"SetUnknownProbe":true}))?;
+        a.state["prefs"]["probe_unknown_devices"] = json!(true);
+        a.state["probe_diagnostics"] = json!([{
+            "bus_scope": "Usb",
+            "vid": 0x0c45,
+            "pid": 0x9999,
+            "usage_page": 0xffb0,
+            "usage": 1,
+            "variant": "SparkLinkV2Wireless",
+            "state": "confirmed",
+            "reason": null
+        }]);
+        a.update()?;
+        a.photo("Unknown-probe-enabled")?;
+        native::wheel(a.hwnd, -360, 4)?;
+        a.photo("Unknown-probe-bottom")?;
+        a.click(345., 610.)?;
+        pause(120);
+        require(
+            a.p.lines.try_recv().is_err(),
+            "copying probe diagnostics sent an unexpected IPC command",
+        )?;
+        let clip = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Get-Clipboard -Raw"])
+            .output()?;
+        let clip_text = String::from_utf8_lossy(&clip.stdout);
+        require(
+            clip_text.contains("[Usb] 0c45:9999 up=0xffb0 usage=0x0001 variant=SparkLinkV2Wireless state=confirmed"),
+            "clipboard did not contain expected redacted probe diagnostics",
+        )?;
+        a.photo("Probe-diagnostics-copied")?;
+        passed.push("copy redacted probe diagnostics");
+        // 关闭未知设备探测开关并验证关闭后诊断按钮隐藏。
+        a.exact(475., 552., json!({"SetUnknownProbe":false}))?;
+        a.state["prefs"]["probe_unknown_devices"] = json!(false);
+        a.update()?;
+        a.photo("Unknown-probe-disabled-bottom")?;
+        passed.push("unknown device probing confirmation, cancel and disable");
+        a.exact(150., 480., json!({"SetEngineMode":"Normal"}))?;
+        a.state["prefs"]["engine_mode"] = json!("Normal");
+        a.update()?;
+        native::wheel(a.hwnd, -360, 9)?;
+        passed.push("recognition mode confirmation, cancel and return to normal");
+        a.exact(270., 610., json!("CheckUpdate"))?;
         passed.push("check updates");
         a.state["update"] = json!({"Available":"0.2.0"});
         a.state["release_notes"] = json!("Fix device sleep recovery.\n修复设备休眠恢复。");
@@ -136,7 +204,7 @@ pub fn run(exe: &Path, out: &Path) -> Result<Value> {
         a.update()?;
         a.photo("Update-progress")?;
         a.key(27)?;
-        a.click(205., 650.)?;
+        a.click(270., 650.)?;
         a.photo("Update-progress-reopened")?;
         passed.push("reopen transfer progress");
         Ok::<_, Box<dyn std::error::Error>>(())

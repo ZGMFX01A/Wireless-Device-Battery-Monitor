@@ -40,10 +40,6 @@ pub fn notice(locale: Locale, notice: &Notice) -> String {
         Notice::SettingsSaveFailed => "toast.saving_failed",
         Notice::KeyboardReconnected => "toast.keyboard_reconnected",
         Notice::KeyboardReconnectFailed => "toast.keyboard_reconnect_failed",
-        Notice::PreferencesImported(pending) => {
-            return label(locale, "toast.preferences_imported")
-                .replace("{pending}", &pending.to_string());
-        }
         Notice::PreviewHardwareUnavailable => "toast.preview_hardware_unavailable",
         Notice::AutostartStatusFailed => "toast.autostart_status_failed",
         Notice::UpdateFailed(failure) => return update_failure(locale, *failure).into(),
@@ -85,6 +81,54 @@ pub fn update_failure(locale: Locale, failure: Failure) -> &'static str {
 // UI, native tray and notification text share the same complete dictionaries.
 pub fn label(locale: Locale, key: &str) -> &'static str {
     let (z, e, r) = match key {
+        "settings.engine_mode.title" => ("识别模式", "Recognition Mode", "Режим распознавания"),
+        "settings.engine_mode.subtitle" => (
+            "选择外设的识别方式",
+            "Choose how devices are recognized",
+            "Настройте способ распознавания устройств",
+        ),
+        "settings.engine_mode.normal" => ("普通模式", "Normal", "Обычный режим"),
+        "settings.engine_mode.compatible" => (
+            "兼容模式（实验性）",
+            "Compatible (Experimental)",
+            "Совместимый режим (экспериментальный)",
+        ),
+        "dialog.compatible.title" => (
+            "启用兼容模式？",
+            "Enable compatible mode?",
+            "Включить режим совместимости?",
+        ),
+        "dialog.compatible.message" => (
+            "默认仅扩展已支持接收器的识别范围，新识别的同源设备使用通用名称。如需探测未知型号，可在设置中开启「探测未知设备（实验性）」。",
+            "By default, Compatible mode extends recognition through supported receivers and gives newly recognized sibling devices generic names. To probe for unknown models, enable Probe unknown devices (Experimental) in Settings.",
+            "По умолчанию режим расширяет распознавание через поддерживаемые приёмники и даёт новым устройствам с тем же протоколом общие имена. Для поиска неизвестных моделей включите «Поиск неизвестных устройств (эксп.)» в настройках.",
+        ),
+        "dialog.compatible.confirm" => (
+            "启用兼容模式",
+            "Enable compatible mode",
+            "Включить совместимость",
+        ),
+        "settings.unknown_probe.title" => (
+            "探测未知设备（实验性）",
+            "Probe unknown devices (Experimental)",
+            "Поиск неизвестных устройств (эксп.)",
+        ),
+        "settings.unknown_probe.subtitle" => (
+            "向未登记的同源无线设备发送只读探测命令",
+            "Send read-only probes to unregistered sibling devices",
+            "Отправка запросов только для чтения на незарегистрированные устройства",
+        ),
+        "dialog.unknown_probe.title" => (
+            "开启未知设备探测？",
+            "Enable unknown device probing?",
+            "Включить поиск неизвестных устройств?",
+        ),
+        "dialog.unknown_probe.message" => (
+            "开启后将向部分方案商的未登记外设发送只读电量探测包，以尝试识别新设备。极少数陌生固件可能不兼容此操作；你可以随时关闭此开关。",
+            "The app will send read-only battery probes to unregistered peripherals from supported chipsets. A few unfamiliar firmwares might not handle probing well. You can turn this off at any time.",
+            "Приложение будет отправлять запросы заряда только для чтения на незарегистрированные устройства поддерживаемых чипсетов. Редкие прошивки могут работать нестабильно; функцию можно отключить в любой момент.",
+        ),
+        "dialog.unknown_probe.confirm" => ("开启探测", "Enable probing", "Включить поиск"),
         "settings.glass.title" => ("磨砂通透度", "Glass Transparency", "Прозрачность стекла"),
         "settings.glass.subtitle" => (
             "仅调节背景，数值越大越通透",
@@ -138,6 +182,11 @@ pub fn label(locale: Locale, key: &str) -> &'static str {
         "device.ready" => ("就绪", "Ready", "Готово"),
         "device.paired" => ("已配对", "Paired", "Сопряжено"),
         "action.close" => ("收起", "Close", "Закрыть"),
+        "toast.probe_diagnostics_copied" => (
+            "已复制脱敏探测诊断信息",
+            "Copied redacted probe diagnostics",
+            "Диагностика скопирована без личных данных",
+        ),
         "toast.saving_failed" => (
             "设置保存失败",
             "Failed to save settings.",
@@ -203,6 +252,11 @@ pub fn label(locale: Locale, key: &str) -> &'static str {
             "Беспроводное аудиоустройство",
         ),
         "device.offline" => ("已离线", "Offline", "Не в сети"),
+        "device.compatible_only" => (
+            "需在兼容模式开启未知设备探测",
+            "Requires Compatible mode with probing",
+            "Требуется режим совместимости с поиском",
+        ),
         "device.online" => ("正常", "Online", "В сети"),
         "device.charging" => ("⚡ 充电中", "⚡ Charging", "⚡ Заряжается"),
         "device.wait_update" => ("等待更新", "Waiting for update", "Ожидание обновления"),
@@ -381,11 +435,6 @@ pub fn label(locale: Locale, key: &str) -> &'static str {
             "无法重新连接键盘",
             "Could not reconnect the keyboard.",
             "Не удалось переподключить клавиатуру.",
-        ),
-        "toast.preferences_imported" => (
-            "已导入偏好与匹配的设备，待匹配 {pending} 项",
-            "Preferences and matching devices imported. Pending matches: {pending}.",
-            "Настройки и подходящие устройства импортированы. Ожидают сопоставления: {pending}.",
         ),
         "toast.preview_hardware_unavailable" => (
             "预览模式不访问外设",
@@ -570,10 +619,10 @@ pub fn label(locale: Locale, key: &str) -> &'static str {
         "device.previous" => ("沿用上次读数", "Previous reading", "Прежние показания"),
         "device.full" => ("已充满", "Fully charged", "Заряжено"),
         "device.charging_short" => ("充电中", "Charging", "Заряжается"),
-        "settings.import" => (
-            "导入旧版设置",
-            "Import legacy settings",
-            "Импорт старых настроек",
+        "settings.copy_probe_diagnostics" => (
+            "复制探测诊断",
+            "Copy probe diagnostics",
+            "Скопировать диагностику",
         ),
         "dialog.retry" => ("重试", "Retry", "Повторить"),
         "update.no_notes" => (
@@ -617,6 +666,16 @@ pub fn label(locale: Locale, key: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compatible_only_offline_hint_is_localized() {
+        for (locale, expected) in [
+            (super::Locale::Zh, "需在兼容模式开启未知设备探测"),
+            (super::Locale::En, "Requires Compatible mode with probing"),
+            (super::Locale::Ru, "Требуется режим совместимости с поиском"),
+        ] {
+            assert_eq!(super::label(locale, "device.compatible_only"), expected);
+        }
+    }
     use super::*;
     use crate::model::Manual;
 
@@ -694,7 +753,6 @@ mod tests {
             update_failure(Locale::Ru, Failure::Download),
             "Не удалось скачать обновление."
         );
-        assert!(notice(Locale::Ru, &Notice::PreferencesImported(12)).contains("12"));
         assert!(
             notice(
                 Locale::Ru,

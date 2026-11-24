@@ -416,7 +416,7 @@ impl TrayView {
             .map(|r| {
                 format!(
                     "{}: {}",
-                    s.prefs.name(&r.device),
+                    s.row_name(r),
                     r.battery
                         .and_then(|b| b.percentage())
                         .map_or_else(|| "—".to_owned(), |p| format!("{p}%"))
@@ -798,7 +798,7 @@ pub fn run(demo: bool) -> Result<(), AppError> {
                                 balloon(
                                     &tray,
                                     label(locale(&s.prefs), "settings.low_battery.title"),
-                                    &format!("{} · {}%", s.prefs.name(&r.device), v.raw),
+                                    &format!("{} · {}%", s.row_name(r), v.raw),
                                 );
                             }
                         }

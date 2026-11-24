@@ -4,32 +4,45 @@
 
 use crate::model::*;
 use battery_protocol::{
-    Charge, Descriptor, Kind, Reading, Source, bluetooth, codec::KYSONA_SLOT_UNPAIRED, hid,
+    BusScope, Charge, Descriptor, ENABLED_VARIANTS, EngineMode, GenericName, Kind, ProbedRoute,
+    Reading, Source, bluetooth,
+    codec::KYSONA_SLOT_UNPAIRED,
+    hid::{
+        self, DiscoveryWarning, KeyboardPresence,
+        probe::{
+            ProbeBatchResult, ProbeCache, ProbeControl, ProbeDiagnosticEntry, ProbeJob,
+            ProbeScanOptions, ProbeWorker,
+        },
+    },
 };
 use std::{
-    collections::HashMap,
-    sync::{Arc, Condvar, Mutex},
+    collections::{HashMap, VecDeque},
+    sync::{Arc, Condvar, Mutex, mpsc},
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-const SCAN: u8 = 1;
-const REFRESH: u8 = 2;
-const PREFS: u8 = 4;
-const JOB: u8 = 64;
-const SYNC: u8 = 128;
-const RESUME: u8 = 8;
-const STOP: u8 = 16;
-const SUSPEND: u8 = 32;
+const SCAN: u16 = 1;
+const REFRESH: u16 = 2;
+const PREFS: u16 = 4;
+const JOB: u16 = 64;
+const SYNC: u16 = 128;
+const RESUME: u16 = 8;
+const STOP: u16 = 16;
+const SUSPEND: u16 = 32;
+// 探测结果只唤醒所属总线的轮询线程。
+const PROBE_RESULT: u16 = 256;
+// 手动扫描等待多批探测的总预算。
+const MANUAL_SCAN_MAX_WAIT: Duration = Duration::from_millis(4500);
 #[derive(Default)]
 pub struct Signal {
-    bits: Mutex<u8>,
+    bits: Mutex<u16>,
     device_scan: Mutex<Option<Instant>>,
     manual: Mutex<Option<(u64, bool)>>,
     jobs: Mutex<std::collections::VecDeque<DeviceJob>>,
     cv: Condvar,
 }
 impl Signal {
-    fn send(&self, b: u8) {
+    fn send(&self, b: u16) {
         let mut f = self.bits.lock().unwrap();
         if b == RESUME {
             *f &= !SUSPEND
@@ -39,7 +52,13 @@ impl Signal {
         *f |= b;
         self.cv.notify_one()
     }
-    fn take(&self, d: Duration) -> u8 {
+    fn reset(&self) -> std::collections::VecDeque<DeviceJob> {
+        *self.bits.lock().unwrap() = 0;
+        *self.device_scan.lock().unwrap() = None;
+        *self.manual.lock().unwrap() = None;
+        std::mem::take(&mut *self.jobs.lock().unwrap())
+    }
+    fn take(&self, d: Duration) -> u16 {
         let f = self.bits.lock().unwrap();
         let (mut f, _) = self.cv.wait_timeout_while(f, d, |s| *s == 0).unwrap();
         std::mem::take(&mut *f)
@@ -50,6 +69,9 @@ pub struct Signals {
     cycle: Mutex<PowerCycle>,
     hid: Signal,
     bt: Signal,
+    probe_results_hid: Mutex<VecDeque<ProbeBatchResult>>,
+    probe_results_bt: Mutex<VecDeque<ProbeBatchResult>>,
+    probe_control: Mutex<Option<ProbeControl>>,
 }
 /// One recovery per wake cycle. A late user-input notification after automatic resume
 /// is not a second wake. A fresh suspend always rearms recovery, even inside 10 s.
@@ -57,12 +79,16 @@ pub struct Signals {
 struct PowerCycle {
     last: Option<Instant>,
     automatic: bool,
+    suspended: bool,
 }
 impl PowerCycle {
-    fn event(&mut self, code: u32, now: Instant) -> Option<u8> {
+    fn event(&mut self, code: u32, now: Instant) -> Option<u16> {
         match code {
             4 => {
-                *self = Self::default();
+                *self = Self {
+                    suspended: true,
+                    ..Self::default()
+                };
                 return Some(SUSPEND);
             }
             7 if !self.automatic => (),
@@ -76,6 +102,7 @@ impl PowerCycle {
             return None;
         }
         self.last = Some(now);
+        self.suspended = false;
         Some(RESUME)
     }
 }
@@ -83,18 +110,84 @@ impl Signals {
     pub fn power(&self, code: u32) {
         let mut cycle = self.cycle.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(signal) = cycle.event(code, Instant::now()) {
+            if let Some(control) = self.probe_control.lock().unwrap().as_ref() {
+                control.set_suspended(cycle.suspended);
+            }
             self.both(signal);
         }
     }
-    fn both(&self, b: u8) {
+    fn both(&self, b: u16) {
         self.hid.send(b);
         self.bt.send(b)
     }
+    fn probe_results(&self, scope: BusScope) -> &Mutex<VecDeque<ProbeBatchResult>> {
+        match scope {
+            BusScope::Usb => &self.probe_results_hid,
+            BusScope::Bluetooth => &self.probe_results_bt,
+        }
+    }
+    fn forward_probe_result(&self, batch: ProbeBatchResult) {
+        let scope = batch.bus_scope;
+        self.probe_results(scope).lock().unwrap().push_back(batch);
+        match scope {
+            BusScope::Usb => self.hid.send(PROBE_RESULT),
+            BusScope::Bluetooth => self.bt.send(PROBE_RESULT),
+        }
+    }
 }
+
+struct ProbeRuntime {
+    worker: ProbeWorker,
+    forwarder: JoinHandle<()>,
+}
+
+impl ProbeRuntime {
+    fn start(signals: &Arc<Signals>) -> std::io::Result<Self> {
+        let (tx, rx) = mpsc::channel();
+        let worker = ProbeWorker::start(tx)?;
+        let cycle = signals.cycle.lock().unwrap();
+        let control = worker.control();
+        control.set_suspended(cycle.suspended);
+        let forward_signals = signals.clone();
+        let forwarder = thread::Builder::new()
+            .name("battery-probe-results".into())
+            .spawn(move || {
+                for batch in rx {
+                    forward_signals.forward_probe_result(batch);
+                }
+            })?;
+        *signals.probe_control.lock().unwrap() = Some(control);
+        Ok(Self { worker, forwarder })
+    }
+
+    fn stop(self) {
+        // 先停止生产者并释放发送端，转发线程随后读完队列退出。
+        let _ = self.worker.stop();
+        let _ = self.forwarder.join();
+    }
+}
+
+#[derive(Default)]
+struct Workers(
+    Mutex<Vec<JoinHandle<Vec<Target>>>>,
+    Mutex<Option<ProbeRuntime>>,
+);
+
+impl Workers {
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.0.lock().unwrap().is_empty()
+    }
+    fn probe_runtime_active(&self) -> bool {
+        self.1.lock().unwrap().is_some()
+    }
+}
+
 pub struct Service {
     pub state: Arc<Mutex<State>>,
     pub signals: Arc<Signals>,
-    workers: Vec<JoinHandle<()>>,
+    workers: Workers,
+    wake: Arc<dyn Fn() + Send + Sync>,
     demo: bool,
 }
 fn stamp() -> u64 {
@@ -273,10 +366,14 @@ fn stale_bluetooth(slots: &HashMap<String, Slot>, prefs: &Prefs) -> bool {
         .any(|s| s.row.device.kind == Kind::Bluetooth && prefs.bound(&s.row.device) && s.fail >= 3)
 }
 fn stale_keyboard(slots: &HashMap<String, Slot>, prefs: &Prefs) -> bool {
-    prefs
-        .keyboard_endpoint()
-        .and_then(|id| slots.get(id))
-        .is_some_and(|s| s.fail >= 3)
+    !prefs.keyboard_requires_compatible_mode()
+        && prefs
+            .keyboard_endpoint()
+            .and_then(|id| slots.get(id))
+            .is_some_and(|s| s.fail >= 3)
+}
+fn keyboard_recovery_allowed(prefs: &Prefs) -> bool {
+    prefs.keyboard.is_some() && !prefs.keyboard_requires_compatible_mode()
 }
 fn missing_devices<'a>(
     prefs: &Prefs,
@@ -286,19 +383,21 @@ fn missing_devices<'a>(
     if bt {
         return (
             prefs.bluetooth.iter().any(|id| {
-                !devices
-                    .clone()
-                    .any(|d| d.kind == Kind::Bluetooth && d.id == *id)
+                (prefs.unknown_probe_enabled() || !prefs.has_probed_only_binding(id))
+                    && !devices
+                        .clone()
+                        .any(|d| d.kind == Kind::Bluetooth && d.id == *id)
             }),
             false,
         );
     }
     let mouse = !devices.clone().any(|d| d.kind == Kind::Mouse);
-    let keyboard = prefs.keyboard_endpoint().is_some_and(|id| {
-        !devices
-            .clone()
-            .any(|d| d.kind == Kind::Keyboard && d.id == id)
-    });
+    let keyboard = keyboard_recovery_allowed(prefs)
+        && prefs.keyboard_endpoint().is_some_and(|id| {
+            !devices
+                .clone()
+                .any(|d| d.kind == Kind::Keyboard && d.id == id)
+        });
     (mouse, keyboard)
 }
 fn restore_keyboard<T>(
@@ -327,6 +426,13 @@ fn restore_keyboard<T>(
     Ok(())
 }
 impl Target {
+    fn probed_route(&self) -> Option<ProbedRoute> {
+        match self {
+            Self::H(t, _) => t.probed_route(),
+            Self::B(_) => None,
+        }
+    }
+
     fn data(&self) -> &Descriptor {
         match self {
             Self::H(t, _) => &t.info,
@@ -516,7 +622,276 @@ fn apply_reopened_target(device: &Descriptor, slot: &mut Slot, transition: Targe
     }
 }
 
-fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn() + Send + Sync>) {
+fn has_exact_identity(d: &Descriptor) -> bool {
+    d.generic_name.is_none() && d.identity.as_ref().is_some_and(|i| i.model_key.is_some())
+}
+
+fn restore_exact_identity<T: EndpointReconcile>(target: &mut T, prior: &[T]) -> bool {
+    let Some(old) = prior.iter().find(|old| target.same_endpoint(old)) else {
+        return false;
+    };
+    if target.descriptor().generic_name.is_some() && !has_exact_identity(target.descriptor()) {
+        target.retain_identity(old);
+    }
+    has_exact_identity(target.descriptor())
+}
+
+struct ManualProbeWindow {
+    sync_id: Option<u64>,
+    job: Option<DeviceJob>,
+    deadline: Instant,
+    warnings: Vec<DiscoveryWarning>,
+    partial_error: Option<Notice>,
+    scan_result: Result<(), String>,
+}
+
+impl ManualProbeWindow {
+    fn new(now: Instant) -> Self {
+        Self {
+            sync_id: None,
+            job: None,
+            deadline: now + MANUAL_SCAN_MAX_WAIT,
+            warnings: Vec::new(),
+            partial_error: None,
+            scan_result: Ok(()),
+        }
+    }
+
+    fn waiting(&self, now: Instant, in_flight: bool, pending: bool) -> bool {
+        now < self.deadline && (in_flight || pending)
+    }
+
+    fn finish(mut self, st: &mut State, bt: bool) {
+        if let Some(id) = self.sync_id {
+            self.warnings.sort();
+            self.warnings.dedup();
+            self.warnings.truncate(3);
+            let notice = self.partial_error.or_else(|| {
+                (!self.warnings.is_empty()).then_some(Notice::DiscoveryWarnings(self.warnings))
+            });
+            st.manual.finish(id, bt, notice);
+        }
+        if let Some(job) = self.job {
+            st.finish(&job, self.scan_result);
+        }
+    }
+
+    fn cancel(self, st: &mut State, bt: bool, notice: Notice, error: &str) {
+        if let Some(id) = self.sync_id {
+            st.manual.finish(id, bt, Some(notice));
+        }
+        if let Some(job) = self.job {
+            st.finish(&job, Err(error.into()));
+        }
+    }
+}
+
+type KeyboardInventory = Result<Vec<KeyboardPresence>, String>;
+
+fn keyboard_recovery_inventory<'a>(
+    prefs: &Prefs,
+    unpaired: &[Descriptor],
+    inventory: Option<&'a KeyboardInventory>,
+) -> Option<&'a KeyboardInventory> {
+    inventory.filter(|_| {
+        keyboard_recovery_allowed(prefs)
+            && !unpaired
+                .iter()
+                .any(|d| prefs.keyboard_endpoint() == Some(d.id.as_str()))
+    })
+}
+
+struct CompatibleScan {
+    scope: BusScope,
+    control: Option<ProbeControl>,
+    cache: ProbeCache,
+    scan_generation: u64,
+    probe_in_flight: Option<u64>,
+    manual_probe: Option<ManualProbeWindow>,
+    keyboard_inventory: Option<KeyboardInventory>,
+    seeded_routes: HashMap<String, ProbedRoute>,
+}
+
+/// 两个发现线程各自发布当前总线的诊断，保留另一总线的摘要。
+fn publish_probe_diagnostics(st: &mut State, scope: BusScope, entries: Vec<ProbeDiagnosticEntry>) {
+    if st.prefs.unknown_probe_enabled() {
+        st.probe_diagnostics
+            .retain(|entry| entry.bus_scope != scope);
+        st.probe_diagnostics.extend(entries);
+        st.probe_diagnostics
+            .sort_unstable_by_key(ProbeDiagnosticEntry::sort_key);
+    }
+}
+
+impl CompatibleScan {
+    fn new(scope: BusScope, control: Option<ProbeControl>) -> Self {
+        Self {
+            scope,
+            control,
+            cache: ProbeCache::default(),
+            scan_generation: 0,
+            probe_in_flight: None,
+            manual_probe: None,
+            keyboard_inventory: None,
+            seeded_routes: HashMap::new(),
+        }
+    }
+
+    fn advance(&mut self, signals: &Signals) {
+        self.invalidate_batch(signals);
+        self.keyboard_inventory = None;
+    }
+
+    fn invalidate_batch(&mut self, signals: &Signals) {
+        self.scan_generation += 1;
+        if let Some(control) = &self.control {
+            control.set_generation(self.scope, self.scan_generation);
+        }
+        self.probe_in_flight = None;
+        signals.probe_results(self.scope).lock().unwrap().clear();
+    }
+
+    fn seed(&mut self, prefs: &Prefs, reset: bool) {
+        let routes: HashMap<_, _> = prefs
+            .bound_probed_routes()
+            .into_iter()
+            .filter(|(id, _)| prefs.bluetooth.contains(id) == (self.scope == BusScope::Bluetooth))
+            .collect();
+        // core 按总线清理种子。绑定换路或移除时同步淘汰旧快照。
+        if reset
+            || self
+                .seeded_routes
+                .iter()
+                .any(|(id, route)| routes.get(id) != Some(route))
+        {
+            self.cache.reset(self.scope);
+        }
+        for (id, route) in &routes {
+            self.cache.seed_bound_route(id.clone(), *route);
+        }
+        self.seeded_routes = routes;
+    }
+
+    fn options(&mut self) -> ProbeScanOptions<'_> {
+        ProbeScanOptions {
+            mode: EngineMode::Compatible,
+            cache: &mut self.cache,
+            generation: self.scan_generation,
+            enabled: ENABLED_VARIANTS,
+        }
+    }
+
+    fn submit(&mut self, job: Option<ProbeJob>) {
+        if self.probe_in_flight.is_none()
+            && let (Some(control), Some(job)) = (&self.control, job)
+            && control.submit(job)
+        {
+            self.probe_in_flight = Some(self.scan_generation);
+        }
+    }
+
+    fn commit(&mut self, batch: &ProbeBatchResult) -> bool {
+        self.commit_current(batch.generation, |cache| cache.commit(batch))
+    }
+
+    fn commit_current(
+        &mut self,
+        generation: u64,
+        commit: impl FnOnce(&mut ProbeCache) -> bool,
+    ) -> bool {
+        if self.probe_in_flight != Some(generation) || generation != self.scan_generation {
+            return false;
+        }
+        self.probe_in_flight = None;
+        commit(&mut self.cache)
+    }
+
+    fn waiting(&self, now: Instant) -> bool {
+        self.manual_probe.as_ref().is_some_and(|window| {
+            window.waiting(
+                now,
+                self.probe_in_flight.is_some(),
+                self.control.is_some() && self.cache.has_pending(self.scope),
+            )
+        })
+    }
+
+    fn awaiting_generation(&self, now: Instant) -> bool {
+        self.probe_in_flight.is_some() || self.waiting(now)
+    }
+
+    fn budget_expired(&self, now: Instant) -> bool {
+        self.manual_probe
+            .as_ref()
+            .is_some_and(|window| now >= window.deadline)
+    }
+
+    fn take_ready_window(&mut self, signals: &Signals, now: Instant) -> Option<ManualProbeWindow> {
+        if self.waiting(now) {
+            return None;
+        }
+        if self.budget_expired(now) && self.probe_in_flight.is_some() {
+            // 预算用完后作废未返回的批次，已提交的缓存留给后续退避扫描。
+            self.invalidate_batch(signals);
+        }
+        self.manual_probe.take()
+    }
+
+    fn next_probe(&self, now: Instant) -> Option<Instant> {
+        if self.probe_in_flight.is_some() || self.control.is_none() {
+            return None;
+        }
+        self.cache.next_probe_after_in(self.scope, now)
+    }
+}
+
+fn probe_wake_delay(
+    now: Instant,
+    probe_due: Option<Instant>,
+    deadline: Option<Instant>,
+) -> Option<Duration> {
+    let retry = probe_due.map(|due| {
+        due.saturating_duration_since(now)
+            .max(Duration::from_millis(25))
+    });
+    retry
+        .into_iter()
+        .chain(deadline.map(|due| due.saturating_duration_since(now)))
+        .min()
+}
+
+fn merge_keyboard_presence(inventory: &mut Vec<KeyboardPresence>, added: Vec<KeyboardPresence>) {
+    for presence in added {
+        if let Some(prior) = inventory.iter_mut().find(|p| p.id == presence.id) {
+            if prior.serial.is_none() {
+                prior.serial = presence.serial;
+            }
+        } else {
+            inventory.push(presence);
+        }
+    }
+}
+
+fn prune_absent_keyboards(
+    devices: &mut Vec<Target>,
+    slots: &mut HashMap<String, Slot>,
+    present: &[KeyboardPresence],
+) {
+    devices
+        .retain(|t| t.data().kind != Kind::Keyboard || present.iter().any(|p| p.id == t.data().id));
+    slots
+        .retain(|id, s| s.row.device.kind != Kind::Keyboard || present.iter().any(|p| p.id == *id));
+}
+
+fn run(
+    state: Arc<Mutex<State>>,
+    sig: Arc<Signals>,
+    bt: bool,
+    mode: EngineMode,
+    unknown_probe_enabled: bool,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    mut prior_exact: Vec<Target>,
+) -> Vec<Target> {
     let (_apartment, bluetooth_initialization_error) = if bt {
         match bluetooth::Apartment::enter() {
             Ok(a) => (Some(a), None),
@@ -538,22 +913,53 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
     let mut last_fallback = None::<u64>;
     let mut first = true;
     let mut interval_ms = state.lock().unwrap().prefs.poll_ms();
+    let scope = if bt {
+        BusScope::Bluetooth
+    } else {
+        BusScope::Usb
+    };
+    let mut compatible = unknown_probe_enabled
+        .then(|| sig.probe_control.lock().unwrap().clone())
+        .map(|control| CompatibleScan::new(scope, control));
     let mut discovery_at = interval_ms;
     let mut unpaired = Vec::<Descriptor>::new();
     loop {
         let mut flags = signal.take(delay);
-        {
+        let hotplug = {
             let mut pending = signal.device_scan.lock().unwrap();
-            if pending.is_some_and(|due| Instant::now() >= due) {
+            let due = pending.is_some_and(|due| Instant::now() >= due);
+            if due {
                 *pending = None;
                 flags |= SCAN;
             }
-        }
+            due
+        };
         if flags & STOP != 0 {
+            if let Some(window) = compatible.as_mut().and_then(|p| p.manual_probe.take()) {
+                window.cancel(
+                    &mut state.lock().unwrap(),
+                    bt,
+                    Notice::OperationFailed,
+                    "Recognition mode changed",
+                );
+            }
             break;
         }
         if flags & SUSPEND != 0 {
-            suspended = true
+            suspended = true;
+            if let Some(p) = compatible.as_mut() {
+                p.advance(&sig);
+                if let Some(window) = p.manual_probe.take() {
+                    window.cancel(
+                        &mut state.lock().unwrap(),
+                        bt,
+                        Notice::Suspended,
+                        "System suspended; retry after wake",
+                    );
+                    flags |= JOB;
+                    wake();
+                }
+            }
         }
         if flags & RESUME != 0 {
             suspended = false;
@@ -573,6 +979,9 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 slot.row.error = Some("Resuming".into());
             }
             if devices.is_empty() && !bt {
+                flags |= SCAN;
+            }
+            if compatible.is_some() {
                 flags |= SCAN;
             }
         }
@@ -624,7 +1033,11 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             }
             first = false
         }
-        let job = if flags & JOB != 0 {
+        let job = if flags & JOB != 0
+            && !compatible
+                .as_ref()
+                .is_some_and(|p| p.manual_probe.as_ref().is_some_and(|w| w.job.is_some()))
+        {
             let mut q = signal.jobs.lock().unwrap();
             let j = q.pop_front();
             if !q.is_empty() {
@@ -637,8 +1050,77 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
         if job.as_ref().is_some_and(|j| j.bind.is_none()) {
             flags |= SCAN;
         }
-        if !bt && flags & REFRESH != 0 && state.lock().unwrap().prefs.keyboard.is_some() {
-            flags |= SCAN;
+        if flags & REFRESH != 0 {
+            let st = state.lock().unwrap();
+            if compatible.is_some()
+                || (!bt
+                    && st.prefs.keyboard.is_some()
+                    && !st.prefs.keyboard_requires_compatible_mode())
+            {
+                flags |= SCAN;
+            }
+        }
+        // 主动重扫和热插拔清除旧消歧结果，周期退避仍复用当前缓存。
+        let reset_probe_cache = hotplug || (flags & SCAN != 0 && !recover_only);
+        let mut keyboard_inventory = None;
+        let mut probe_updated = false;
+        if let Some(p) = compatible.as_mut()
+            && flags & PROBE_RESULT != 0
+            && flags & SCAN == 0
+        {
+            let batches = std::mem::take(&mut *sig.probe_results(scope).lock().unwrap());
+            for batch in batches {
+                if !p.commit(&batch) {
+                    continue;
+                }
+                probe_updated = true;
+                if bt
+                    && !batch.targets.is_empty()
+                    && let Some(window) = p.manual_probe.as_mut()
+                {
+                    // 标准蓝牙枚举失败时，异步私有蓝牙结果仍可完成发现。
+                    window.scan_result = Ok(());
+                }
+                if let Some(Ok(present)) = p.keyboard_inventory.as_mut() {
+                    merge_keyboard_presence(present, batch.probed_keyboards);
+                }
+                let prefs = &state.lock().unwrap().prefs;
+                for target in batch.targets {
+                    let target = merge_discovered_target(
+                        Target::H(target, None),
+                        &mut devices,
+                        &mut slots,
+                        true,
+                    );
+                    let d = target.data();
+                    if transport_bound(prefs, d) {
+                        let slot = slots
+                            .entry(d.id.clone())
+                            .or_insert_with(|| Slot::new(d.clone(), clock()));
+                        slot.row.device = d.clone();
+                    }
+                    devices.retain(|prior| prior.data().id != target.data().id);
+                    devices.push(target);
+                }
+            }
+        }
+        let mut continuation = false;
+        if let Some(p) = compatible.as_mut()
+            && flags & SCAN == 0
+        {
+            let now = Instant::now();
+            if p.next_probe(now).is_some_and(|due| due <= now) && (!probe_updated || p.waiting(now))
+            {
+                continuation = p.waiting(now);
+                flags |= SCAN;
+                recover_only = true;
+            }
+            if flags & SCAN == 0 && p.probe_in_flight.is_none() && !p.waiting(now) {
+                keyboard_inventory = p.keyboard_inventory.take();
+                if let Some(Ok(present)) = keyboard_inventory.as_ref() {
+                    prune_absent_keyboards(&mut devices, &mut slots, present);
+                }
+            }
         }
         let mut recover_keyboard = false;
         if clock() >= discovery_at {
@@ -653,7 +1135,13 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 bt,
             );
             let stale_key = !bt && stale_keyboard(&slots, &state.lock().unwrap().prefs);
-            if (missing.0 || missing.1 || stale_bt || stale_key) && flags & SCAN == 0 {
+            let probe_pending = compatible
+                .as_ref()
+                .is_some_and(|p| p.awaiting_generation(Instant::now()));
+            if (missing.0 || missing.1 || stale_bt || stale_key)
+                && flags & SCAN == 0
+                && !probe_pending
+            {
                 recover_only = true;
                 flags |= SCAN;
                 if stale_bt {
@@ -663,16 +1151,56 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             recover_keyboard = missing.1;
             discovery_at = clock() + interval_ms;
         }
-        let mut keyboard_inventory = None;
         if flags & SCAN != 0 {
+            if let Some(p) = compatible.as_mut() {
+                if !continuation {
+                    p.advance(&sig);
+                    p.seed(
+                        &state.lock().unwrap().prefs,
+                        reset_probe_cache || flags & (REFRESH | RESUME) != 0,
+                    );
+                }
+                let scan_sync = sync.filter(|(_, scan)| *scan).map(|(id, _)| id);
+                let scan_job = job.as_ref().filter(|j| j.bind.is_none());
+                if scan_sync.is_some() || scan_job.is_some() {
+                    let window = p
+                        .manual_probe
+                        .get_or_insert_with(|| ManualProbeWindow::new(Instant::now()));
+                    if let Some(id) = scan_sync {
+                        window.sync_id = Some(id);
+                    }
+                    if let Some(job) = scan_job {
+                        window.job = Some(job.clone());
+                    }
+                }
+            }
             let mut warnings = Vec::new();
             let list: Result<Vec<Target>, String> = if bt {
-                let standard = match bluetooth_initialization_error.as_ref() {
-                    Some(error) => Err(error.clone()),
-                    None => bluetooth::discover().map(|ds| ds.into_iter().map(Target::B).collect()),
+                let standard = if continuation {
+                    Ok(Vec::new())
+                } else {
+                    match bluetooth_initialization_error.as_ref() {
+                        Some(error) => Err(error.clone()),
+                        None => {
+                            bluetooth::discover().map(|ds| ds.into_iter().map(Target::B).collect())
+                        }
+                    }
                 };
-                let private = hid::discover_private_bluetooth()
-                    .map(|ds| ds.into_iter().map(|t| Target::H(t, None)).collect());
+                let private = if let Some(p) = compatible.as_mut() {
+                    match hid::discover_private_bluetooth_compatible(p.options()) {
+                        Ok((targets, job)) => {
+                            p.submit(job);
+                            Ok(targets)
+                        }
+                        Err(error) => {
+                            p.cache.reset(scope);
+                            Err(error)
+                        }
+                    }
+                } else {
+                    hid::discover_private_bluetooth_in_mode(mode)
+                }
+                .map(|ds| ds.into_iter().map(|t| Target::H(t, None)).collect());
                 let (targets, partial_error) = merge_bluetooth_discovery(standard, private);
                 if let Some(error) = partial_error {
                     recover_only = true;
@@ -681,7 +1209,21 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 }
                 targets
             } else {
-                hid::discover_inventory_with_diagnostics().map(|found| {
+                let found = if let Some(p) = compatible.as_mut() {
+                    match hid::discover_inventory_compatible(p.options()) {
+                        Ok((found, job)) => {
+                            p.submit(job);
+                            Ok(found)
+                        }
+                        Err(error) => {
+                            p.cache.reset(scope);
+                            Err(error)
+                        }
+                    }
+                } else {
+                    hid::discover_inventory_with_diagnostics_in_mode(mode)
+                };
+                found.map(|found| {
                     warnings = found.warnings;
                     keyboard_inventory = Some(Ok(found.keyboards));
                     unpaired = found.unpaired;
@@ -693,6 +1235,17 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 })
             };
             let scan_result = list.as_ref().map(|_| ()).map_err(Clone::clone);
+            if let Some(window) = compatible.as_mut().and_then(|p| p.manual_probe.as_mut()) {
+                window.warnings.extend(warnings.iter().copied());
+                if let Err(error) = &scan_result {
+                    window.scan_result = Err(error.clone());
+                }
+            }
+            let keep_pending_keyboard = !bt
+                && compatible.as_ref().is_some_and(|p| {
+                    p.probe_in_flight.is_some()
+                        || (scan_result.is_ok() && p.waiting(Instant::now()))
+                });
             match list {
                 Ok(v) => {
                     let mut old = std::mem::take(&mut devices);
@@ -700,20 +1253,25 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                         .into_iter()
                         .map(|new| merge_discovered_target(new, &mut old, &mut slots, recover_only))
                         .collect();
-                    if recover_only {
+                    if recover_only || keep_pending_keyboard {
                         // Recovery enumeration can be incomplete during login. Keep
                         // existing paths, including healthy devices omitted by this scan.
                         for old_device in old {
-                            if !devices.iter().any(|d| d.data().id == old_device.data().id)
+                            if (recover_only || old_device.data().kind == Kind::Keyboard)
+                                && !devices.iter().any(|d| d.data().id == old_device.data().id)
                                 && !unpaired.iter().any(|d| d.id == old_device.data().id)
                             {
                                 devices.push(old_device);
                             }
                         }
+                    }
+                    if recover_only {
                         slots.retain(|id, _| devices.iter().any(|t| t.data().id == *id));
                     } else {
                         slots.retain(|id, slot| {
-                            slot.has_peripheral_sample()
+                            (slot.has_peripheral_sample()
+                                || (keep_pending_keyboard
+                                    && slot.row.device.kind == Kind::Keyboard))
                                 && devices.iter().any(|t| t.data().id == *id)
                         });
                         for slot in slots.values_mut() {
@@ -724,19 +1282,27 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                         recovered.clear();
                         last_fallback = None;
                     }
-                    if let Some(Ok(present)) = keyboard_inventory.as_ref() {
+                    if !keep_pending_keyboard && let Some(Ok(present)) = keyboard_inventory.as_ref()
+                    {
                         // Retaining an old session does not make its receiver present.
                         // Missing keyboards must keep discovery on the polling deadline.
-                        devices.retain(|t| {
-                            t.data().kind != Kind::Keyboard
-                                || present.iter().any(|p| p.id == t.data().id)
-                        });
-                        slots.retain(|id, s| {
-                            s.row.device.kind != Kind::Keyboard
-                                || present.iter().any(|p| p.id == *id)
-                        });
+                        prune_absent_keyboards(&mut devices, &mut slots, present);
                     }
                     let mut st = state.lock().unwrap();
+                    // 只继承本轮仍能确认同一端点的精确身份，旧会话和读数随线程退出。
+                    if !prior_exact.is_empty() {
+                        for target in &mut devices {
+                            if restore_exact_identity(target, &prior_exact)
+                                && transport_bound(&st.prefs, target.data())
+                            {
+                                let d = target.data();
+                                slots
+                                    .entry(d.id.clone())
+                                    .or_insert_with(|| Slot::new(d.clone(), clock()));
+                            }
+                        }
+                        prior_exact.clear();
+                    }
                     update_candidates(&mut st, &devices, bt);
                     for target in &devices {
                         let d = target.data();
@@ -771,7 +1337,7 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                         manual_err = Some(m.clone());
                         m
                     });
-                    publish_device_rows(&mut st, &slots, &unpaired, bt);
+                    publish_device_rows(&mut st, &slots, &devices, &unpaired, &[], bt);
                 }
                 Err(e) => {
                     keyboard_inventory = Some(Err(e.clone()));
@@ -787,9 +1353,23 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 }
             }
             discovery_at = clock() + interval_ms;
-            if let Some(j) = job.as_ref().filter(|j| j.bind.is_none()) {
+            if let Some(p) = compatible.as_mut() {
+                if keep_pending_keyboard {
+                    p.keyboard_inventory = keyboard_inventory.take();
+                } else {
+                    p.keyboard_inventory = None;
+                }
+            } else if let Some(j) = job.as_ref().filter(|j| j.bind.is_none()) {
                 state.lock().unwrap().finish(j, scan_result);
             }
+        }
+        if let Some(p) = compatible.as_ref()
+            && (flags & SCAN != 0 || probe_updated)
+        {
+            let entries = p.cache.diagnostics(scope);
+            publish_probe_diagnostics(&mut state.lock().unwrap(), scope, entries);
+        }
+        if flags & SCAN != 0 && compatible.as_ref().is_none_or(|p| p.manual_probe.is_none()) {
             wake();
         }
         if let Some(ref j) = job
@@ -808,6 +1388,8 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                     .or_insert_with(|| Slot::new(t.data().clone(), clock()));
                 slot.set_interval(interval_ms, clock());
                 let error = sample.reading.as_ref().err().cloned();
+                let probed_route = t.probed_route();
+                let association_replaced = generic_association_changed(mode, t.data(), &sample);
                 apply_target_sample(slot, t.data(), sample, clock(), true);
                 update_candidates(&mut st, &devices, bt);
                 let outcome = (|| {
@@ -821,12 +1403,18 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                     if !p.change(&Command::Bind(id.clone()), &st.candidates) {
                         return Err("Device identity changed".into());
                     }
-                    p.remember_identity(&slot.row.device);
+                    if association_replaced {
+                        p.clear_identity(&slot.row.device);
+                    }
+                    if probed_route.is_none() {
+                        p.clear_probed_route(&slot.row.device);
+                    }
+                    p.remember_identity_with_route(&slot.row.device, probed_route);
                     p.save(&Prefs::path()?)?;
                     st.prefs = p;
                     Ok(())
                 })();
-                publish_device_rows(&mut st, &slots, &unpaired, bt);
+                publish_device_rows(&mut st, &slots, &devices, &unpaired, &[], bt);
                 outcome
             })();
             state.lock().unwrap().finish(j, out);
@@ -835,15 +1423,13 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
         let mut prefs = state.lock().unwrap().prefs.clone();
         recover_only = false;
         let force = flags & REFRESH != 0;
-        let mut changed = flags != 0 || recover_keyboard;
+        let mut changed = flags != 0 || recover_keyboard || keyboard_inventory.is_some();
         let mut keyboard_blocked = false;
         let mut recovered_sample = None;
+        let mut changed_associations = Vec::new();
         if !bt
-            && prefs.keyboard.is_some()
-            && !unpaired
-                .iter()
-                .any(|d| prefs.keyboard_endpoint() == Some(d.id.as_str()))
-            && let Some(inventory) = keyboard_inventory.as_ref()
+            && let Some(inventory) =
+                keyboard_recovery_inventory(&prefs, &unpaired, keyboard_inventory.as_ref())
         {
             // The complete fresh inventory, never retained sessions or handshake successes,
             // decides whether replacing an absent endpoint is unambiguous.
@@ -855,7 +1441,11 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                         .iter_mut()
                         .find(|t| t.data().id == connection.endpoint_id)
                         .ok_or("no responsive keyboard control endpoint")?;
-                    target.read(clock(), true).reading
+                    let sample = target.read(clock(), true);
+                    if generic_association_changed(mode, target.data(), &sample) {
+                        changed_associations.push(target.data().clone());
+                    }
+                    sample.reading
                 },
             );
             let outcome = match recovery {
@@ -899,9 +1489,15 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 if keyboard_blocked {
                     slots.retain(|_, s| s.row.device.kind != Kind::Keyboard);
                 }
-                eprintln!("Keyboard reconnect failed: {e}");
-                state.lock().unwrap().note = Some(Notice::KeyboardReconnectFailed);
-                manual_err.get_or_insert(Notice::KeyboardReconnectFailed);
+                // 兼容模式的已确认路由在设备离线时保留，等待下次枚举恢复。
+                if !prefs
+                    .keyboard_endpoint()
+                    .is_some_and(|id| prefs.has_probed_only_binding(id))
+                {
+                    eprintln!("Keyboard reconnect failed: {e}");
+                    state.lock().unwrap().note = Some(Notice::KeyboardReconnectFailed);
+                    manual_err.get_or_insert(Notice::KeyboardReconnectFailed);
+                }
             }
         }
         let due_at = clock();
@@ -934,6 +1530,12 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                 continue;
             }
             if *signal.bits.lock().unwrap() & (STOP | SUSPEND) != 0 {
+                break;
+            }
+            if compatible
+                .as_ref()
+                .is_some_and(|p| p.budget_expired(Instant::now()))
+            {
                 break;
             }
             let sample = match (&mut *t, batch.as_ref()) {
@@ -970,11 +1572,17 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
                     }
                 }
             }
-            if sync.is_some()
+            if (sync.is_some()
+                || compatible
+                    .as_ref()
+                    .is_some_and(|p| p.manual_probe.as_ref().is_some_and(|w| w.sync_id.is_some())))
                 && let Err(e) = &sample.reading
             {
                 eprintln!("Battery refresh failed: {e}");
                 manual_err = Some(Notice::RefreshFailed);
+            }
+            if generic_association_changed(mode, t.data(), &sample) {
+                changed_associations.push(t.data().clone());
             }
             apply_target_sample(slot, t.data(), sample, clock(), force);
             let key = t.data().id.clone();
@@ -1013,6 +1621,9 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
         let mut known = devices.iter().filter(|d| transport_bound(&prefs, d.data()));
         if !bt
             && !recover_only
+            && !compatible
+                .as_ref()
+                .is_some_and(|p| p.awaiting_generation(Instant::now()))
             && known.clone().next().is_some()
             && known.all(|d| failed_reopens.contains(&d.data().id))
             && last_fallback.is_none_or(|t| clock().saturating_sub(t) >= 60_000)
@@ -1021,15 +1632,52 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
             recover_only = true;
             signal.send(SCAN);
         }
+        let mut defer_scan_wake = false;
+        if let Some(p) = compatible.as_mut() {
+            let waiting = p.waiting(Instant::now());
+            if let Some(window) = p.manual_probe.as_mut() {
+                if let Some(notice) = &manual_err
+                    && !matches!(notice, Notice::DiscoveryWarnings(_))
+                {
+                    window.partial_error = Some(notice.clone());
+                }
+                defer_scan_wake = waiting && flags & (SCAN | PROBE_RESULT) != 0;
+            }
+            if !waiting && p.manual_probe.is_some() {
+                changed = true;
+            }
+        }
         if changed {
             let mut st = state.lock().unwrap();
             update_candidates(&mut st, &devices, bt);
-            publish_device_rows(&mut st, &slots, &unpaired, bt);
-            if let Some((id, _)) = sync {
+            publish_device_rows(
+                &mut st,
+                &slots,
+                &devices,
+                &unpaired,
+                &changed_associations,
+                bt,
+            );
+            if let Some((id, scan)) = sync
+                && !(scan && compatible.is_some())
+            {
                 st.manual.finish(id, bt, manual_err);
             }
+            if let Some(window) = compatible
+                .as_mut()
+                .and_then(|p| p.take_ready_window(&sig, Instant::now()))
+            {
+                let resume_jobs = window.job.is_some();
+                window.finish(&mut st, bt);
+                if resume_jobs {
+                    signal.send(JOB);
+                }
+                defer_scan_wake = false;
+            }
             drop(st);
-            wake();
+            if !defer_scan_wake {
+                wake();
+            }
         }
         let missing = missing_devices(&prefs, devices.iter().map(Target::data), bt);
         let discovery = (missing.0
@@ -1045,8 +1693,37 @@ fn run(state: Arc<Mutex<State>>, sig: Arc<Signals>, bt: bool, wake: Arc<dyn Fn()
         if let Some(due) = *signal.device_scan.lock().unwrap() {
             delay = delay.min(due.saturating_duration_since(Instant::now()));
         }
+        if let Some(p) = compatible.as_ref() {
+            let now = Instant::now();
+            if let Some(wait) = probe_wake_delay(
+                now,
+                p.next_probe(now),
+                p.manual_probe.as_ref().map(|w| w.deadline),
+            ) {
+                delay = delay.min(wait);
+            }
+        }
     }
+    prior_exact.extend(devices.into_iter().filter_map(|mut target| {
+        if slots.contains_key(&target.data().id) && has_exact_identity(target.data()) {
+            target.close();
+            Some(target)
+        } else {
+            None
+        }
+    }));
+    prior_exact
 }
+
+fn generic_association_changed(mode: EngineMode, d: &Descriptor, sample: &TargetSample) -> bool {
+    mode == EngineMode::Compatible
+        && sample.association_changed
+        && matches!(
+            d.generic_name,
+            Some(GenericName::Receiver24g { brand: None, .. })
+        )
+}
+
 fn apply_target_sample(
     slot: &mut Slot,
     device: &Descriptor,
@@ -1076,22 +1753,43 @@ fn update_candidates(st: &mut State, devices: &[Target], bt: bool) {
         .extend(devices.iter().map(|t| t.data().clone()));
     st.candidates.sort_by(|a, b| a.id.cmp(&b.id));
 }
-fn publish_device_rows(
-    st: &mut State,
+#[cfg(test)]
+fn remember_slot_identities(
+    prefs: &mut Prefs,
     slots: &HashMap<String, Slot>,
     unpaired: &[Descriptor],
-    bt: bool,
-) {
-    let mut prefs = st.prefs.clone();
+    changed_associations: &[Descriptor],
+) -> bool {
+    remember_slot_identities_with_routes(prefs, slots, &[], unpaired, changed_associations)
+}
+
+fn remember_slot_identities_with_routes(
+    prefs: &mut Prefs,
+    slots: &HashMap<String, Slot>,
+    devices: &[Target],
+    unpaired: &[Descriptor],
+    changed_associations: &[Descriptor],
+) -> bool {
     let mut changed = false;
-    for device in unpaired {
+    for device in unpaired.iter().chain(changed_associations) {
         changed |= prefs.clear_identity(device);
     }
     for slot in slots.values() {
         let row = &slot.row;
+        let target = devices
+            .iter()
+            .find(|target| target.data().id == row.device.id);
+        let route = target.and_then(Target::probed_route);
         if row.error.as_deref() == Some(KYSONA_SLOT_UNPAIRED) {
             changed |= prefs.clear_identity(&row.device);
-        } else if row.battery.is_some()
+            continue;
+        }
+        // 有现行目录目标时，淘汰同端点旧的探测路由，离线占位不参与。
+        if target.is_some() && route.is_none() {
+            changed |= prefs.clear_probed_route(&row.device);
+        }
+        if route.is_some()
+            || row.battery.is_some()
             || (row.device.kind == Kind::Bluetooth
                 && row
                     .device
@@ -1099,9 +1797,32 @@ fn publish_device_rows(
                     .as_ref()
                     .is_some_and(|i| i.category != battery_protocol::DeviceCategory::Unknown))
         {
-            changed |= prefs.remember_identity(&row.device);
+            if route.is_some() {
+                changed |= prefs.remember_identity_with_route(&row.device, route);
+            } else {
+                changed |= prefs.remember_identity(&row.device);
+            }
         }
     }
+    changed
+}
+
+fn publish_device_rows(
+    st: &mut State,
+    slots: &HashMap<String, Slot>,
+    devices: &[Target],
+    unpaired: &[Descriptor],
+    changed_associations: &[Descriptor],
+    bt: bool,
+) {
+    let mut prefs = st.prefs.clone();
+    let changed = remember_slot_identities_with_routes(
+        &mut prefs,
+        slots,
+        devices,
+        unpaired,
+        changed_associations,
+    );
     if changed {
         match Prefs::path().and_then(|path| prefs.save(&path)) {
             Ok(()) => st.prefs = prefs,
@@ -1129,6 +1850,7 @@ fn publish_rows(st: &mut State, slots: &HashMap<String, Slot>, bt: bool) {
             return None;
         }
         let mut row = slot.row.clone();
+        st.prefs.retain_bound_identity(&mut row.device);
         row.device = st.prefs.keyboard_row(row.device);
         Some(row)
     }));
@@ -1139,45 +1861,184 @@ fn publish_rows(st: &mut State, slots: &HashMap<String, Slot>, bt: bool) {
 }
 impl Service {
     pub fn start(p: Prefs, demo: bool, wake: impl Fn() + Send + Sync + 'static) -> Self {
+        Self::start_with_signals(p, demo, Signals::default(), wake)
+    }
+
+    fn start_with_signals(
+        p: Prefs,
+        demo: bool,
+        signals: Signals,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
         let w: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let state = Arc::new(Mutex::new(if demo {
-            State::demo()
+            let mut state = State::demo();
+            state.prefs.engine_mode = p.engine_mode;
+            state.prefs.probe_unknown_devices = p.probe_unknown_devices;
+            state
         } else {
             State {
                 prefs: p,
                 ..Default::default()
             }
         }));
-        let signals = Arc::new(Signals::default());
-        let workers = if demo {
-            vec![]
-        } else {
-            [false, true]
-                .into_iter()
-                .map(|bt| {
-                    let (s, n, w) = (state.clone(), signals.clone(), w.clone());
-                    thread::spawn(move || run(s, n, bt, w))
-                })
-                .collect()
-        };
-        Self {
+        let service = Self {
             state,
-            signals,
-            workers,
+            signals: Arc::new(signals),
+            workers: Workers::default(),
+            wake: w,
             demo,
+        };
+        if !demo {
+            *service.workers.0.lock().unwrap() = service.spawn_workers([vec![], vec![]]);
         }
+        service
+    }
+
+    /// 以挂起状态启动真实线程，避免首次扫描依赖本机 HID 或蓝牙设备。
+    pub(crate) fn smoke_test_compatible(prefs: Prefs) -> bool {
+        for enabled in [false, true] {
+            let mut prefs = prefs.clone();
+            prefs.probe_unknown_devices = enabled;
+            let signals = Signals::default();
+            signals.power(4);
+            let service = Self::start_with_signals(prefs, false, signals, || {});
+            let worker_count = service.workers.0.lock().unwrap().len();
+            if worker_count != 2 || service.workers.probe_runtime_active() != enabled {
+                return false;
+            }
+        }
+
+        let demo = Self::start(prefs, true, || {});
+        let st = demo.state.lock().unwrap();
+        st.prefs.engine_mode == EngineMode::Compatible && st.rows.len() == 2
+    }
+
+    fn spawn_workers(&self, prior_exact: [Vec<Target>; 2]) -> Vec<JoinHandle<Vec<Target>>> {
+        let (mode, unknown_probe_enabled) = {
+            let st = self.state.lock().unwrap();
+            (st.prefs.engine_mode, st.prefs.unknown_probe_enabled())
+        };
+        if unknown_probe_enabled {
+            match ProbeRuntime::start(&self.signals) {
+                Ok(runtime) => *self.workers.1.lock().unwrap() = Some(runtime),
+                Err(error) => eprintln!("Failed to start device probe worker: {error}"),
+            }
+        }
+        [false, true]
+            .into_iter()
+            .zip(prior_exact)
+            .map(|(bt, prior)| {
+                let (state, signals, wake) =
+                    (self.state.clone(), self.signals.clone(), self.wake.clone());
+                thread::spawn(move || {
+                    run(state, signals, bt, mode, unknown_probe_enabled, wake, prior)
+                })
+            })
+            .collect()
+    }
+
+    fn stop_workers(&self, workers: &mut Vec<JoinHandle<Vec<Target>>>) -> [Vec<Target>; 2] {
+        self.signals.both(STOP);
+        if let Some(runtime) = self.workers.1.lock().unwrap().take() {
+            self.signals.probe_control.lock().unwrap().take();
+            runtime.stop();
+        }
+        let mut snapshots = [vec![], vec![]];
+        for (index, worker) in workers.drain(..).enumerate() {
+            if let Ok(exact) = worker.join() {
+                snapshots[index] = exact;
+            }
+        }
+        for scope in [BusScope::Usb, BusScope::Bluetooth] {
+            self.signals.probe_results(scope).lock().unwrap().clear();
+        }
+        snapshots
+    }
+
+    /// 停止旧线程后，用当前模式重启发现与轮询，保持外部订阅的状态和信号引用。
+    pub fn restart_workers(&self) {
+        if self.demo {
+            return;
+        }
+        let mut workers = self.workers.0.lock().unwrap();
+        let snapshots = self.stop_workers(&mut workers);
+        let pending_jobs = {
+            let cycle = self.signals.cycle.lock().unwrap();
+            let hid_jobs = self.signals.hid.reset();
+            let bt_jobs = self.signals.bt.reset();
+            if cycle.suspended {
+                self.signals.both(SUSPEND);
+            }
+            hid_jobs.into_iter().chain(bt_jobs)
+        };
+        {
+            let mut st = self.state.lock().unwrap();
+            st.probe_diagnostics.clear();
+            // 模式切换取消旧请求，向仍在等待回执的界面结束对应请求。
+            if st.manual.id != 0 && !st.manual.completed() {
+                let id = st.manual.id;
+                st.manual.finish(id, false, Some(Notice::OperationFailed));
+                st.manual.finish(id, true, None);
+            }
+            for job in pending_jobs {
+                st.finish(&job, Err("Recognition mode changed".into()));
+            }
+        }
+        *workers = self.spawn_workers(snapshots);
     }
     pub fn device_changed(&self) {
         if !self.demo {
-            schedule_device_scan(
-                &mut self.signals.hid.device_scan.lock().unwrap(),
-                Instant::now(),
-            );
-            self.signals.hid.send(PREFS);
+            let now = Instant::now();
+            let schedule = |signal: &Signal| {
+                schedule_device_scan(&mut signal.device_scan.lock().unwrap(), now);
+                signal.send(PREFS);
+            };
+            schedule(&self.signals.hid);
+            if self.state.lock().unwrap().prefs.unknown_probe_enabled() {
+                schedule(&self.signals.bt);
+            }
         }
     }
     pub fn command(&self, c: Command) -> Result<(), String> {
         match c {
+            Command::SetEngineMode(mode) => {
+                let mut st = self.state.lock().unwrap();
+                if st.prefs.engine_mode == mode {
+                    return Ok(());
+                }
+                let mut prefs = st.prefs.clone();
+                prefs.change(&Command::SetEngineMode(mode), &[]);
+                if !self.demo {
+                    prefs.save(&Prefs::path()?)?;
+                }
+                st.prefs = prefs;
+                st.probe_diagnostics.clear();
+                drop(st);
+                if !self.demo {
+                    self.restart_workers();
+                }
+            }
+            Command::SetUnknownProbe(enabled) => {
+                let mut st = self.state.lock().unwrap();
+                if st.prefs.probe_unknown_devices == enabled {
+                    return Ok(());
+                }
+                let mut prefs = st.prefs.clone();
+                prefs.change(&Command::SetUnknownProbe(enabled), &[]);
+                if !self.demo {
+                    prefs.save(&Prefs::path()?)?;
+                }
+                let compatible = prefs.engine_mode == EngineMode::Compatible;
+                st.prefs = prefs;
+                if !enabled {
+                    st.probe_diagnostics.clear();
+                }
+                drop(st);
+                if compatible {
+                    self.restart_workers();
+                }
+            }
             Command::Sync(id, scan) => {
                 self.state.lock().unwrap().manual = Manual {
                     id,
@@ -1217,41 +2078,6 @@ impl Service {
                     }
                 }
             }
-            Command::ImportAppearance => {
-                if self.demo {
-                    return Err("Preview does not import preferences".into());
-                }
-                let target = Prefs::path()?;
-                let old = target
-                    .parent()
-                    .and_then(|p| p.parent())
-                    .ok_or("invalid profile path")?
-                    .join("WirelessDeviceBatteryMonitor")
-                    .join("config.json");
-                use std::io::Read;
-                let mut bytes = Vec::new();
-                std::fs::File::open(&old)
-                    .map_err(|e| e.to_string())?
-                    .take(4 * 1024 * 1024 + 1)
-                    .read_to_end(&mut bytes)
-                    .map_err(|e| e.to_string())?;
-                if bytes.len() > 4 * 1024 * 1024 {
-                    return Err("legacy preferences too large".into());
-                }
-                let snapshot: serde_json::Value =
-                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-                let mut st = self.state.lock().unwrap();
-                let mut prefs = st.prefs.clone();
-                prefs.import_appearance_value(&snapshot)?;
-                let pending = prefs.import_devices_value(&snapshot, &st.candidates)?;
-                prefs.save(&target)?;
-                st.prefs = prefs;
-                st.prune_unbound();
-                st.note = Some(Notice::PreferencesImported(pending));
-                drop(st);
-                self.signals.hid.send(SCAN);
-                self.signals.bt.send(SCAN);
-            }
             Command::Autostart => {
                 let mut st = self.state.lock().unwrap();
                 if !self.demo {
@@ -1289,15 +2115,729 @@ impl Service {
 }
 impl Drop for Service {
     fn drop(&mut self) {
-        self.signals.both(STOP);
-        for j in self.workers.drain(..) {
-            let _ = j.join();
-        }
+        self.stop_workers(&mut self.workers.0.lock().unwrap());
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_probed_route(variant: battery_protocol::ProbeVariantId) -> ProbedRoute {
+        ProbedRoute {
+            variant,
+            vid: 0x0c45,
+            pid: 0x1234,
+            usage_page: 0xff00,
+            usage: 1,
+        }
+    }
+
+    #[test]
+    fn probe_diagnostics_sync_by_bus_and_round_trip_with_state_json() {
+        use battery_protocol::{
+            ProbeVariantId,
+            hid::probe::{ProbeDiagnosticReason, ProbeDiagnosticState, format_probe_diagnostics},
+        };
+
+        let mut st: State = serde_json::from_str("{}").unwrap();
+        let mut entry = ProbeDiagnosticEntry {
+            bus_scope: BusScope::Usb,
+            vid: 0x0c45,
+            pid: 0x9999,
+            usage_page: 0xffb0,
+            usage: 1,
+            variant: ProbeVariantId::SparkLinkV2Wireless,
+            state: ProbeDiagnosticState::Rejected,
+            reason: Some(ProbeDiagnosticReason::ConfirmedWired),
+        };
+        publish_probe_diagnostics(&mut st, BusScope::Usb, vec![entry.clone()]);
+        assert!(st.probe_diagnostics.is_empty());
+        assert!(
+            serde_json::to_value(&st)
+                .unwrap()
+                .get("probe_diagnostics")
+                .is_none()
+        );
+
+        st.prefs.engine_mode = EngineMode::Compatible;
+        publish_probe_diagnostics(&mut st, BusScope::Usb, vec![entry.clone()]);
+        assert!(st.probe_diagnostics.is_empty());
+        st.prefs.probe_unknown_devices = true;
+        let bt = ProbeDiagnosticEntry {
+            bus_scope: BusScope::Bluetooth,
+            vid: 0x3151,
+            pid: 0xee09,
+            usage_page: 0xff55,
+            usage: 0x0202,
+            variant: ProbeVariantId::RongYuanBle77,
+            ..entry.clone()
+        };
+        publish_probe_diagnostics(&mut st, BusScope::Bluetooth, vec![bt.clone()]);
+        publish_probe_diagnostics(&mut st, BusScope::Usb, vec![entry.clone()]);
+        entry.state = ProbeDiagnosticState::Confirmed;
+        entry.reason = None;
+        publish_probe_diagnostics(&mut st, BusScope::Usb, vec![entry.clone()]);
+        assert_eq!(st.probe_diagnostics, [entry, bt.clone()]);
+        let json = serde_json::to_string(&st).unwrap();
+        let decoded: State = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, st);
+        let poisoned = serde_json::json!({
+            "bus_scope": "Usb",
+            "vid": 0x0c45,
+            "pid": 0x9999,
+            "usage_page": 0xffb0,
+            "usage": 1,
+            "variant": "SparkLinkV2Wireless",
+            "state": r"C:\Users\AliceUser",
+            "reason": "SN-SECRET-987654"
+        });
+        assert!(serde_json::from_value::<ProbeDiagnosticEntry>(poisoned).is_err());
+        let report = format_probe_diagnostics(&decoded.probe_diagnostics);
+        assert!(report.contains("[Usb] 0c45:9999"));
+        assert!(report.contains("[Bluetooth] 3151:ee09"));
+        for secret in ["AliceUser", "SN-SECRET-987654", "\\"] {
+            assert!(!report.contains(secret));
+        }
+        publish_probe_diagnostics(&mut st, BusScope::Usb, Vec::new());
+        assert_eq!(st.probe_diagnostics, [bt]);
+
+        let service = Service::start(st.prefs.clone(), true, || {});
+        *service.state.lock().unwrap() = st;
+        service
+            .command(Command::SetEngineMode(EngineMode::Normal))
+            .unwrap();
+        assert!(service.state.lock().unwrap().probe_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn probe_runtime_is_compatible_only_and_stops_on_restart_and_drop() {
+        let mut service = Service::start(Prefs::default(), true, || {});
+        service.demo = false;
+        service.signals.power(4);
+        service.restart_workers();
+        assert!(!service.workers.probe_runtime_active());
+        let control = || {
+            service
+                .signals
+                .probe_control
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap()
+        };
+
+        {
+            let mut st = service.state.lock().unwrap();
+            st.prefs.engine_mode = EngineMode::Compatible;
+            st.prefs.probe_unknown_devices = true;
+        }
+        service.restart_workers();
+        assert!(service.workers.probe_runtime_active());
+        let first = control();
+        let scope = BusScope::Usb;
+        first.set_generation(scope, 99);
+        assert!(first.should_abort(scope, 99));
+        first.set_suspended(false);
+        assert!(!first.should_abort(scope, 99));
+
+        service.state.lock().unwrap().prefs.engine_mode = EngineMode::Normal;
+        service.restart_workers();
+        assert!(!service.workers.probe_runtime_active());
+        assert!(first.should_abort(scope, 99));
+        assert!(service.signals.probe_control.lock().unwrap().is_none());
+
+        service.state.lock().unwrap().prefs.engine_mode = EngineMode::Compatible;
+        service.restart_workers();
+        let last = control();
+        let signals = service.signals.clone();
+        last.set_generation(scope, 100);
+        last.set_suspended(false);
+        assert!(!last.should_abort(scope, 100));
+        drop(service);
+        assert!(last.should_abort(scope, 100));
+        assert!(signals.probe_control.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn probe_result_bit_survives_each_independent_signal() {
+        let signal = Signal::default();
+        for bit in [SCAN, REFRESH, PREFS, JOB, SYNC, STOP, SUSPEND, RESUME] {
+            assert_eq!(bit & PROBE_RESULT, 0);
+            signal.send(PROBE_RESULT);
+            signal.send(bit);
+            assert_eq!(signal.take(Duration::ZERO), PROBE_RESULT | bit);
+        }
+    }
+
+    #[test]
+    fn stale_probe_generation_never_reaches_cache_commit() {
+        let signals = Signals::default();
+        let control = ProbeControl::default();
+        let mut scan = CompatibleScan::new(BusScope::Usb, Some(control.clone()));
+        scan.advance(&signals);
+        scan.probe_in_flight = Some(1);
+        scan.advance(&signals);
+        scan.probe_in_flight = Some(2);
+        assert!(control.should_abort(BusScope::Usb, 1));
+        assert!(!scan.commit_current(1, |_| panic!("stale batch reached the cache")));
+        assert_eq!(scan.probe_in_flight, Some(2));
+        assert!(scan.commit_current(2, |_| true));
+        assert!(!scan.commit_current(2, |_| panic!("duplicate batch reached the cache")));
+    }
+
+    #[test]
+    fn normal_mode_missing_probed_bindings_skip_recovery_and_keep_routes() {
+        use battery_protocol::ProbeVariantId::{AulaHfdWireless56, RongYuanBle77};
+        let mut prefs = Prefs {
+            keyboard: Some("key".into()),
+            ..Default::default()
+        };
+        let keyboard = phase1_receiver("key", Kind::Keyboard, None);
+        let bt = phase1_receiver("bt", Kind::Bluetooth, None);
+        prefs.bluetooth.insert(bt.id.clone());
+        assert!(
+            prefs.remember_identity_with_route(
+                &keyboard,
+                Some(test_probed_route(AulaHfdWireless56))
+            )
+        );
+        assert!(prefs.remember_identity_with_route(&bt, Some(test_probed_route(RongYuanBle77))));
+        let saved = prefs.bound_probed_routes();
+        let mut stale = Slot::new(keyboard.clone(), 0);
+        stale.fail = 3;
+        let slots = HashMap::from([(keyboard.id.clone(), stale)]);
+        let inventory = Err("枚举失败".into());
+        assert!(keyboard_recovery_inventory(&prefs, &[], Some(&inventory)).is_none());
+        assert!(!stale_keyboard(&slots, &prefs));
+        let mouse = phase1_receiver("mouse", Kind::Mouse, Some("known"));
+        assert_eq!(
+            missing_devices(&prefs, std::iter::once(&mouse), false),
+            (false, false)
+        );
+        assert_eq!(
+            missing_devices(&prefs, std::iter::empty(), true),
+            (false, false)
+        );
+        prefs.bluetooth.insert("ordinary-bt".into());
+        assert_eq!(
+            missing_devices(&prefs, std::iter::empty(), true),
+            (true, false)
+        );
+        let mut st = State {
+            prefs,
+            ..Default::default()
+        };
+        publish_rows(&mut st, &HashMap::new(), false);
+        publish_rows(&mut st, &HashMap::new(), true);
+        assert_eq!(
+            st.rows
+                .iter()
+                .filter(|row| row.error.as_deref() == Some(PROBED_COMPATIBLE_ONLY_ERROR))
+                .count(),
+            2
+        );
+        assert_ne!(st.note, Some(Notice::KeyboardReconnectFailed));
+        assert_eq!(st.prefs.bound_probed_routes(), saved);
+        st.prefs.engine_mode = EngineMode::Compatible;
+        assert!(keyboard_recovery_inventory(&st.prefs, &[], Some(&inventory)).is_none());
+        assert!(!stale_keyboard(&slots, &st.prefs));
+        assert_eq!(
+            missing_devices(&st.prefs, std::iter::once(&mouse), false),
+            (false, false)
+        );
+        st.prefs.bluetooth.remove("ordinary-bt");
+        assert_eq!(
+            missing_devices(&st.prefs, std::iter::empty(), true),
+            (false, false)
+        );
+        publish_rows(&mut st, &HashMap::new(), false);
+        publish_rows(&mut st, &HashMap::new(), true);
+        assert_eq!(
+            st.rows
+                .iter()
+                .filter(|row| row.error.as_deref() == Some(PROBED_COMPATIBLE_ONLY_ERROR))
+                .count(),
+            2
+        );
+        assert_ne!(st.note, Some(Notice::KeyboardReconnectFailed));
+        assert_eq!(st.prefs.bound_probed_routes(), saved);
+        st.prefs.probe_unknown_devices = true;
+        assert_eq!(
+            keyboard_recovery_inventory(&st.prefs, &[], Some(&inventory)),
+            Some(&inventory)
+        );
+        assert!(stale_keyboard(&slots, &st.prefs));
+        assert_eq!(
+            missing_devices(&st.prefs, std::iter::empty(), false),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn compatible_restart_seeds_the_bound_transport_and_schedules_probe_retries() {
+        let mut prefs = Prefs {
+            engine_mode: EngineMode::Compatible,
+            keyboard: Some("logical".into()),
+            keyboard_connection: Some(KeyboardConnection {
+                endpoint_id: "physical".into(),
+                serial: None,
+            }),
+            ..Default::default()
+        };
+        let keyboard = phase1_receiver("physical", Kind::Keyboard, None);
+        let route = test_probed_route(battery_protocol::ProbeVariantId::AulaHfdWireless56);
+        assert!(prefs.remember_identity_with_route(&keyboard, Some(route)));
+        let mut scan = CompatibleScan::new(BusScope::Usb, Some(ProbeControl::default()));
+        scan.seed(&prefs, true);
+        assert_eq!(
+            scan.seeded_routes,
+            HashMap::from([(keyboard.id.clone(), route)])
+        );
+        let now = Instant::now();
+        // 只预热路由，等 core 枚举端点后才会有下一次探测时间。
+        assert_eq!(scan.next_probe(now), None);
+        assert_eq!(
+            probe_wake_delay(now, Some(now + Duration::from_secs(3)), None),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            probe_wake_delay(now, Some(now), None),
+            Some(Duration::from_millis(25))
+        );
+        assert!(prefs.clear_identity(&keyboard));
+        scan.seed(&prefs, false);
+        assert!(scan.seeded_routes.is_empty());
+    }
+
+    #[test]
+    fn manual_probe_waits_for_pending_batches_and_finishes_both_receipts_at_deadline() {
+        let now = Instant::now();
+        let signals = Signals::default();
+        for (elapsed, in_flight, pending) in [
+            (Duration::from_secs(1), false, false),
+            (MANUAL_SCAN_MAX_WAIT, true, true),
+        ] {
+            let mut window = ManualProbeWindow::new(now);
+            window.sync_id = Some(7);
+            window.job = Some(DeviceJob {
+                id: 8,
+                kind: Kind::Keyboard,
+                bind: None,
+            });
+            let mut st = State {
+                manual: Manual {
+                    id: 7,
+                    bt: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            assert_eq!(
+                window.deadline.duration_since(now),
+                Duration::from_millis(4500)
+            );
+            let before = window.deadline - Duration::from_millis(1);
+            assert!(window.waiting(before, false, true));
+            assert!(window.waiting(before, true, false));
+            assert!(!st.manual.completed());
+            assert!(st.reply(Kind::Keyboard).is_none());
+            assert_eq!(
+                probe_wake_delay(before, Some(before), Some(window.deadline)),
+                Some(Duration::from_millis(1))
+            );
+            assert!(!window.waiting(now + elapsed, in_flight, pending));
+            let control = ProbeControl::default();
+            let mut scan = CompatibleScan::new(BusScope::Usb, Some(control.clone()));
+            scan.advance(&signals);
+            scan.manual_probe = Some(window);
+            scan.probe_in_flight = Some(1);
+            assert!(scan.take_ready_window(&signals, before).is_none());
+            if !in_flight {
+                assert!(scan.commit_current(1, |_| true));
+            }
+            scan.take_ready_window(&signals, now + elapsed)
+                .unwrap()
+                .finish(&mut st, false);
+            assert_eq!(scan.probe_in_flight, None);
+            assert_eq!(control.should_abort(BusScope::Usb, 1), in_flight);
+            assert!(st.manual.completed());
+            assert_eq!(
+                st.reply(Kind::Keyboard),
+                Some(&Receipt {
+                    id: 8,
+                    result: Ok(())
+                })
+            );
+        }
+    }
+    fn phase1_receiver(id: &str, kind: Kind, key: Option<&str>) -> Descriptor {
+        let category = if kind == Kind::Keyboard {
+            battery_protocol::DeviceCategory::Keyboard
+        } else {
+            battery_protocol::DeviceCategory::Mouse
+        };
+        Descriptor {
+            id: id.into(),
+            name: key.unwrap_or("2.4G Receiver").into(),
+            kind,
+            legacy_ids: vec![],
+            identity: Some(battery_protocol::DeviceIdentity {
+                model_key: key.map(str::to_owned),
+                category,
+                connection: battery_protocol::ConnectionKind::Rf24,
+                battery: battery_protocol::BatteryCapability::Present,
+                model_source: key.map(|_| battery_protocol::ModelSource::ProtocolIdentity),
+            }),
+            generic_name: key.is_none().then_some(GenericName::Receiver24g {
+                brand: None,
+                channel: Some(category),
+            }),
+        }
+    }
+
+    #[test]
+    fn compatible_association_replaces_bound_cache_and_keeps_only_the_new_sample() {
+        use crate::device_display::{DeviceIcon, device_icon_in_mode};
+        let old = phase1_receiver("keyboard", Kind::Keyboard, Some("AULA F87 Pro V2"));
+        let new = phase1_receiver("keyboard", Kind::Keyboard, None);
+        let mut st = State {
+            prefs: Prefs {
+                keyboard: Some(old.id.clone()),
+                lang: Language::En,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(st.prefs.remember_identity(&old));
+        let cached = st.prefs.bound_identity.clone();
+        let mut slot = Slot::new(old.clone(), 0);
+        let last = Reading::new(93, Charge::Discharging, Source::AulaHfd).unwrap();
+        slot.apply(Ok(last), 10, false);
+        slot.row.sampled = 1;
+        let slots = HashMap::from([(old.id.clone(), Slot::new(new.clone(), 0))]);
+        for mode in [EngineMode::Normal, EngineMode::Compatible] {
+            st.prefs.engine_mode = mode;
+            assert!(!st.prefs.remember_identity(&new));
+            assert_eq!(st.prefs.name(&new), old.name);
+            assert_eq!(st.prefs.bound_identity, cached);
+            publish_rows(&mut st, &slots, false);
+            assert_eq!(st.rows[0].device, old);
+        }
+
+        let reading = Reading::new(37, Charge::Discharging, Source::AulaHfd).unwrap();
+        let sample = TargetSample {
+            reading: Ok(reading),
+            association_changed: true,
+        };
+        assert!(!generic_association_changed(
+            EngineMode::Normal,
+            &new,
+            &sample
+        ));
+        assert!(generic_association_changed(
+            EngineMode::Compatible,
+            &new,
+            &sample
+        ));
+        apply_target_sample(&mut slot, &new, sample, 20, false);
+        assert_eq!(slot.row.battery, Some(reading));
+        assert!(slot.row.sampled > 1);
+        assert!(!slot.row.held);
+        let slots = HashMap::from([(new.id.clone(), slot)]);
+        assert!(remember_slot_identities(
+            &mut st.prefs,
+            &slots,
+            &[],
+            std::slice::from_ref(&new)
+        ));
+        publish_rows(&mut st, &slots, false);
+        assert_eq!(st.rows[0].device, new);
+        assert_ne!(st.prefs.bound_identity, cached);
+        assert_eq!(st.row_name(&st.rows[0]), "2.4G receiver (Keyboard channel)");
+        assert_eq!(
+            device_icon_in_mode(&st.rows[0].device, EngineMode::Compatible),
+            Some(DeviceIcon::Keyboard)
+        );
+    }
+
+    #[test]
+    fn compatible_generic_names_are_numbered_by_id_across_display_surfaces() {
+        let mut st = State {
+            prefs: Prefs {
+                lang: Language::En,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        st.prefs.aliases.insert("b".into(), "Desk mouse".into());
+        let slots = ["e", "c", "a", "b", "d"]
+            .into_iter()
+            .map(|id| {
+                let d = phase1_receiver(id, Kind::Mouse, (id == "d").then_some("Exact Mouse"));
+                (id.into(), Slot::new(d, 0))
+            })
+            .collect();
+        publish_rows(&mut st, &slots, false);
+        assert_eq!(
+            st.rows
+                .iter()
+                .map(|row| row.device.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c", "d", "e"]
+        );
+        let base = st.prefs.name(&st.rows[0].device);
+        for (mode, expected) in [
+            (
+                EngineMode::Normal,
+                vec![
+                    base.clone(),
+                    "Desk mouse".into(),
+                    base.clone(),
+                    "Exact Mouse".into(),
+                    base.clone(),
+                ],
+            ),
+            (
+                EngineMode::Compatible,
+                vec![
+                    base.clone(),
+                    "Desk mouse".into(),
+                    format!("{base} 2"),
+                    "Exact Mouse".into(),
+                    format!("{base} 3"),
+                ],
+            ),
+        ] {
+            st.prefs.engine_mode = mode;
+            assert_eq!(
+                st.rows.iter().map(|r| st.row_name(r)).collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn restart_snapshot_inherits_only_same_endpoint_without_fresh_evidence() {
+        let mut pending = FakeEndpoint::new("new-worker", "2.4G Receiver", None, None);
+        pending.info.generic_name = Some(GenericName::Receiver24g {
+            brand: Some("AULA".into()),
+            channel: None,
+        });
+        let known = FakeEndpoint::new(
+            "old-worker",
+            "AULA F87 Pro V2",
+            Some(0x2710),
+            Some("aula_f87_pro_v2_z"),
+        );
+        let prior = [known.clone()];
+        let mut different = pending.clone();
+        different.path = "another collection";
+        assert!(!restore_exact_identity(&mut different, &prior));
+        let mut observed = pending.clone();
+        observed.observed = Some(battery_protocol::IdentityEvidence::PeripheralIds {
+            vid: 0x38a6,
+            pid: 0xee01,
+        });
+        assert!(!restore_exact_identity(&mut observed, &prior));
+        assert!(restore_exact_identity(&mut pending, &prior));
+        assert_eq!(pending.info, known.info);
+        assert_eq!(pending.observed, known.observed);
+    }
+
+    #[test]
+    fn engine_mode_command_restarts_workers_in_place_and_keeps_preferences() {
+        const NAME: &str =
+            "service::tests::engine_mode_command_restarts_workers_in_place_and_keeps_preferences";
+        const PROFILE: &str = "WDBM_PHASE1_TEST_PROFILE";
+        if std::env::var_os(PROFILE).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([NAME, "--exact"])
+                .env("APPDATA", dir.path())
+                .env(PROFILE, dir.path())
+                .output()
+                .unwrap();
+            assert!(
+                status.status.success(),
+                "{}",
+                String::from_utf8_lossy(&status.stdout)
+            );
+            return;
+        }
+        assert_eq!(std::env::var_os(PROFILE), std::env::var_os("APPDATA"));
+        let mut service = Service::start(Prefs::default(), true, || {});
+        service.demo = false;
+        let state = service.state.clone();
+        let signals = service.signals.clone();
+        let sleeping = phase1_receiver("bound-keyboard", Kind::Keyboard, Some("Known keyboard"));
+        let mut prefs: Prefs = serde_json::from_str(
+            r#"{"keyboard":"bound-keyboard","low":30,"aliases":{"mouse":"Desk Mouse"}}"#,
+        )
+        .unwrap();
+        assert_eq!(prefs.engine_mode, EngineMode::Normal);
+        prefs.bluetooth.insert("bound-headset".into());
+        assert!(prefs.remember_identity(&sleeping));
+        *state.lock().unwrap() = State {
+            prefs: prefs.clone(),
+            autostart: true,
+            update: crate::update::Status::Current,
+            ..Default::default()
+        };
+        signals.power(4);
+
+        // 旧线程以退出计数证明切换是 join，后续两代由生产路径创建。
+        let exited = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        *service.workers.0.lock().unwrap() = [false, true]
+            .into_iter()
+            .map(|bt| {
+                let signals = signals.clone();
+                let exited = exited.clone();
+                thread::spawn(move || {
+                    let sig = if bt { &signals.bt } else { &signals.hid };
+                    while sig.take(Duration::from_secs(60)) & STOP == 0 {}
+                    exited.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Vec::new()
+                })
+            })
+            .collect();
+        let thread_ids = || {
+            service
+                .workers
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|w| w.thread().id())
+                .collect::<Vec<_>>()
+        };
+        for mode in [EngineMode::Compatible, EngineMode::Normal] {
+            let old_ids = thread_ids();
+            *signals.hid.manual.lock().unwrap() = Some((7, true));
+            signals.bt.jobs.lock().unwrap().push_back(DeviceJob {
+                id: 8,
+                kind: Kind::Bluetooth,
+                bind: None,
+            });
+            *signals.hid.device_scan.lock().unwrap() =
+                Some(Instant::now() + Duration::from_secs(60));
+            service.command(Command::SetEngineMode(mode)).unwrap();
+            assert_eq!(exited.load(std::sync::atomic::Ordering::SeqCst), 2);
+            assert!(Arc::ptr_eq(&state, &service.state));
+            assert!(Arc::ptr_eq(&signals, &service.signals));
+            assert_eq!(thread_ids().len(), 2);
+            assert!(thread_ids().iter().all(|id| !old_ids.contains(id)));
+            assert!(signals.hid.manual.lock().unwrap().is_none());
+            assert!(signals.hid.device_scan.lock().unwrap().is_none());
+            assert!(signals.bt.jobs.lock().unwrap().is_empty());
+            let ids = thread_ids();
+            service.command(Command::SetEngineMode(mode)).unwrap();
+            assert_eq!(thread_ids(), ids);
+            prefs.engine_mode = mode;
+            let mut st = state.lock().unwrap();
+            assert!(st.autostart);
+            assert_eq!(st.update, crate::update::Status::Current);
+            assert_eq!(st.prefs, prefs);
+            assert_eq!(Prefs::load(&Prefs::path().unwrap()).unwrap(), prefs);
+            publish_rows(&mut st, &HashMap::new(), false);
+            let row = st.rows.iter().find(|r| r.device.id == sleeping.id).unwrap();
+            assert_eq!(st.row_name(row), sleeping.name);
+            assert_eq!(row.device.identity, sleeping.identity);
+        }
+
+        let route = test_probed_route(battery_protocol::ProbeVariantId::AulaHfdWireless56);
+        {
+            let mut st = state.lock().unwrap();
+            assert!(
+                st.prefs
+                    .remember_identity_with_route(&sleeping, Some(route))
+            );
+        }
+        service
+            .command(Command::SetEngineMode(EngineMode::Compatible))
+            .unwrap();
+        assert!(!service.workers.probe_runtime_active());
+        {
+            let mut st = state.lock().unwrap();
+            publish_rows(&mut st, &HashMap::new(), false);
+            assert_eq!(
+                st.prefs.bound_probed_routes(),
+                [(sleeping.id.clone(), route)]
+            );
+            let row = st.rows.iter().find(|r| r.device.id == sleeping.id).unwrap();
+            assert_eq!(row.error.as_deref(), Some(PROBED_COMPATIBLE_ONLY_ERROR));
+            assert_ne!(st.note, Some(Notice::KeyboardReconnectFailed));
+        }
+
+        let diagnostic = ProbeDiagnosticEntry {
+            bus_scope: BusScope::Usb,
+            vid: route.vid,
+            pid: route.pid,
+            usage_page: route.usage_page,
+            usage: route.usage,
+            variant: route.variant,
+            state: battery_protocol::hid::probe::ProbeDiagnosticState::Confirmed,
+            reason: None,
+        };
+        for stop in [
+            Command::SetUnknownProbe(false),
+            Command::SetEngineMode(EngineMode::Normal),
+        ] {
+            if st_mode_is_normal(&state) {
+                service
+                    .command(Command::SetEngineMode(EngineMode::Compatible))
+                    .unwrap();
+                assert!(!service.workers.probe_runtime_active());
+                assert!(!state.lock().unwrap().prefs.probe_unknown_devices);
+            }
+            service.command(Command::SetUnknownProbe(true)).unwrap();
+            assert!(service.workers.probe_runtime_active());
+            assert!(
+                Prefs::load(&Prefs::path().unwrap())
+                    .unwrap()
+                    .unknown_probe_enabled()
+            );
+            let ids = thread_ids();
+            service.command(Command::SetUnknownProbe(true)).unwrap();
+            assert_eq!(thread_ids(), ids);
+            {
+                let mut st = state.lock().unwrap();
+                publish_probe_diagnostics(&mut st, BusScope::Usb, vec![diagnostic.clone()]);
+                assert_eq!(st.probe_diagnostics, std::slice::from_ref(&diagnostic));
+            }
+            service.command(stop).unwrap();
+            assert!(!service.workers.probe_runtime_active());
+            assert!(signals.probe_control.lock().unwrap().is_none());
+            let st = state.lock().unwrap();
+            assert!(st.probe_diagnostics.is_empty());
+            assert!(!st.prefs.unknown_probe_enabled());
+            assert!(!st.prefs.probe_unknown_devices);
+            assert_eq!(
+                st.prefs.bound_probed_routes(),
+                [(sleeping.id.clone(), route)]
+            );
+            assert_eq!(Prefs::load(&Prefs::path().unwrap()).unwrap(), st.prefs);
+        }
+        // 切回普通模式后再次进入兼容模式，不得绕过二次确认自动开启未知探测。
+        service
+            .command(Command::SetEngineMode(EngineMode::Compatible))
+            .unwrap();
+        assert!(!service.workers.probe_runtime_active());
+        assert!(!state.lock().unwrap().prefs.probe_unknown_devices);
+        let ids = thread_ids();
+        service.command(Command::SetUnknownProbe(false)).unwrap();
+        assert_eq!(thread_ids(), ids);
+        assert!(!service.workers.probe_runtime_active());
+        assert!(
+            !Prefs::load(&Prefs::path().unwrap())
+                .unwrap()
+                .probe_unknown_devices
+        );
+    }
+
+    fn st_mode_is_normal(state: &Arc<Mutex<State>>) -> bool {
+        state.lock().unwrap().prefs.engine_mode == EngineMode::Normal
+    }
+
     #[test]
     #[ignore = "requires the original 0C45:FEFA receiver; uses a subprocess with isolated APPDATA"]
     fn live_old_binding_recovers_without_touching_the_user_profile() {

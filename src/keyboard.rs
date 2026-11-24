@@ -24,16 +24,7 @@ pub fn plan(
     let Some(endpoint) = prefs.keyboard_endpoint() else {
         return Ok(None);
     };
-    let serial = prefs
-        .keyboard_connection
-        .as_ref()
-        .and_then(|c| c.serial.as_deref())
-        .or_else(|| {
-            endpoint
-                .split_once(":serial:")
-                .map(|(_, serial)| serial)
-                .filter(|serial| !serial.is_empty() && !serial.chars().all(|c| c == '0'))
-        });
+    let serial = prefs.keyboard_serial();
     if let Some(current) = inventory.iter().find(|p| p.id == endpoint) {
         if serial.is_some_and(|s| current.serial.as_deref() != Some(s)) {
             return Err(
@@ -89,6 +80,7 @@ pub fn commit(
         return Ok(false);
     }
     let mut next = state.prefs.clone();
+    next.reconcile_replaced_keyboard_identity(&connection);
     next.keyboard_connection = Some(connection);
     save(&next)
         .map_err(|e| format!("键盘连接配置保存失败：{e} / Keyboard preferences save failed"))?;
@@ -275,5 +267,78 @@ mod tests {
         assert_eq!(row.id, OLD);
         assert_eq!(state.prefs.name(&row), "Renamed");
         assert!(state.prefs.bound(&row));
+    }
+
+    #[test]
+    fn serial_less_replacement_drops_cached_exact_identity_while_serial_match_updates_endpoint() {
+        use battery_protocol::{
+            BatteryCapability, ConnectionKind, DeviceCategory, DeviceIdentity, GenericName,
+            ModelSource,
+        };
+        let exact = battery_protocol::Descriptor {
+            id: OLD.into(),
+            name: "Exact Receiver Keyboard".into(),
+            kind: battery_protocol::Kind::Keyboard,
+            legacy_ids: vec![],
+            identity: Some(DeviceIdentity {
+                model_key: Some("exact_kb".into()),
+                category: DeviceCategory::Keyboard,
+                connection: ConnectionKind::Rf24,
+                battery: BatteryCapability::Present,
+                model_source: Some(ModelSource::CatalogRule),
+            }),
+            generic_name: None,
+        };
+        let generic_new = battery_protocol::Descriptor {
+            id: NEW.into(),
+            name: "2.4G Receiver".into(),
+            kind: battery_protocol::Kind::Keyboard,
+            legacy_ids: vec![],
+            identity: Some(DeviceIdentity {
+                model_key: None,
+                category: DeviceCategory::Keyboard,
+                connection: ConnectionKind::Rf24,
+                battery: BatteryCapability::Present,
+                model_source: None,
+            }),
+            generic_name: Some(GenericName::Receiver24g {
+                brand: None,
+                channel: Some(DeviceCategory::Keyboard),
+            }),
+        };
+
+        // 无序列号替换同 VID/PID 接收器时，清除旧精确快照（保留别名）。
+        let mut before = prefs();
+        assert!(before.remember_identity(&exact));
+        let connection = plan(&before, &[presence(NEW, None)]).unwrap().unwrap();
+        let mut state = State {
+            prefs: before.clone(),
+            ..Default::default()
+        };
+        assert!(commit(&mut state, &before, connection, |_| Ok(())).unwrap());
+        assert!(!state.prefs.bound_identity.contains_key(OLD));
+        assert_eq!(state.prefs.aliases[OLD], "SK98");
+        state.prefs.aliases.remove(OLD);
+        let row = state.prefs.keyboard_row(generic_new.clone());
+        assert_ne!(state.prefs.name(&row), "Exact Receiver Keyboard");
+
+        // 有匹配序列号换口重连时，刷新 endpoint_id 并保持精确名称与图标。
+        let mut with_serial = prefs();
+        with_serial.aliases.clear();
+        with_serial.keyboard_connection = Some(KeyboardConnection {
+            endpoint_id: OLD.into(),
+            serial: Some("SN-SAME".into()),
+        });
+        assert!(with_serial.remember_identity(&exact));
+        let connection = plan(&with_serial, &[presence(NEW, Some("SN-SAME"))])
+            .unwrap()
+            .unwrap();
+        let mut state = State {
+            prefs: with_serial.clone(),
+            ..Default::default()
+        };
+        assert!(commit(&mut state, &with_serial, connection, |_| Ok(())).unwrap());
+        let row = state.prefs.keyboard_row(generic_new);
+        assert_eq!(state.prefs.name(&row), "Exact Receiver Keyboard");
     }
 }

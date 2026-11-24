@@ -43,6 +43,17 @@ fn main() {
                 Err(host::AppError::SmokeTest)
             }
         }
+        [s, m] if s == "--smoke-test" && m == "compat" => {
+            let prefs = model::Prefs {
+                engine_mode: battery_protocol::EngineMode::Compatible,
+                ..Default::default()
+            };
+            if service::Service::smoke_test_compatible(prefs) {
+                Ok(())
+            } else {
+                Err(host::AppError::SmokeTest)
+            }
+        }
         [s] if s == "--demo-tray" || s == "--exercise-tray" => host::run(true),
         [] => host::run(false),
         _ => Err(host::AppError::UnknownOption),

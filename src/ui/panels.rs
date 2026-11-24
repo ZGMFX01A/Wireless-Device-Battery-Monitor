@@ -4,6 +4,7 @@
 
 //! Native layout mirrors web_ui/{theme-layout,devices,settings}.css in logical pixels.
 use super::{skin::*, *};
+use crate::model::PROBED_COMPATIBLE_ONLY_ERROR;
 use battery_protocol::{Source, codec::KYSONA_SLOT_UNPAIRED};
 const PROJECT_HOME_URL: &str = "https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor";
 fn time_text(sec: u64) -> Option<String> {
@@ -222,7 +223,7 @@ impl Panel {
     fn card(&self, r: &Row, k: Skin, cx: &mut Context<Self>) -> Stateful<Div> {
         let d = &r.device;
         let id = d.id.clone();
-        let name = self.state.prefs.name(d);
+        let name = self.state.row_name(r);
         let b = r.battery;
         let online = b.is_some() && r.error.is_none();
         let show_percent = (online || r.held) && b.is_some_and(|b| b.percentage_known);
@@ -282,6 +283,8 @@ impl Panel {
             };
         let st = if r.error.as_deref() == Some(KYSONA_SLOT_UNPAIRED) {
             self.t("device.unpaired")
+        } else if r.error.as_deref() == Some(PROBED_COMPATIBLE_ONLY_ERROR) {
+            self.t("device.compatible_only")
         } else if !online && show_percent {
             self.t("device.offline_previous")
         } else if !online {
@@ -516,7 +519,19 @@ impl Panel {
                             .text_center()
                             .when(sel, |d| d.font_weight(FontWeight::SEMIBOLD)),
                     )
-                    .on_click(cx.listener(move |s, _, _, cx| s.issue(c.clone(), cx))),
+                    .on_click(cx.listener(move |s, _, _, cx| {
+                        if let Command::SetEngineMode(mode) = c {
+                            if mode == s.state.prefs.engine_mode {
+                                return;
+                            }
+                            if mode == EngineMode::Compatible {
+                                s.modal = Some(Dialog::ConfirmCompatibleMode);
+                                cx.notify();
+                                return;
+                            }
+                        }
+                        s.issue(c.clone(), cx);
+                    })),
             )
         }
         seg
@@ -587,7 +602,10 @@ impl Panel {
                     .shadow_sm(),
             )
             .on_click(cx.listener(move |s, _, _, cx| {
-                if let Some(c) = &c {
+                if matches!(c, Some(Command::SetUnknownProbe(true))) {
+                    s.modal = Some(Dialog::ConfirmUnknownProbe);
+                    cx.notify();
+                } else if let Some(c) = &c {
                     s.issue(c.clone(), cx)
                 } else {
                     s.live = !s.live;
@@ -803,6 +821,42 @@ impl Panel {
                 cx,
             ),
         ));
+        group = group.child(self.group(
+            "engine_mode",
+            k,
+            true,
+            self.segments(
+                "engine-mode",
+                vec![
+                    (
+                        self.t("settings.engine_mode.normal"),
+                        Command::SetEngineMode(EngineMode::Normal),
+                        p.engine_mode == EngineMode::Normal,
+                    ),
+                    (
+                        self.t("settings.engine_mode.compatible"),
+                        Command::SetEngineMode(EngineMode::Compatible),
+                        p.engine_mode == EngineMode::Compatible,
+                    ),
+                ],
+                k,
+                cx,
+            ),
+        ));
+        if p.engine_mode == EngineMode::Compatible {
+            group = group.child(self.group(
+                "unknown_probe",
+                k,
+                false,
+                self.switch(
+                    "unknown-probe",
+                    p.probe_unknown_devices,
+                    Some(Command::SetUnknownProbe(!p.probe_unknown_devices)),
+                    k,
+                    cx,
+                ),
+            ));
+        }
         let check = action("updates")
             .gap(px(6.))
             .h(px(34.))
@@ -826,11 +880,6 @@ impl Panel {
                 }
                 cx.notify()
             }));
-        let import = action("import")
-            .px(px(8.))
-            .h(px(34.))
-            .child(txt(self.t("settings.import"), 11., k.dim()))
-            .on_click(cx.listener(|s, _, _, cx| s.issue(Command::ImportAppearance, cx)));
         col()
             .w_full()
             .items_center()
@@ -843,7 +892,27 @@ impl Panel {
                     .mt(px(14.))
                     .gap(px(8.))
                     .child(check)
-                    .child(import),
+                    .when(p.unknown_probe_enabled(), |r| {
+                        r.child(
+                            action("copy-probe-diagnostics")
+                                .h(px(34.))
+                                .px(px(14.))
+                                .bg(k.grad(false))
+                                .rounded(px(8.))
+                                .border_1()
+                                .border_color(k.line())
+                                .hover(move |d| d.bg(k.selected()))
+                                .child(txt(self.t("settings.copy_probe_diagnostics"), 12., k.sub()))
+                                .on_click(cx.listener(|s, _, _, cx| {
+                                    let text =
+                                        battery_protocol::hid::probe::format_probe_diagnostics(
+                                            &s.state.probe_diagnostics,
+                                        );
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    s.toast(Toast::Label("toast.probe_diagnostics_copied"), cx);
+                                })),
+                        )
+                    }),
             )
             .child(self.author_footer(k))
     }
