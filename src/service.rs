@@ -229,6 +229,11 @@ fn retains_last_peripheral_sample(source: Source) -> bool {
             | Source::HyperX
             | Source::TurtleBeach
             | Source::Scyrox
+            | Source::Compx
+            | Source::Lamzu
+            | Source::Valkyrie
+            | Source::Hecate
+            | Source::Xctech
     )
 }
 impl Slot {
@@ -3326,6 +3331,39 @@ mod tests {
         slot.apply(Err("Scyrox mouse is offline".into()), 1000, false);
         assert_eq!(slot.row.battery, Some(sample));
         assert!(slot.row.held && slot.row.error.is_some());
+    }
+
+    #[test]
+    fn new_mouse_sources_keep_old_samples_stale_until_a_live_reply() {
+        for source in [
+            Source::Compx,
+            Source::Lamzu,
+            Source::Xctech,
+            Source::Valkyrie,
+            Source::Hecate,
+        ] {
+            let device = Descriptor {
+                id: "hid:test:mouse".into(),
+                name: "2.4G Receiver".into(),
+                kind: Kind::Mouse,
+                legacy_ids: vec![],
+                identity: None,
+                generic_name: None,
+            };
+            let mut slot = Slot::new(device, 0);
+            let sample = Reading::new(73, Charge::Discharging, source).unwrap();
+            slot.apply(Ok(sample), 50, false);
+            slot.row.sampled = 50;
+            slot.apply(Err("mouse is asleep or offline".into()), 1000, false);
+            assert_eq!(slot.row.battery, Some(sample));
+            assert_eq!(slot.row.sampled, 50);
+            assert!(slot.row.held && slot.row.error.is_some());
+            let sample = Reading::new(0, Charge::Charging, source).unwrap();
+            slot.apply(Ok(sample), 2000, false);
+            assert_eq!(slot.row.battery, Some(sample));
+            assert!(slot.row.sampled > 50);
+            assert!(!slot.row.held && slot.row.error.is_none());
+        }
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]

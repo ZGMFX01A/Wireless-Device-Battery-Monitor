@@ -248,6 +248,8 @@ impl Panel {
                 )
             } else if src == Some(Source::Rog) || id.starts_with("hid:0b05:") {
                 ("ROG", 0xff4d67, if k.dark { 0xffb0b8 } else { 0x9f3c4a })
+            } else if crate::device_display::is_lamzu(d) {
+                ("LAMZU", 0x5b91ff, if k.dark { 0xb4cbff } else { 0x365cac })
             } else if crate::device_display::is_hyperx(d, src) {
                 ("HyperX", 0xff4d67, if k.dark { 0xffb0b8 } else { 0x9f3c4a })
             } else if crate::device_display::is_turtle_beach(d, src) {

@@ -69,6 +69,21 @@ pub fn is_scyrox(device: &Descriptor, source: Option<battery_protocol::Source>) 
     confirmed_model || scyrox_receiver || own_vid_sample
 }
 
+pub fn is_lamzu(device: &Descriptor) -> bool {
+    let catalog_model = device.identity.as_ref().is_some_and(|identity| {
+        identity.model_source == Some(battery_protocol::ModelSource::CatalogRule)
+            && identity
+                .model_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("lamzu:"))
+    });
+    catalog_model
+        || matches!(
+            &device.generic_name,
+            Some(GenericName::Receiver24g { brand: Some(brand), .. }) if brand == "LAMZU"
+        )
+}
+
 /// 默认沿用标准设备图标策略；兼容模式请使用 `device_icon_in_mode`。
 #[cfg(test)]
 pub fn device_icon(device: &Descriptor) -> Option<DeviceIcon> {
@@ -207,6 +222,13 @@ mod tests {
                 "legacy:0b05:1ac6",
                 DeviceCategory::Mouse,
                 DeviceIcon::Mouse,
+                (false, false, false),
+            ),
+            (
+                "ROG Azoth X Wireless",
+                "legacy:0b05:1c25",
+                DeviceCategory::Keyboard,
+                DeviceIcon::Keyboard,
                 (false, false, false),
             ),
             (
@@ -385,6 +407,44 @@ mod tests {
             );
             d.id = shared_id.into();
             assert!(!is_scyrox(&d, Some(battery_protocol::Source::Scyrox)));
+        }
+    }
+
+    #[test]
+    fn lamzu_badge_is_available_before_first_sample_and_excludes_probed_mice() {
+        let mut d = descriptor(
+            DeviceCategory::Mouse,
+            ConnectionKind::Usb,
+            BatteryCapability::Present,
+            Some("lamzu:373e:001c"),
+        );
+        d.id = "hid:373e:001c:Mouse:usb".into();
+        assert!(is_lamzu(&d));
+
+        d = descriptor(
+            DeviceCategory::Mouse,
+            ConnectionKind::Rf24,
+            BatteryCapability::Present,
+            None,
+        );
+        d.id = "hid:37b0:0048:Mouse:receiver".into();
+        d.generic_name = Some(GenericName::Receiver24g {
+            brand: Some("LAMZU".into()),
+            channel: Some(DeviceCategory::Mouse),
+        });
+        assert!(is_lamzu(&d));
+
+        for vid in ["373e", "37b0"] {
+            d.id = format!("hid:{vid}:ee09:Mouse:probed");
+            d.generic_name = Some(GenericName::Receiver24g {
+                brand: None,
+                channel: Some(DeviceCategory::Mouse),
+            });
+            assert!(!is_lamzu(&d));
+            assert_eq!(
+                device_icon_in_mode(&d, EngineMode::Compatible),
+                Some(DeviceIcon::Mouse)
+            );
         }
     }
 
