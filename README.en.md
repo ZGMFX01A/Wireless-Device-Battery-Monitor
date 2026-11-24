@@ -80,7 +80,14 @@ Battery-powered peripherals can be monitored in USB mode when they report an act
 2. **Open the panel and add devices.** Connect your mouse receiver and check automatic detection. For a supported 2.4 GHz keyboard, plug in its USB receiver and select “Add Keyboard.” Pair and connect Bluetooth devices, including Bluetooth keyboards, in Windows first, then select “Add Bluetooth.”
 3. **Set your preferences.** Choose the tray style, display priority, and notification threshold. Enable “Start with Windows” in settings if desired. After moving or renaming the executable, enable it again to update the same startup entry to the current path; disabling it removes that entry.
 
-When upgrading from an older version, exit it from its tray menu before running the new version. “Import legacy settings” can read your previous preferences. Device bindings and aliases are restored only when device identity can be matched unambiguously; add unmatched devices again. Enabling startup in the new version removes the legacy startup entry only after successfully writing the new one. This also works if the old executable has already been deleted; there is no need to run it again.
+When upgrading from an older version, exit it from its tray menu before running the new version. Enabling startup in the new version removes the legacy startup entry only after successfully writing the new one. This also works if the old executable has already been deleted; there is no need to run it again.
+
+### Recognition modes
+
+- **Normal mode (default)** uses the existing verified device and protocol rules.
+- **Compatible mode (experimental)** can be enabled in Settings after confirmation. By default, it only extends recognition to sibling devices paired with registered shared receivers and sends no active probes to unknown devices. Newly recognized sibling devices use a generic name and category icon. Known devices and devices previously identified by exact model retain their names and icons.
+- **Probe unknown devices (experimental, off by default)** is a separate switch in Compatible mode. After confirmation, the first three controlled probe variants send read-only battery queries to eligible unregistered wireless peripherals. Use **Copy probe diagnostics** next to **Check for updates** in Settings to include a report in an issue. The report omits serial numbers and local paths.
+- **Switching modes and downgrading.** Bound devices that depend on probing stay listed as offline with a hint when you turn probing off or return to Normal mode. An older version without recognition modes ignores the new fields when it saves your settings. After upgrading again, restore the settings you need and re-add the devices that depend on them.
 
 ## Frequently asked questions
 

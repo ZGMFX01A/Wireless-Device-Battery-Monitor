@@ -321,17 +321,45 @@ impl Panel {
                     .child(txt(st, 11., k.card_secondary()).whitespace_normal()),
             );
         let edit_id = id.clone();
+        let pin_id = id.clone();
+        let pinned = self.state.prefs.taskbar_pinned(&id);
         let display = name.clone();
-        let mut controls = row().gap(px(4.)).child(
-            action(format!("edit-{id}"))
-                .size(px(22.))
-                .rounded(px(4.))
-                .hover(|e| e.bg(rgba(0x10b98128)))
-                .child(icon("edit", 13., k.dim()))
-                .on_click(
-                    cx.listener(move |s, _, w, cx| s.edit(edit_id.clone(), display.clone(), w, cx)),
-                ),
-        );
+        let mut controls = row()
+            .gap(px(4.))
+            .child(
+                action(format!("pin-{id}"))
+                    .size(px(22.))
+                    .rounded(px(4.))
+                    .when(pinned, |d| d.bg(rgba(0x10b98124)))
+                    .hover(|e| e.bg(rgba(0x10b98128)))
+                    .child(icon(
+                        "pin",
+                        13.,
+                        if pinned { rgb(GREEN).into() } else { k.dim() },
+                    ))
+                    .on_click(cx.listener(move |s, _, _, cx| {
+                        let was_pinned = s.state.prefs.taskbar_pinned(&pin_id);
+                        s.issue(Command::ToggleTaskbarDevice(pin_id.clone()), cx);
+                        s.toast(
+                            Toast::Label(if was_pinned {
+                                "toast.taskbar_unpinned"
+                            } else {
+                                "toast.taskbar_pinned"
+                            }),
+                            cx,
+                        );
+                    })),
+            )
+            .child(
+                action(format!("edit-{id}"))
+                    .size(px(22.))
+                    .rounded(px(4.))
+                    .hover(|e| e.bg(rgba(0x10b98128)))
+                    .child(icon("edit", 13., k.dim()))
+                    .on_click(cx.listener(move |s, _, w, cx| {
+                        s.edit(edit_id.clone(), display.clone(), w, cx)
+                    })),
+            );
         if matches!(d.kind, Kind::Keyboard | Kind::Bluetooth) {
             let remove_id = id.clone();
             let title = name.clone();
@@ -731,6 +759,62 @@ impl Panel {
             );
         }
         group = group.child(self.group("tray_priority", k, false, chooser));
+        group = group.child(self.group(
+            "taskbar_position",
+            k,
+            true,
+            self.segments(
+                "taskbar-position",
+                vec![
+                    (
+                        self.t("settings.taskbar_position.tray_left"),
+                        Command::SetTaskbarPosition(TaskbarPosition::TrayLeft),
+                        p.taskbar_position == TaskbarPosition::TrayLeft,
+                    ),
+                    (
+                        self.t("settings.taskbar_position.taskbar_left"),
+                        Command::SetTaskbarPosition(TaskbarPosition::TaskbarLeft),
+                        p.taskbar_position == TaskbarPosition::TaskbarLeft,
+                    ),
+                ],
+                k,
+                cx,
+            ),
+        ));
+        group = group.child(self.group(
+            "taskbar_layout",
+            k,
+            true,
+            self.segments(
+                "taskbar-layout",
+                vec![
+                    (
+                        self.t("settings.taskbar_layout.stacked"),
+                        Command::SetTaskbarLayout(TaskbarLayout::Stacked),
+                        p.taskbar_layout == TaskbarLayout::Stacked,
+                    ),
+                    (
+                        self.t("settings.taskbar_layout.inline"),
+                        Command::SetTaskbarLayout(TaskbarLayout::Inline),
+                        p.taskbar_layout == TaskbarLayout::Inline,
+                    ),
+                ],
+                k,
+                cx,
+            ),
+        ));
+        group = group.child(self.group(
+            "taskbar_backdrop",
+            k,
+            false,
+            self.switch(
+                "taskbar-backdrop",
+                p.taskbar_backdrop,
+                Some(Command::SetTaskbarBackdrop(!p.taskbar_backdrop)),
+                k,
+                cx,
+            ),
+        ));
         let low = [0, 10, 20, 30];
         group = group.child(
             self.group(

@@ -289,6 +289,69 @@ pub fn label(locale: Locale, key: &str) -> &'static str {
         "settings.tray_priority.mouse_first" => ("优先鼠标", "Mouse First", "Мышь"),
         "settings.tray_priority.keyboard_first" => ("优先键盘", "Keyboard First", "Клавиатура"),
         "settings.tray_priority.lowest_battery" => ("低电量优先", "Lowest First", "Меньший заряд"),
+        "settings.taskbar_position.title" => (
+            "任务栏小组件位置",
+            "Taskbar Widget Position",
+            "Позиция на панели задач",
+        ),
+        "settings.taskbar_position.subtitle" => (
+            "多设备任务栏电量显示在托盘左侧或任务栏左侧",
+            "Show multi-device battery on tray left or taskbar left",
+            "Показывать заряд устройств слева от трея или панели задач",
+        ),
+        "settings.taskbar_position.tray_left" => ("托盘左侧", "Left of tray", "Слева от трея"),
+        "settings.taskbar_position.taskbar_left" => {
+            ("任务栏左侧", "Left of taskbar", "Слева на панели")
+        }
+        "settings.taskbar_layout.title" => (
+            "任务栏电量排列",
+            "Taskbar Widget Layout",
+            "Макет на панели задач",
+        ),
+        "settings.taskbar_layout.subtitle" => (
+            "选择图标位于百分比上方（更窄）或图标在左侧",
+            "Choose icon above percentage (narrower) or icon on left",
+            "Значок над процентом (уже) или значок слева",
+        ),
+        "settings.taskbar_layout.stacked" => (
+            "图标在上方（更窄）",
+            "Icon above (narrower)",
+            "Значок сверху (уже)",
+        ),
+        "settings.taskbar_layout.inline" => ("图标在左侧", "Icon on left", "Значок слева"),
+        "settings.taskbar_backdrop.title" => (
+            "任务栏文字底框",
+            "Taskbar Text Backdrop",
+            "Подложка текста на панели",
+        ),
+        "settings.taskbar_backdrop.subtitle" => (
+            "为多设备电量绘制半透明底框（适用于透明任务栏）",
+            "Add a translucent pill backdrop for transparent taskbars",
+            "Полупрозрачная подложка для прозрачной панели задач",
+        ),
+        "toast.taskbar_pinned" => (
+            "已固定到任务栏显示",
+            "Pinned to taskbar",
+            "Закреплено на панели задач",
+        ),
+        "toast.taskbar_unpinned" => (
+            "已取消任务栏显示",
+            "Unpinned from taskbar",
+            "Откреплено от панели задач",
+        ),
+        "taskbar.menu.open" => ("打开设备面板", "Open Panel", "Открыть панель"),
+        "taskbar.menu.position" => ("小组件显示位置", "Widget Position", "Позиция виджета"),
+        "taskbar.menu.layout" => ("图标排列方式", "Icon Layout", "Расположение значка"),
+        "taskbar.menu.backdrop" => (
+            "任务栏文字背景",
+            "Taskbar Text Backdrop",
+            "Подложка текста на панели",
+        ),
+        "taskbar.menu.clear" => (
+            "清空任务栏固定",
+            "Clear Pinned Devices",
+            "Очистить закреплённые устройства",
+        ),
         "settings.low_battery.title" => (
             "低电量提醒",
             "Low Battery Alert",

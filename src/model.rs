@@ -43,6 +43,20 @@ pub enum Language {
     En,
     Ru,
 }
+/// 任务栏多设备电量显示位置。
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub enum TaskbarPosition {
+    #[default]
+    TrayLeft,
+    TaskbarLeft,
+}
+/// 任务栏多设备电量排列布局。
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub enum TaskbarLayout {
+    #[default]
+    Stacked,
+    Inline,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KeyboardConnection {
     pub endpoint_id: String,
@@ -85,6 +99,18 @@ pub struct Prefs {
     pub aliases: BTreeMap<String, String>,
     pub bound_names: BTreeMap<String, String>,
     pub bound_identity: BTreeMap<String, CachedDeviceIdentity>,
+    /// 固定到任务栏显示的设备 ID 列表（按固定顺序保存）。
+    #[serde(default)]
+    pub taskbar_devices: Vec<String>,
+    /// 任务栏多设备小组件的停靠位置。
+    #[serde(default)]
+    pub taskbar_position: TaskbarPosition,
+    /// 任务栏多设备小组件的图标与百分比布局。
+    #[serde(default)]
+    pub taskbar_layout: TaskbarLayout,
+    /// 是否为任务栏多设备小组件绘制半透明底框以适配透明任务栏。
+    #[serde(default)]
+    pub taskbar_backdrop: bool,
 }
 impl Default for Prefs {
     fn default() -> Self {
@@ -106,10 +132,21 @@ impl Default for Prefs {
             aliases: Default::default(),
             bound_names: Default::default(),
             bound_identity: Default::default(),
+            taskbar_devices: Vec::new(),
+            taskbar_position: Default::default(),
+            taskbar_layout: Default::default(),
+            taskbar_backdrop: false,
         }
     }
 }
 impl Prefs {
+    /// 判断指定设备是否已固定显示到任务栏。
+    pub fn taskbar_pinned(&self, id: &str) -> bool {
+        self.taskbar_devices.iter().any(|item| item == id)
+    }
+    fn unpin_taskbar_device(&mut self, id: &str) {
+        self.taskbar_devices.retain(|item| item != id);
+    }
     pub fn keyboard_endpoint(&self) -> Option<&str> {
         self.keyboard.as_deref().map(|id| {
             self.keyboard_connection
@@ -391,6 +428,11 @@ impl Prefs {
             if let Some(snapshot) = self.bound_identity.remove(&old) {
                 self.bound_identity.entry(d.id.clone()).or_insert(snapshot);
             }
+            for item in &mut self.taskbar_devices {
+                if *item == old {
+                    *item = d.id.clone();
+                }
+            }
             remapped = true;
         }
         for (old, alias) in self.aliases.clone() {
@@ -404,6 +446,24 @@ impl Prefs {
                 remapped = true;
             }
         }
+        let mut seen = BTreeSet::new();
+        let mut next_taskbar = Vec::with_capacity(self.taskbar_devices.len());
+        for old in std::mem::take(&mut self.taskbar_devices) {
+            let resolved = if old.starts_with("hid:")
+                && !(self.keyboard_connection.is_some() && self.keyboard.as_ref() == Some(&old))
+                && let Some(d) = exact(list, std::slice::from_ref(&old), None)
+                && d.id != old
+            {
+                remapped = true;
+                d.id.clone()
+            } else {
+                old
+            };
+            if seen.insert(resolved.clone()) {
+                next_taskbar.push(resolved);
+            }
+        }
+        self.taskbar_devices = next_taskbar;
         remapped
     }
     pub fn load(p: &Path) -> Result<Self, String> {
@@ -861,6 +921,11 @@ pub enum Command {
     OpenUpdate,
     InstallUpdate,
     Switched(Mode, u64),
+    ToggleTaskbarDevice(String),
+    ClearTaskbarDevices,
+    SetTaskbarPosition(TaskbarPosition),
+    SetTaskbarLayout(TaskbarLayout),
+    SetTaskbarBackdrop(bool),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
@@ -938,6 +1003,7 @@ impl Prefs {
                         if let Some(old) = self.keyboard.replace(id.clone()).filter(|old| old != id)
                         {
                             self.bound_identity.remove(&old);
+                            self.unpin_taskbar_device(&old);
                         }
                         self.keyboard_connection = None;
                     }
@@ -953,7 +1019,25 @@ impl Prefs {
                 self.bluetooth.remove(id);
                 self.bound_names.remove(id);
                 self.bound_identity.remove(id);
+                self.unpin_taskbar_device(id);
             }
+            Command::ToggleTaskbarDevice(id) => {
+                if self.taskbar_pinned(id) {
+                    self.unpin_taskbar_device(id);
+                } else if list.iter().any(|d| d.id == *id)
+                    || self.bound_names.contains_key(id)
+                    || self.keyboard.as_deref() == Some(id.as_str())
+                    || self.bluetooth.contains(id)
+                {
+                    self.taskbar_devices.push(id.clone());
+                } else {
+                    return false;
+                }
+            }
+            Command::ClearTaskbarDevices => self.taskbar_devices.clear(),
+            Command::SetTaskbarPosition(v) => self.taskbar_position = v.clone(),
+            Command::SetTaskbarLayout(v) => self.taskbar_layout = v.clone(),
+            Command::SetTaskbarBackdrop(v) => self.taskbar_backdrop = *v,
             Command::Alias(id, name)
                 if (list.iter().any(|d| d.id == *id) || self.bound_names.contains_key(id))
                     && name.encode_utf16().count() <= 32 =>
@@ -1438,5 +1522,66 @@ mod formal_review_tests {
         let bytes = format!(r#"{{"future_field":"{}"}}"#, "a".repeat(4 * 1024 * 1024));
         std::fs::write(&file, bytes).unwrap();
         assert!(Prefs::load(&file).is_err());
+    }
+    #[test]
+    fn taskbar_preferences_default_toggle_unbind_resolve_and_round_trip() {
+        let legacy: Prefs = serde_json::from_str(r#"{"glass":30}"#).unwrap();
+        assert!(legacy.taskbar_devices.is_empty());
+        assert_eq!(legacy.taskbar_position, TaskbarPosition::TrayLeft);
+        assert_eq!(legacy.taskbar_layout, TaskbarLayout::Stacked);
+        assert!(!legacy.taskbar_backdrop);
+
+        let demo = State::demo();
+        let mouse_id = demo.rows[0].device.id.clone();
+        let kb_id = demo.rows[1].device.id.clone();
+        let mut prefs = demo.prefs.clone();
+        assert!(!prefs.change(
+            &Command::ToggleTaskbarDevice("missing".into()),
+            &demo.candidates
+        ));
+        assert!(prefs.change(
+            &Command::ToggleTaskbarDevice(mouse_id.clone()),
+            &demo.candidates
+        ));
+        assert!(prefs.change(
+            &Command::ToggleTaskbarDevice(kb_id.clone()),
+            &demo.candidates
+        ));
+        assert_eq!(prefs.taskbar_devices, vec![mouse_id.clone(), kb_id.clone()]);
+        assert!(prefs.taskbar_pinned(&mouse_id));
+        assert!(prefs.change(&Command::Unbind(kb_id.clone()), &demo.candidates));
+        assert_eq!(prefs.taskbar_devices, vec![mouse_id.clone()]);
+        assert!(prefs.change(
+            &Command::ToggleTaskbarDevice(mouse_id.clone()),
+            &demo.candidates
+        ));
+        assert!(prefs.taskbar_devices.is_empty());
+
+        let old_id = "hid:old".to_owned();
+        prefs.taskbar_devices = vec![old_id.clone(), "hid:new".to_owned()];
+        let resolved_desc = Descriptor {
+            id: "hid:new".into(),
+            name: "Mouse".into(),
+            kind: Kind::Mouse,
+            legacy_ids: vec![old_id],
+            identity: None,
+            generic_name: None,
+        };
+        assert!(prefs.resolve(&[resolved_desc]));
+        assert_eq!(prefs.taskbar_devices, vec!["hid:new".to_owned()]);
+
+        assert!(prefs.change(
+            &Command::SetTaskbarPosition(TaskbarPosition::TaskbarLeft),
+            &[]
+        ));
+        assert!(prefs.change(&Command::SetTaskbarLayout(TaskbarLayout::Inline), &[]));
+        assert!(prefs.change(&Command::SetTaskbarBackdrop(true), &[]));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences-v2.json");
+        prefs.save(&path).unwrap();
+        let loaded = Prefs::load(&path).unwrap();
+        assert_eq!(loaded, prefs);
+        assert!(prefs.change(&Command::ClearTaskbarDevices, &[]));
+        assert!(prefs.taskbar_devices.is_empty());
     }
 }

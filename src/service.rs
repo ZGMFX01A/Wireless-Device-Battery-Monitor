@@ -2110,7 +2110,16 @@ impl Service {
                 s.prune_unbound();
                 s.demo_reconcile();
                 drop(s);
-                if !matches!(c, Command::SetLanguage(_) | Command::Language) {
+                if !matches!(
+                    c,
+                    Command::SetLanguage(_)
+                        | Command::Language
+                        | Command::ToggleTaskbarDevice(_)
+                        | Command::ClearTaskbarDevices
+                        | Command::SetTaskbarPosition(_)
+                        | Command::SetTaskbarLayout(_)
+                        | Command::SetTaskbarBackdrop(_)
+                ) {
                     self.signals.both(PREFS)
                 }
             }

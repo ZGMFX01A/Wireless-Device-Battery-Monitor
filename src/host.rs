@@ -405,6 +405,7 @@ struct TrayView {
     icon: (Option<u8>, bool, Style, icon::Appearance),
     tip: crate::tooltip::Content,
     menu: MenuKey,
+    taskbar: crate::taskbar::Content,
 }
 impl TrayView {
     fn of(s: &State, appearance: icon::Appearance) -> Self {
@@ -435,6 +436,7 @@ impl TrayView {
                 locale: locale(&s.prefs),
                 labels,
             },
+            taskbar: crate::taskbar::Content::of(s, appearance.dark),
         }
     }
 }
@@ -612,6 +614,31 @@ pub fn run(demo: bool) -> Result<(), AppError> {
     let s = svc.state.lock().unwrap().clone();
     let initial = TrayView::of(&s, icon::appearance());
     let mut tooltip = crate::tooltip::Tooltip::new(initial.tip.clone())?;
+    let tb_bus = bus.clone();
+    let mut taskbar = crate::taskbar::TaskbarWidget::new(
+        initial.taskbar.clone(),
+        tooltip.target(),
+        move |action| match action {
+            crate::taskbar::Action::OpenFlyout(at) => {
+                tb_bus.post(Msg::Open(Mode::Flyout, Some(at)))
+            }
+            crate::taskbar::Action::OpenSettings => tb_bus.post(Msg::Open(Mode::Settings, None)),
+            crate::taskbar::Action::Refresh => tb_bus.post(Msg::Action(Command::Refresh)),
+            crate::taskbar::Action::SetPosition(pos) => {
+                tb_bus.post(Msg::Action(Command::SetTaskbarPosition(pos)))
+            }
+            crate::taskbar::Action::SetLayout(layout) => {
+                tb_bus.post(Msg::Action(Command::SetTaskbarLayout(layout)))
+            }
+            crate::taskbar::Action::SetBackdrop(on) => {
+                tb_bus.post(Msg::Action(Command::SetTaskbarBackdrop(on)))
+            }
+            crate::taskbar::Action::ClearPinned => {
+                tb_bus.post(Msg::Action(Command::ClearTaskbarDevices))
+            }
+            crate::taskbar::Action::Quit => tb_bus.post(Msg::Quit),
+        },
+    )?;
     let tray = TrayIconBuilder::new()
         .with_icon(icon::draw(
             initial.icon.0,
@@ -760,6 +787,9 @@ pub fn run(demo: bool) -> Result<(), AppError> {
                     }
                     if next.menu != tray_view.menu {
                         tray.set_menu(Some(Box::new(menu(&next.menu))));
+                    }
+                    if next.taskbar != tray_view.taskbar {
+                        taskbar.update(next.taskbar.clone());
                     }
                     tray_view = next;
                     use crate::update::schedule::Action;
@@ -1140,6 +1170,18 @@ mod audit_tray {
         );
         assert_ne!(themed.icon, named.icon);
         assert_eq!(themed.menu, named.menu);
+
+        let before_pin = TrayView::of(&st, a);
+        let id = st.rows[0].device.id.clone();
+        assert!(
+            st.prefs
+                .change(&Command::ToggleTaskbarDevice(id), &st.candidates)
+        );
+        let after_pin = TrayView::of(&st, a);
+        assert_eq!(after_pin.icon, before_pin.icon);
+        assert_eq!(after_pin.menu, before_pin.menu);
+        assert_ne!(after_pin.taskbar, before_pin.taskbar);
+        assert_eq!(after_pin.taskbar.items.len(), 1);
     }
     #[test]
     fn unread_pipe_does_not_block_state_or_exit_producer() {

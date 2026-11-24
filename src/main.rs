@@ -12,6 +12,7 @@ mod model;
 mod service;
 mod startup;
 mod swap;
+mod taskbar;
 mod tooltip;
 mod update;
 #[cfg(test)]

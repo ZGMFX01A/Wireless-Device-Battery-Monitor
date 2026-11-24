@@ -3253,6 +3253,7 @@ dependencies = [
  "tokio",
  "tray-icon",
  "unicode-segmentation",
+ "windows",
  "windows-sys 0.61.2",
 ]
 

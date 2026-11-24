@@ -195,6 +195,23 @@ impl Target {
             }
         }
     }
+    /// 在指定锚点矩形悬停时展示原生设备详情浮窗。
+    pub fn enter_rect(self, rect: RECT) {
+        unsafe {
+            SendMessageW(
+                self.0 as HWND,
+                ENTER,
+                pack(rect.left, rect.top) as WPARAM,
+                pack(rect.right, rect.bottom) as LPARAM,
+            );
+        }
+    }
+    /// 立即隐藏原生设备详情浮窗。
+    pub fn hide(self) {
+        unsafe {
+            SendMessageW(self.0 as HWND, HIDE, 0, 0);
+        }
+    }
 }
 impl Tooltip {
     pub fn new(content: Content) -> Result<Self, String> {

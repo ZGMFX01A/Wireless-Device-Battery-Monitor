@@ -13,6 +13,7 @@ impl AssetSource for Icons {
             "update" => include_bytes!("../../assets/update.svg"),
             "empty" => include_bytes!("../../assets/empty.svg"),
             "edit" => include_bytes!("../../assets/edit.svg"),
+            "pin" => include_bytes!("../../assets/pin.svg"),
             _ => return Ok(None),
         })))
     }
@@ -27,6 +28,7 @@ impl AssetSource for Icons {
             "update".into(),
             "empty".into(),
             "edit".into(),
+            "pin".into(),
         ])
     }
 }
