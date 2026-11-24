@@ -5,10 +5,21 @@ body:
   - type: markdown
     attributes:
       value: |
-        Include the **exact model, including suffixes such as Pro / Max / SE, generation, and variant**, and an **official driver download or official web driver URL**.
+        > **Important prerequisite**: Before requesting device support, please confirm that **you can currently see this device's battery level in an official driver, official web driver, Windows Settings, or another tool/method**. If you cannot view the battery level through any software or method yourself, there is no reference source to analyze or verify against, so support cannot be added — please do not submit a request.
+
+        Include the **exact model, including suffixes such as Pro / Max / SE, generation, and variant**, and an **official driver download or official web driver URL** (if there is no official driver and you see the battery in another app, specify its name and URL).
         Devices in the same series, with the same appearance, or sharing a VID do not necessarily use the same battery protocol. Describe results for each connection mode separately.
 
         See the [device information collection guide](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/blob/main/docs/device-support.md#english).
+
+  - type: checkboxes
+    id: battery-visibility-confirm
+    attributes:
+      label: Prerequisite confirmation
+      description: You must have a working tool or method that can read this device's battery level before requesting support.
+      options:
+        - label: I confirm that I can currently view this device's battery level via an official driver, official web driver, Windows, or another tool/method
+          required: true
 
   - type: input
     id: device-model
@@ -22,11 +33,12 @@ body:
   - type: textarea
     id: official-driver
     attributes:
-      label: Official driver download or web driver URL
-      description: Provide at least one official URL for this model. If you must select a model/version on the download page, specify the selection. For web drivers, link to the device management page.
+      label: Official driver, web driver, or battery-reading software URL
+      description: Provide at least one official URL for this model. If you must select a model/version on the download page, specify the selection. For web drivers, link to the device management page. If there is no official driver and you see the battery via Windows (e.g., Bluetooth battery) or another app, state the exact app/method and its download URL.
       placeholder: |
         Official driver download URL:
         Official web driver URL:
+        Other app/method showing battery and its URL (if applicable):
         Model/version to select on the page, if applicable:
     validations:
       required: true
@@ -80,13 +92,14 @@ body:
   - type: textarea
     id: official-driver-behavior
     attributes:
-      label: Behavior in the official driver
-      description: Does the official driver identify the device and show a battery percentage and charging state? Compare both apps at the same time. Describe results with the official driver running and exited; mark untested cases.
+      label: Behavior in the software/method that shows battery
+      description: Clearly state which app or method (official driver, web driver, Windows, etc.) currently shows the battery, and whether it reports battery percentage and charging state. Compare both apps at the same time, and describe results with that app running and exited; mark untested cases.
       placeholder: |
-        Official driver identification, battery level, and charging state:
+        App/method currently showing battery:
+        Battery percentage and charging state shown there:
         This app's reading at the same time:
-        With the official driver running:
-        After exiting the official driver (close its browser tabs for web drivers):
+        With that app running:
+        After exiting that app (close its browser tabs for web drivers):
     validations:
       required: true
 

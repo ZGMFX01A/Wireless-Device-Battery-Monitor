@@ -357,6 +357,25 @@ impl Panel {
                     })),
                 );
             }
+            Dialog::SupportStar => {
+                width = 310.;
+                title = self.t("dialog.star.title").into();
+                body = body.child(
+                    txt(self.t("dialog.star.message"), 12., k.sub())
+                        .w_full()
+                        .whitespace_normal()
+                        .flex_none(),
+                );
+                footer = footer.child(close(self.t("dialog.star.later"))).child(
+                    footbtn("star-open", self.t("dialog.star.action"), true, k).on_click(
+                        cx.listener(|s, _, _, cx| {
+                            s.modal = None;
+                            cx.notify();
+                            cx.open_url(PROJECT_HOME_URL);
+                        }),
+                    ),
+                );
+            }
             Dialog::Update => {
                 width = 320.;
                 let st = &self.state.update;

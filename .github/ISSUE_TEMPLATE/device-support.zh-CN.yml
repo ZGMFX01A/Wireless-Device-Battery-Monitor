@@ -5,10 +5,21 @@ body:
   - type: markdown
     attributes:
       value: |
-        请提供**完整型号（包含 Pro / Max / SE、代数及版本等后缀）**，并附上**官方驱动下载地址或官方网页驱动地址**。
+        > **重要前提**：申请设备适配前，请先确认**你自己目前已经有官方驱动、官方网页驱动、Windows 系统设置或其他软件/方式能够看到该设备的电量**。如果你自己通过任何软件或方式都看不到该设备的电量，说明没有可供分析与对照的电量来源，暂无法适配，请勿提交适配申请。
+
+        请提供**完整型号（包含 Pro / Max / SE、代数及版本等后缀）**，并附上**官方驱动下载地址或官方网页驱动地址**（若无官方驱动而是通过其他软件读取电量，请写明软件名称及地址）。
         同一系列、外观相同或 VID 相同，不代表使用相同的电量协议。请按实际连接方式分别描述结果。
 
         详细步骤见 [设备信息采集说明](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/blob/main/docs/device-support.md)。
+
+  - type: checkboxes
+    id: battery-visibility-confirm
+    attributes:
+      label: 适配前提确认
+      description: 必须先确认存在能够读取该设备电量的软件或方式，否则无法开展适配。
+      options:
+        - label: 我已确认：我目前能通过官方驱动、官方网页驱动、Windows 系统或其他软件/方式看到该设备的电量
+          required: true
 
   - type: input
     id: device-model
@@ -22,11 +33,12 @@ body:
   - type: textarea
     id: official-driver
     attributes:
-      label: 官方驱动下载或网页驱动地址
-      description: 至少提供一个与该型号对应的官方地址。下载需先选型号时，请注明选项；网页驱动请给出能打开设备管理界面的地址。
+      label: 官方驱动、网页驱动或可读取电量的软件地址
+      description: 至少提供一个与该型号对应的官方地址。下载需先选型号时，请注明选项；网页驱动请给出能打开设备管理界面的地址。若无官方驱动、而是通过 Windows 系统（如蓝牙电量）或其他软件看到电量，请写明具体软件名称/获取方式及下载地址。
       placeholder: |
         官方驱动下载地址：
         官方网页驱动地址：
+        其他可看到电量的软件名称/获取方式及地址（如适用）：
         页面中需要选择的型号/版本（如有）：
     validations:
       required: true
@@ -80,13 +92,14 @@ body:
   - type: textarea
     id: official-driver-behavior
     attributes:
-      label: 官方驱动中的表现
-      description: 官方驱动是否识别设备、能否显示电量百分比与充电状态？记录同一时间的本软件/官方读数。还请说明官方驱动运行、退出时的结果；未测试请注明。
+      label: 当前可看到电量的软件/方式表现
+      description: 请明确说明当前是通过哪款软件或哪种方式（官方驱动、网页驱动、Windows 系统等）看到的电量，以及能否显示电量百分比与充电状态。记录同一时间的本软件与对照软件读数，并说明对照软件运行、退出时的结果；未测试请注明。
       placeholder: |
-        官方驱动识别结果、电量与充电状态：
+        当前通过哪款软件/方式看到电量：
+        该软件/方式显示的电量百分比与充电状态：
         同一时间本软件的读数：
-        官方驱动运行时：
-        官方驱动退出后（网页驱动需关闭相关标签页）：
+        对照软件运行时：
+        对照软件退出后（网页驱动需关闭相关标签页）：
     validations:
       required: true
 

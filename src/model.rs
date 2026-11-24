@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: LicenseRef-Wireless-Device-Battery-Monitor
 // See LICENSE in the repository root for the full terms.
 
-use battery_protocol::{Charge, Descriptor, EngineMode, Kind, Reading, hid::DiscoveryWarning};
+use battery_protocol::{
+    Charge, ConnectionKind, Descriptor, DeviceCategory, EngineMode, Kind, Reading,
+    hid::DiscoveryWarning,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -11,13 +14,23 @@ use std::{
 };
 pub const POLL_INTERVALS: [u64; 7] = [5, 10, 15, 30, 60, 120, 300];
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 30;
+/// 托盘弹窗中 GitHub Star 支持提示的弹出间隔（15 天，单位：秒）。
+pub const STAR_PROMPT_INTERVAL_SECS: u64 = 15 * 24 * 60 * 60;
 /// 普通模式下，标记需要切回兼容模式才能识别的离线绑定。
 pub const PROBED_COMPATIBLE_ONLY_ERROR: &str = "compatible-mode-only";
+/// 托盘多设备显示优先级策略。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum Priority {
+    /// 优先展示鼠标电量。
     #[default]
     Mouse,
+    /// 优先展示键盘电量。
     Keyboard,
+    /// 优先展示蓝牙设备电量。
+    Bluetooth,
+    /// 优先展示耳机设备电量。
+    Audio,
+    /// 始终展示电量最低的在线设备。
     Lowest,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -111,6 +124,9 @@ pub struct Prefs {
     /// 是否为任务栏多设备小组件绘制半透明底框以适配透明任务栏。
     #[serde(default)]
     pub taskbar_backdrop: bool,
+    /// 上次展示 GitHub Star 支持提示的时间戳（Unix 秒；0 表示尚未展示过）。
+    #[serde(default)]
+    pub last_star_prompt_at: u64,
 }
 impl Default for Prefs {
     fn default() -> Self {
@@ -136,10 +152,17 @@ impl Default for Prefs {
             taskbar_position: Default::default(),
             taskbar_layout: Default::default(),
             taskbar_backdrop: false,
+            last_star_prompt_at: 0,
         }
     }
 }
 impl Prefs {
+    /// 判断在给定 Unix 秒时间戳下是否需要弹出 GitHub Star 支持提示（首次或距上次已满 15 天）。
+    pub fn should_show_star_prompt(&self, now_secs: u64) -> bool {
+        now_secs > 0
+            && (self.last_star_prompt_at == 0
+                || now_secs.saturating_sub(self.last_star_prompt_at) >= STAR_PROMPT_INTERVAL_SECS)
+    }
     /// 判断指定设备是否已固定显示到任务栏。
     pub fn taskbar_pinned(&self, id: &str) -> bool {
         self.taskbar_devices.iter().any(|item| item == id)
@@ -832,6 +855,40 @@ impl State {
                         Kind::Mouse => 1,
                         Kind::Bluetooth | Kind::Audio | Kind::Gamepad => 2,
                     },
+                    // 蓝牙设备既包含系统蓝牙枚举条目，也包含已确认蓝牙连接协议的 HID 设备。
+                    Priority::Bluetooth => {
+                        let is_bluetooth = r.device.kind == Kind::Bluetooth
+                            || r.device
+                                .identity
+                                .as_ref()
+                                .is_some_and(|i| i.connection == ConnectionKind::Bluetooth);
+                        if is_bluetooth {
+                            0
+                        } else {
+                            match r.device.kind {
+                                Kind::Mouse => 1,
+                                Kind::Keyboard => 2,
+                                Kind::Bluetooth | Kind::Audio | Kind::Gamepad => 3,
+                            }
+                        }
+                    }
+                    // 耳机设备兼容 2.4G 无线音频（Kind::Audio）与识别为耳机品类的蓝牙耳机。
+                    Priority::Audio => {
+                        let is_headset = r.device.kind == Kind::Audio
+                            || r.device
+                                .identity
+                                .as_ref()
+                                .is_some_and(|i| i.category == DeviceCategory::Headset);
+                        if is_headset {
+                            0
+                        } else {
+                            match r.device.kind {
+                                Kind::Mouse => 1,
+                                Kind::Keyboard => 2,
+                                Kind::Bluetooth | Kind::Audio | Kind::Gamepad => 3,
+                            }
+                        }
+                    }
                 };
                 (rank, r.battery.unwrap().display)
             })
@@ -926,6 +983,8 @@ pub enum Command {
     SetTaskbarPosition(TaskbarPosition),
     SetTaskbarLayout(TaskbarLayout),
     SetTaskbarBackdrop(bool),
+    /// 记录已展示 GitHub Star 支持提示的 Unix 时间戳（秒）。
+    RecordStarPrompt(u64),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
@@ -986,7 +1045,9 @@ impl Prefs {
             Command::Priority => {
                 self.priority = match self.priority {
                     Priority::Mouse => Priority::Keyboard,
-                    Priority::Keyboard => Priority::Lowest,
+                    Priority::Keyboard => Priority::Bluetooth,
+                    Priority::Bluetooth => Priority::Audio,
+                    Priority::Audio => Priority::Lowest,
                     Priority::Lowest => Priority::Mouse,
                 }
             }
@@ -1038,6 +1099,9 @@ impl Prefs {
             Command::SetTaskbarPosition(v) => self.taskbar_position = v.clone(),
             Command::SetTaskbarLayout(v) => self.taskbar_layout = v.clone(),
             Command::SetTaskbarBackdrop(v) => self.taskbar_backdrop = *v,
+            Command::RecordStarPrompt(ts) if *ts > 0 => {
+                self.last_star_prompt_at = self.last_star_prompt_at.max(*ts);
+            }
             Command::Alias(id, name)
                 if (list.iter().any(|d| d.id == *id) || self.bound_names.contains_key(id))
                     && name.encode_utf16().count() <= 32 =>
@@ -1317,6 +1381,185 @@ mod tests {
         assert_eq!(s.selected().unwrap().battery.unwrap().raw, 35);
         s.rows[1].error = Some("sleep".into());
         assert_eq!(s.selected().unwrap().battery.unwrap().raw, 72)
+    }
+
+    #[test]
+    fn bluetooth_and_audio_priorities_select_expected_devices_and_persist() {
+        use battery_protocol::{
+            BatteryCapability, ConnectionKind, DeviceCategory, DeviceIdentity, Source,
+        };
+
+        let make_row = |id: &str,
+                        name: &str,
+                        kind: Kind,
+                        pct: u8,
+                        source: Source,
+                        category: DeviceCategory,
+                        connection: ConnectionKind| Row {
+            device: Descriptor {
+                id: id.into(),
+                name: name.into(),
+                kind,
+                legacy_ids: vec![],
+                identity: Some(DeviceIdentity {
+                    model_key: None,
+                    category,
+                    connection,
+                    battery: BatteryCapability::Present,
+                    model_source: None,
+                }),
+                generic_name: None,
+            },
+            battery: Reading::new(pct, Charge::Discharging, source),
+            error: None,
+            sampled: 0,
+            held: false,
+        };
+
+        let mut s = State::demo();
+        let bt_mouse = make_row(
+            "bt:mouse",
+            "BT Mouse",
+            Kind::Bluetooth,
+            90,
+            Source::Ble,
+            DeviceCategory::Mouse,
+            ConnectionKind::Bluetooth,
+        );
+        let hid_bt_kb = make_row(
+            "hid:bt-kb",
+            "HID BT Keyboard",
+            Kind::Keyboard,
+            85,
+            Source::KysonaBluetooth,
+            DeviceCategory::Keyboard,
+            ConnectionKind::Bluetooth,
+        );
+        let rf_audio = make_row(
+            "hid:audio",
+            "2.4G Headset",
+            Kind::Audio,
+            80,
+            Source::HyperX,
+            DeviceCategory::Headset,
+            ConnectionKind::Rf24,
+        );
+        let bt_headset = make_row(
+            "bt:headset",
+            "BT Headset",
+            Kind::Bluetooth,
+            65,
+            Source::Classic,
+            DeviceCategory::Headset,
+            ConnectionKind::Bluetooth,
+        );
+        s.rows
+            .extend([bt_mouse.clone(), rf_audio.clone(), bt_headset.clone()]);
+
+        // 未绑定的蓝牙设备不得命中，回退到在线鼠标。
+        s.prefs.priority = Priority::Bluetooth;
+        assert_eq!(s.selected().unwrap().device.id, s.rows[0].device.id);
+
+        // 绑定蓝牙鼠标后，即使电量更高也应优先于 2.4G 鼠标与键盘。
+        s.prefs.bluetooth.insert(bt_mouse.device.id.clone());
+        assert_eq!(s.selected().unwrap().device.id, "bt:mouse");
+
+        // 绑定且为耳机品类的蓝牙耳机电量更低时，同一优先级下选中电量更低者。
+        s.prefs.bluetooth.insert(bt_headset.device.id.clone());
+        assert_eq!(s.selected().unwrap().device.id, "bt:headset");
+
+        // 蓝牙设备离线时回退到鼠标。
+        s.rows.iter_mut().for_each(|r| {
+            if r.device.kind == Kind::Bluetooth {
+                r.error = Some("offline".into());
+            }
+        });
+        assert_eq!(s.selected().unwrap().device.id, s.rows[0].device.id);
+
+        // 通过 ConnectionKind::Bluetooth 识别的已绑定 HID 键盘同样属于蓝牙设备优先级。
+        let old_kb = s.prefs.keyboard.clone();
+        s.rows.push(hid_bt_kb);
+        s.prefs.keyboard = Some("hid:bt-kb".into());
+        assert_eq!(s.selected().unwrap().device.id, "hid:bt-kb");
+        s.prefs.keyboard = old_kb;
+
+        // 耳机优先级：蓝牙鼠标不误命中，在线蓝牙耳机（65%）与 2.4G 耳机（80%）均命中且取较低者。
+        s.rows.iter_mut().for_each(|r| r.error = None);
+        s.prefs.priority = Priority::Audio;
+        assert_eq!(s.selected().unwrap().device.id, "bt:headset");
+
+        // 蓝牙耳机休眠/held 时切换到在线 2.4G 耳机。
+        let headset_row = s
+            .rows
+            .iter_mut()
+            .find(|r| r.device.id == "bt:headset")
+            .unwrap();
+        headset_row.error = Some("offline".into());
+        headset_row.held = true;
+        assert_eq!(s.selected().unwrap().device.id, "hid:audio");
+
+        // 2.4G 耳机离线后回退到鼠标（不误选在线蓝牙鼠标）。
+        s.rows
+            .iter_mut()
+            .find(|r| r.device.id == "hid:audio")
+            .unwrap()
+            .error = Some("sleep".into());
+        assert_eq!(s.selected().unwrap().device.id, s.rows[0].device.id);
+
+        // Command::Priority 五态循环、Command::SetPriority 与配置持久化往返验证。
+        let mut prefs = Prefs::default();
+        assert_eq!(prefs.priority, Priority::Mouse);
+        for expected in [
+            Priority::Keyboard,
+            Priority::Bluetooth,
+            Priority::Audio,
+            Priority::Lowest,
+            Priority::Mouse,
+        ] {
+            assert!(prefs.change(&Command::Priority, &[]));
+            assert_eq!(prefs.priority, expected);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        for p in [Priority::Bluetooth, Priority::Audio] {
+            assert!(prefs.change(&Command::SetPriority(p.clone()), &[]));
+            prefs.save(&path).unwrap();
+            assert_eq!(Prefs::load(&path).unwrap().priority, p);
+        }
+    }
+
+    #[test]
+    fn star_prompt_follows_fifteen_day_interval_and_persists() {
+        let legacy: Prefs = serde_json::from_str(r#"{"glass":25}"#).unwrap();
+        assert_eq!(legacy.last_star_prompt_at, 0);
+        assert!(!legacy.should_show_star_prompt(0));
+
+        let t0 = 1_700_000_000u64;
+        assert!(legacy.should_show_star_prompt(t0));
+
+        let mut prefs = Prefs::default();
+        assert!(!prefs.change(&Command::RecordStarPrompt(0), &[]));
+        assert_eq!(prefs.last_star_prompt_at, 0);
+
+        assert!(prefs.change(&Command::RecordStarPrompt(t0), &[]));
+        assert_eq!(prefs.last_star_prompt_at, t0);
+        assert!(!prefs.should_show_star_prompt(t0));
+        assert!(!prefs.should_show_star_prompt(t0 - 100));
+        assert!(!prefs.should_show_star_prompt(t0 + STAR_PROMPT_INTERVAL_SECS - 1));
+        assert!(prefs.should_show_star_prompt(t0 + STAR_PROMPT_INTERVAL_SECS));
+
+        // 传入更旧的时间戳不应倒退已记录时间。
+        assert!(prefs.change(&Command::RecordStarPrompt(t0 - 10), &[]));
+        assert_eq!(prefs.last_star_prompt_at, t0);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        prefs.save(&path).unwrap();
+        let loaded = Prefs::load(&path).unwrap();
+        assert_eq!(loaded.last_star_prompt_at, t0);
+        assert!(!loaded.should_show_star_prompt(t0 + STAR_PROMPT_INTERVAL_SECS - 1));
+        assert!(loaded.should_show_star_prompt(t0 + STAR_PROMPT_INTERVAL_SECS));
     }
     #[test]
     fn disk() {

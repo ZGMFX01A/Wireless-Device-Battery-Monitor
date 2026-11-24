@@ -1,0 +1,74 @@
+name: 其他问题 / Other Issues / Другие вопросы
+description: 功能建议、UI 问题、软件故障或其他非设备适配反馈 / Feature requests, UI issues, app bugs, or other non-device feedback / Запросы функций, проблемы UI, ошибки приложения и прочие вопросы
+title: "[其他 / Other / Другое] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本表单适用于**新增功能建议、UI / 界面与交互问题、软件常规故障**以及其他非设备适配类的反馈。
+        如果是**新设备适配**，或特定设备的**识别、电量、充电及连接状态异常**，请返回选择对应语言的「设备适配 / Device support / Поддержка устройства」表单。
+
+        ---
+
+        Use this form for **feature requests, UI / UX improvements, general app bugs**, and other non-device-support feedback.
+        For **new device support** or device-specific **identification, battery, charging, or connection issues**, please go back and use the matching **Device support** template.
+
+        ---
+
+        Эта форма предназначена для **запросов новых функций, вопросов по интерфейсу (UI / UX), общих ошибок приложения** и других обращений, не связанных с адаптацией устройств.
+        Для **запроса поддержки нового устройства** или проблем с **определением, зарядом, зарядкой и подключением** конкретного устройства вернитесь и выберите форму **Поддержка устройства**.
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: 问题类型 / Category / Категория
+      description: 请选择最符合本次反馈的分类 / Select the category that best matches your feedback / Выберите наиболее подходящую категорию
+      options:
+        - 新增功能 / Feature request / Новая функция
+        - UI 与界面 / UI & UX / Интерфейс (UI)
+        - 软件故障 / App bug / Ошибка приложения
+        - 其他 / Other / Другое
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: 详细描述 / Details / Подробное описание
+      description: |
+        - 新增功能 / UI 建议：请说明需求背景、使用场景与期望的交互或展示效果。
+        - 软件故障 / UI 异常：请说明复现步骤、实际表现与预期表现。
+        - Feature requests / UI suggestions: describe the use case, background, and expected behavior or appearance.
+        - App bugs / UI issues: include steps to reproduce, actual behavior, and expected behavior.
+        - Новая функция / UI: опишите сценарий использования и желаемое поведение или внешний вид.
+        - Ошибка / проблема UI: укажите шаги воспроизведения, фактический и ожидаемый результат.
+      placeholder: |
+        问题 / 需求描述（Description / Описание）：
+
+        使用场景或复现步骤（Use case or steps to reproduce / Сценарий или шаги воспроизведения）：
+
+        实际表现（Actual behavior, if applicable / Фактический результат, если применимо）：
+
+        预期表现（Expected behavior / Ожидаемый результат）：
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境信息 / Environment / Среда (UI / Bug 建议填写 / Recommended for UI & bugs)
+      description: 反馈 UI 显示异常（如缩放、布局错位、任务栏/托盘表现）或软件故障时建议填写。 / Recommended when reporting UI layout, scaling, tray/taskbar, or bug issues. / Рекомендуется заполнить при сообщениях об ошибках, масштабировании или отображении UI.
+      placeholder: |
+        本软件版本 / App version / Версия приложения：
+        Windows 版本与内部版本号（winver）/ Windows version & build / Версия и сборка Windows：
+        屏幕分辨率与 DPI 缩放比例 / Screen resolution & DPI scaling / Разрешение экрана и масштаб DPI：
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图、录屏或补充信息 / Screenshots, recordings, or additional notes / Скриншоты, видео или примечания
+      description: 可直接粘贴截图、录屏或附上相关日志与补充说明。 / You may paste screenshots, screen recordings, logs, or extra context here. / Приложите скриншоты, записи экрана, логи или дополнительные пояснения.
+    validations:
+      required: false

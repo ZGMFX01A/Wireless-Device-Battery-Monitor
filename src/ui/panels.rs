@@ -6,7 +6,6 @@
 use super::{skin::*, *};
 use crate::model::PROBED_COMPATIBLE_ONLY_ERROR;
 use battery_protocol::{Source, codec::KYSONA_SLOT_UNPAIRED};
-const PROJECT_HOME_URL: &str = "https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor";
 fn time_text(sec: u64) -> Option<String> {
     if sec == 0 {
         return None;
@@ -703,6 +702,8 @@ impl Panel {
             self.t(match v {
                 Priority::Mouse => "settings.tray_priority.mouse_first",
                 Priority::Keyboard => "settings.tray_priority.keyboard_first",
+                Priority::Bluetooth => "settings.tray_priority.bluetooth_first",
+                Priority::Audio => "settings.tray_priority.audio_first",
                 Priority::Lowest => "settings.tray_priority.lowest_battery",
             })
         };
@@ -731,13 +732,21 @@ impl Panel {
                 .border_color(k.line())
                 .bg(k.dialog())
                 .shadow_md();
-            for (i, v) in [Priority::Mouse, Priority::Keyboard, Priority::Lowest]
-                .into_iter()
-                .enumerate()
+            for (i, v) in [
+                Priority::Mouse,
+                Priority::Keyboard,
+                Priority::Bluetooth,
+                Priority::Audio,
+                Priority::Lowest,
+            ]
+            .into_iter()
+            .enumerate()
             {
                 items = items.child(
                     action(format!("priority-opt-{i}"))
                         .h(px(26.))
+                        .px(px(8.))
+                        .whitespace_nowrap()
                         .when(p.priority == v, |e| e.bg(k.selected()))
                         .child(txt(priority(&v), 12., k.text()))
                         .on_click(cx.listener(move |s, _, _, cx| {

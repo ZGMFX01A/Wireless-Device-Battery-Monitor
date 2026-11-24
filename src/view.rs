@@ -14,6 +14,13 @@ use windows_sys::Win32::{
     Graphics::Gdi::*,
     UI::{HiDpi::GetDpiForWindow, WindowsAndMessaging::*},
 };
+const PROJECT_HOME_URL: &str = "https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor";
+/// 返回当前系统时间对应的 Unix 秒时间戳；系统时钟异常时返回 0。
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
 fn hwnd(w: &Window) -> HWND {
     match HasWindowHandle::window_handle(w).map(|h| h.as_raw()) {
         Ok(RawWindowHandle::Win32(h)) => h.hwnd.get() as HWND,
@@ -312,6 +319,7 @@ enum Dialog {
     ConfirmCompatibleMode,
     ConfirmUnknownProbe,
     Update,
+    SupportStar,
 }
 /// Reader never waits on the drawing thread. One latest snapshot plus one latest
 /// window intent per burst; exit is terminal. Send a wake token, not another copy.
@@ -472,6 +480,14 @@ pub fn run(managed: bool, initial: Mode) {
                                         s.mode = m;
                                         s.settings_open = m == Mode::Settings;
                                         s.modal = None;
+                                        if m == Mode::Flyout && !s.state.demo {
+                                            let now = unix_now_secs();
+                                            if s.state.prefs.should_show_star_prompt(now) {
+                                                s.modal = Some(Dialog::SupportStar);
+                                                s.state.prefs.last_star_prompt_at = now;
+                                                s.issue(Command::RecordStarPrompt(now), cx);
+                                            }
+                                        }
                                         s.popup = false;
                                         s.editor = None;
                                         s.edit_blur = None;

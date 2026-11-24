@@ -288,6 +288,10 @@ pub fn label(locale: Locale, key: &str) -> &'static str {
         ),
         "settings.tray_priority.mouse_first" => ("优先鼠标", "Mouse First", "Мышь"),
         "settings.tray_priority.keyboard_first" => ("优先键盘", "Keyboard First", "Клавиатура"),
+        "settings.tray_priority.bluetooth_first" => {
+            ("优先蓝牙设备", "Bluetooth First", "Устройство Bluetooth")
+        }
+        "settings.tray_priority.audio_first" => ("优先耳机设备", "Headset First", "Гарнитура"),
         "settings.tray_priority.lowest_battery" => ("低电量优先", "Lowest First", "Меньший заряд"),
         "settings.taskbar_position.title" => (
             "任务栏小组件位置",
@@ -391,6 +395,18 @@ pub fn label(locale: Locale, key: &str) -> &'static str {
         "dialog.connect" => ("连接", "Connect", "Подключить"),
         "dialog.add" => ("添加", "Add", "Добавить"),
         "dialog.remove" => ("确认移除", "Remove", "Удалить"),
+        "dialog.star.title" => (
+            "喜欢这款小工具吗？",
+            "Enjoying this app?",
+            "Нравится приложение?",
+        ),
+        "dialog.star.message" => (
+            "如果它帮到了你，欢迎到 GitHub 项目主页点亮一颗 Star ★ 支持作者持续维护与适配更多无线外设！",
+            "If it helps you track your wireless gear, consider giving it a Star ★ on GitHub to support ongoing updates and new devices.",
+            "Если приложение оказалось полезным, поставьте ему Star ★ на GitHub — это поможет развивать проект и добавлять новые устройства.",
+        ),
+        "dialog.star.action" => ("前往支持 ★", "Star on GitHub", "Поддержать ★"),
+        "dialog.star.later" => ("稍后再说", "Later", "Позже"),
         "keyboard.dialog.title" => ("选择键盘设备", "Select Keyboard Device", "Выбор клавиатуры"),
         "keyboard.dialog.subtitle" => (
             "当前列表已按规则去重，并保留键盘最可信控制接口",

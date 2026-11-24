@@ -2,6 +2,8 @@
 
 [English](#english) | [Русский](#русский)
 
+> **重要前提**：申请设备适配前，请先确认**你自己目前已经有官方驱动、官方网页驱动、Windows 系统设置或其他软件/方式能够看到该设备的电量**。如果你自己通过任何软件或方式都看不到该设备的电量，说明没有可供分析与对照的电量来源，暂无法适配，请勿提交适配申请。
+
 申请新设备适配，或反馈已有设备的识别、电量、充电及连接状态问题，请选择对应语言的表单。三份表单的字段、必填要求和采集命令一致。
 
 | 语言 / Language / Язык | 表单 / Form / Форма |
@@ -66,6 +68,8 @@ Get-CimInstance -ClassName Win32_PnPEntity -Filter 'Present = True' -ErrorAction
 
 ## English
 
+> **Important prerequisite**: Before requesting device support, please confirm that **you can currently see this device's battery level in an official driver, official web driver, Windows Settings, or another tool/method**. If you cannot view the battery level through any software or method yourself, there is no reference source to analyze or verify against, so support cannot be added.
+
 Use the [English device support form](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues/new?template=device-support.en.yml) for new device requests or identification, battery, charging, and connection problems. Chinese and Russian forms are linked in the language table above; all three use the same fields, required inputs, and collection command.
 
 Include the exact brand/model and variant, an **official driver download or official web driver URL**, the connection mode, receiver model and paired devices, app/Windows/firmware/driver versions, reproduction steps, and the official driver's battery/charging behavior. Mark unknown versions and untested cases explicitly.
@@ -81,6 +85,8 @@ Compatibility can vary by firmware, receiver, and connection mode. Vendor utilit
 These identifiers do **not** include a complete HID report descriptor or battery protocol. Driver analysis and device-owner validation may still be needed before support can be confirmed.
 
 ## Русский
+
+> **Важное условие**: перед запросом поддержки убедитесь, что **у вас уже есть официальный драйвер, официальный веб-драйвер, настройки Windows или другая программа/способ, позволяющие увидеть заряд этого устройства**. Если вы сами ни в одной программе и никаким способом не видите заряд устройства, источника данных для анализа и проверки нет — адаптация невозможна.
 
 Для запроса поддержки нового устройства или сообщения о проблемах с определением, зарядом батареи, зарядкой и подключением используйте [русскую форму](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues/new?template=device-support.ru.yml). Китайская и английская формы указаны в таблице языков выше. Во всех трёх формах одинаковые поля, обязательные сведения и команда сбора данных.
 
