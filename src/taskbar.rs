@@ -1306,8 +1306,12 @@ pub(crate) fn is_move_path_clear(
         let end_ov = span_overlap(to_x, to_x + width, ol, or);
         let cand1 = ol.clamp(min_x, max_x);
         let cand2 = (or - width).clamp(min_x, max_x);
-        let max_ov = span_overlap(cand1, cand1 + width, ol, or)
-            .max(span_overlap(cand2, cand2 + width, ol, or));
+        let max_ov = span_overlap(cand1, cand1 + width, ol, or).max(span_overlap(
+            cand2,
+            cand2 + width,
+            ol,
+            or,
+        ));
         if max_ov > start_ov.max(end_ov) {
             return false;
         }
@@ -1365,10 +1369,7 @@ pub(crate) fn resolve_widget_rect(
 
 fn take_surface(hwnd: HWND) -> LayeredSurface {
     WIDGETS
-        .with_borrow_mut(|all| {
-            all.get_mut(&(hwnd as isize))
-                .and_then(|s| s.surface.take())
-        })
+        .with_borrow_mut(|all| all.get_mut(&(hwnd as isize)).and_then(|s| s.surface.take()))
         .unwrap_or_else(LayeredSurface::new)
 }
 
@@ -1642,8 +1643,9 @@ fn sync_widget(hwnd: HWND, reason: SyncReason) {
             geom.dpi,
             keep_anchor,
         );
-        let snap_immediately =
-            size_changed || tb_changed || matches!(reason, SyncReason::Reset | SyncReason::DisplayChanged);
+        let snap_immediately = size_changed
+            || tb_changed
+            || matches!(reason, SyncReason::Reset | SyncReason::DisplayChanged);
         if snap_immediately {
             unsafe {
                 KillTimer(hwnd, ANIM_TIMER);
@@ -1683,7 +1685,8 @@ fn sync_widget(hwnd: HWND, reason: SyncReason) {
                 (r.left, r.top)
             };
             let already_on_target = target_rect.is_some_and(|r| same_rect(r, next_target))
-                && (animation.is_some() || (cur_x == next_target.left && cur_top == next_target.top));
+                && (animation.is_some()
+                    || (cur_x == next_target.left && cur_top == next_target.top));
             if !already_on_target {
                 let mut path_obstacles = snap.spans.clone();
                 if let Some(start) = geom.start_rect {
@@ -2297,8 +2300,7 @@ pub(crate) fn render_content(content: &Content, dpi: u32, tb_height: i32) -> Can
     let max_text_w = measure_max_battery_text_width(text_font_px);
     let item_w = fixed_item_width(&content.layout, dpi, icon_sz, max_text_w);
     let count = content.items.len();
-    let total_w =
-        pad_x * 2 + (count as i32) * item_w + (count.saturating_sub(1) as i32) * item_gap;
+    let total_w = pad_x * 2 + (count as i32) * item_w + (count.saturating_sub(1) as i32) * item_gap;
 
     // 未开启文字底框时保持 alpha = 1 的近零透明背景，使透明间隔也能接收鼠标点击与悬停。
     let mut canvas = Canvas::new(total_w.max(1), widget_h.max(1), 0x01000000);
