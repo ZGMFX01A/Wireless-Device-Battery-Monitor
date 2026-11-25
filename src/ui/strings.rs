@@ -609,9 +609,9 @@ pub fn label(locale: Locale, key: &str) -> &'static str {
             "Операция не удалась. Повторите попытку.",
         ),
         "device.add_failed" => (
-            "无法添加设备，请检查连接后重试。",
-            "Could not add the device. Check its connection and try again.",
-            "Не удалось добавить устройство. Проверьте подключение и повторите.",
+            "无法添加设备，请检查连接；若设备处于休眠状态，请先唤醒后重试。",
+            "Could not add the device. Check its connection, wake it if asleep, and try again.",
+            "Не удалось добавить устройство. Проверьте подключение, разбудите его, если оно спит, и повторите.",
         ),
         "warning.logi_long_endpoint" => (
             "HID++ {pid}：无法确定唯一的长报文端点",
