@@ -2,7 +2,10 @@
 
 [English](#english) | [Русский](#русский)
 
-> **重要前提**：申请设备适配前，请先确认**你自己目前已经有官方驱动、官方网页驱动、Windows 系统设置或其他软件/方式能够看到该设备的电量**。如果你自己通过任何软件或方式都看不到该设备的电量，说明没有可供分析与对照的电量来源，暂无法适配，请勿提交适配申请。
+> [!CAUTION]
+> **提交适配申请前，必须先完成以下两项实测（缺一不可，瞎勾选或无法提供有效来源将直接关闭）：**
+> 1. **先尝试本软件的「兼容模式」**：打开 **「设置 → 识别模式 → 兼容模式（实验性）」**，若仍未发现请继续开启 **「探测未知设备（实验性）」** 并重新扫描。
+> 2. **必须亲测确认官方客户端 / 网页驱动 / 其他软件可获取到准确电量**：如果你自己通过任何软件或方式都看不到该设备的**准确电量百分比**，说明没有可供分析与对照的数据来源，无法适配——**请勿提交申请**。
 
 申请新设备适配，或反馈已有设备的识别、电量、充电及连接状态问题，请选择对应语言的表单。三份表单的字段、必填要求和采集命令一致。
 
@@ -14,11 +17,12 @@
 
 ## 提交哪些信息
 
+- **兼容模式测试结果（必测）**：先开启「兼容模式（实验性）」与「探测未知设备（实验性）」并重新扫描，如实记录是否发现设备及电量/名称表现。
 - **品牌与完整型号**：包含 Pro / Max / SE、代数、硬件版本等后缀。不要只写品牌、系列名或简称。
 - **官方驱动下载地址或官方网页驱动地址**：至少提供一个与该型号对应的官方地址；如需在页面中选择型号、区域或版本，请注明选项。
 - **连接方式及接收器**：明确 2.4G、蓝牙或 USB 数据线；接收器请注明型号、原装/替换/共享/高回报率版本、工作模式和配对设备。
 - **版本信息**：本软件版本、Windows 版本与内部版本号（`winver`）、设备及接收器固件、官方驱动版本。查不到的版本请写“未知”。
-- **问题与官方驱动对照**：复现步骤、实际/预期结果，官方驱动能否识别设备、显示电量和充电状态。尽量提供同一时间的两边读数，并标注官方驱动运行、退出或未测试。
+- **问题与官方客户端/驱动实测对照（必须）**：复现步骤、实际/预期结果，以及**亲测可看到的准确电量百分比与充电状态**。尽量提供同一时间的两边截图与读数，并标注官方驱动运行、退出或未测试。
 - **下面的设备识别信息**，以及已测试的休眠唤醒、充电和连接方式切换结果。
 
 ## 通用设备识别命令
@@ -68,11 +72,14 @@ Get-CimInstance -ClassName Win32_PnPEntity -Filter 'Present = True' -ErrorAction
 
 ## English
 
-> **Important prerequisite**: Before requesting device support, please confirm that **you can currently see this device's battery level in an official driver, official web driver, Windows Settings, or another tool/method**. If you cannot view the battery level through any software or method yourself, there is no reference source to analyze or verify against, so support cannot be added.
+> [!CAUTION]
+> **Both steps below are strictly required before submitting (requests without real testing or with false checkboxes will be closed):**
+> 1. **Try Compatible mode in this app first**: Enable **Settings → Recognition Mode → Compatible (Experimental)**; if the device is still missing, also enable **Probe unknown devices (Experimental)** and rescan.
+> 2. **Verify an official client / web driver / another tool shows the accurate battery level**: If you cannot view an **accurate battery percentage** anywhere yourself, there is no reference source to analyze or verify against — **do NOT submit a request**.
 
 Use the [English device support form](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues/new?template=device-support.en.yml) for new device requests or identification, battery, charging, and connection problems. Chinese and Russian forms are linked in the language table above; all three use the same fields, required inputs, and collection command.
 
-Include the exact brand/model and variant, an **official driver download or official web driver URL**, the connection mode, receiver model and paired devices, app/Windows/firmware/driver versions, reproduction steps, and the official driver's battery/charging behavior. Mark unknown versions and untested cases explicitly.
+Include the **Compatible mode test result (required)**, exact brand/model and variant, an **official driver download or official web driver URL**, the connection mode, receiver model and paired devices, app/Windows/firmware/driver versions, reproduction steps, and the **accurate battery/charging readings personally observed in the official client/method** (ideally with screenshots). Mark unknown versions and untested cases explicitly.
 
 Run the PowerShell command above with the device connected and awake. It reads current USB, HID, and common Bluetooth PnP nodes without requiring a known VID/PID or sending device protocol commands. It includes devices with Windows errors, rather than filtering them out. `HardwareID` and `CompatibleID` arrays are expanded to avoid hiding entries behind an ellipsis.
 
@@ -86,11 +93,14 @@ These identifiers do **not** include a complete HID report descriptor or battery
 
 ## Русский
 
-> **Важное условие**: перед запросом поддержки убедитесь, что **у вас уже есть официальный драйвер, официальный веб-драйвер, настройки Windows или другая программа/способ, позволяющие увидеть заряд этого устройства**. Если вы сами ни в одной программе и никаким способом не видите заряд устройства, источника данных для анализа и проверки нет — адаптация невозможна.
+> [!CAUTION]
+> **Перед отправкой заявки обязательно выполните оба шага (заявки без проверки или с фиктивными галочками будут закрыты):**
+> 1. **Сначала проверьте «Совместимый режим» в программе**: включите **Настройки → Режим распознавания → Совместимый режим (экспериментальный)**; если устройство не найдено, также включите **Поиск неизвестных устройств (эксп.)** и повторите сканирование.
+> 2. **Лично убедитесь, что официальный клиент / веб-драйвер / другая программа показывает точный заряд**: если вы сами ни в одной программе не видите **точный процент заряда**, источника для анализа и проверки нет — **НЕ подавайте заявку**.
 
 Для запроса поддержки нового устройства или сообщения о проблемах с определением, зарядом батареи, зарядкой и подключением используйте [русскую форму](https://github.com/ZGMFX01A/Wireless-Device-Battery-Monitor/issues/new?template=device-support.ru.yml). Китайская и английская формы указаны в таблице языков выше. Во всех трёх формах одинаковые поля, обязательные сведения и команда сбора данных.
 
-Укажите производителя, полную модель и её версию, **официальную ссылку на скачивание драйвера или официальный веб-драйвер**, способ подключения, модель приёмника и сопряжённые устройства, версии приложения/Windows/прошивки/драйвера, шаги воспроизведения и показания заряда/зарядки в официальном драйвере. Неизвестные версии и непроверенные случаи отмечайте явно.
+Укажите **результат проверки совместимого режима (обязательно)**, производителя, полную модель и её версию, **официальную ссылку на скачивание драйвера или официальный веб-драйвер**, способ подключения, модель приёмника и сопряжённые устройства, версии приложения/Windows/прошивки/драйвера, шаги воспроизведения и **лично проверенные точные показания заряда/зарядки в официальном клиенте** (желательно со скриншотами). Неизвестные версии и непроверенные случаи отмечайте явно.
 
 Выполните приведённую выше команду PowerShell при подключённом устройстве, выведенном из спящего режима. Команда читает присутствующие узлы USB, HID и распространённых Bluetooth-устройств; знать VID/PID заранее не нужно. Она не отправляет команды протокола устройства и не исключает устройства с ошибками Windows. Массивы `HardwareID` и `CompatibleID` разворачиваются полностью, без сокращения многоточием.
 

@@ -5,7 +5,11 @@ body:
   - type: markdown
     attributes:
       value: |
-        > **Important prerequisite**: Before requesting device support, please confirm that **you can currently see this device's battery level in an official driver, official web driver, Windows Settings, or another tool/method**. If you cannot view the battery level through any software or method yourself, there is no reference source to analyze or verify against, so support cannot be added — please do not submit a request.
+        > [!CAUTION]
+        > **Both steps below are strictly required before submitting (issues with unchecked tests or false confirmations will be closed):**
+        >
+        > 1. **Try Compatible mode in this app first**: Open **Settings → Recognition Mode → Compatible (Experimental)**; if your device is still missing, also enable **Probe unknown devices (Experimental)** and rescan. Many sibling devices already work or read battery in Compatible mode (possibly under a generic name).
+        > 2. **Verify an official utility/driver can read the accurate battery level**: You must **personally confirm** that an official desktop client, official web driver, Windows Settings, or another tool/method currently displays this device's **accurate battery percentage**. If you cannot view an accurate battery level anywhere yourself, there is no reference source to reverse-engineer or verify against — **do NOT check the confirmation boxes and do NOT submit a request.**
 
         Include the **exact model, including suffixes such as Pro / Max / SE, generation, and variant**, and an **official driver download or official web driver URL** (if there is no official driver and you see the battery in another app, specify its name and URL).
         Devices in the same series, with the same appearance, or sharing a VID do not necessarily use the same battery protocol. Describe results for each connection mode separately.
@@ -15,11 +19,27 @@ body:
   - type: checkboxes
     id: battery-visibility-confirm
     attributes:
-      label: Prerequisite confirmation
-      description: You must have a working tool or method that can read this device's battery level before requesting support.
+      label: Mandatory pre-submission confirmation (do NOT check without testing)
+      description: You must test Compatible mode first AND verify a working official client/driver/method that shows the accurate battery level. False confirmations will be closed.
       options:
-        - label: I confirm that I can currently view this device's battery level via an official driver, official web driver, Windows, or another tool/method
+        - label: "I have enabled Compatible (Experimental) and Probe unknown devices (Experimental) in Settings, rescanned, and accurately reported the result below"
           required: true
+        - label: "I have personally verified that an official client, official web driver, Windows, or another tool/method currently reads this device's accurate battery level (do NOT check if you cannot see an accurate reading)"
+          required: true
+
+  - type: dropdown
+    id: compatible-mode-test
+    attributes:
+      label: Compatible mode test result (test in the app first)
+      description: Enable "Compatible (Experimental)" under "Settings → Recognition Mode"; if still missing, also enable "Probe unknown devices (Experimental)" and rescan before selecting the actual result.
+      options:
+        - "Compatible + Probe unknown devices enabled: device not found at all"
+        - "Compatible + Probe unknown devices enabled: device found, but battery is wrong / unreadable / status abnormal"
+        - "Compatible + Probe unknown devices enabled: battery reads accurately, only generic name or minor issues"
+        - "Only Compatible mode enabled (Probe unknown devices OFF): not found or abnormal"
+        - "Already supported in Normal mode, but behavior is abnormal (wrong %, false charging, sleep issues, etc.)"
+    validations:
+      required: true
 
   - type: input
     id: device-model
@@ -92,12 +112,12 @@ body:
   - type: textarea
     id: official-driver-behavior
     attributes:
-      label: Behavior in the software/method that shows battery
-      description: Clearly state which app or method (official driver, web driver, Windows, etc.) currently shows the battery, and whether it reports battery percentage and charging state. Compare both apps at the same time, and describe results with that app running and exited; mark untested cases.
+      label: Behavior in the client/method showing accurate battery (exact readings required)
+      description: "**You must provide the exact battery percentage and charging status you personally observed (e.g., \"82%, discharging\"); do NOT guess or leave vague.** If no official client, web driver, or OS setting can show an accurate battery level, do not submit this request. Compare against this app (including Compatible mode) at the same time, and note results while that app is running and exited."
       placeholder: |
-        App/method currently showing battery:
-        Battery percentage and charging state shown there:
-        This app's reading at the same time:
+        App/method currently showing accurate battery:
+        Exact battery percentage and charging state shown there (required):
+        This app's reading at the same time (Normal / Compatible mode):
         With that app running:
         After exiting that app (close its browser tabs for web drivers):
     validations:
@@ -149,7 +169,7 @@ body:
     id: screenshots
     attributes:
       label: Screenshots and additional details
-      description: Attach screenshots of this app and the official driver taken at the same time, plus any other symptoms or exact error messages. Label screenshots with the connection mode.
+      description: Strongly recommended to attach simultaneous screenshots of the official client/web driver showing the accurate battery level AND this app in Compatible mode (label the connection mode), plus any exact error messages.
 
   - type: markdown
     attributes:
