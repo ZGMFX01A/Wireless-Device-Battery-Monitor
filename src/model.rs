@@ -14,6 +14,33 @@ use std::{
 };
 pub const POLL_INTERVALS: [u64; 7] = [5, 10, 15, 30, 60, 120, 300];
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 30;
+/// 托盘左键浮窗的默认逻辑尺寸（宽 × 高，单位：逻辑像素）。
+pub const FLYOUT_WINDOW_SIZE: [u32; 2] = [380, 540];
+/// 右键设置窗口的默认逻辑尺寸（宽 × 高，单位：逻辑像素）。
+pub const DEFAULT_SETTINGS_WINDOW_SIZE: [u32; 2] = [540, 680];
+/// 设置窗口允许缩小的最小逻辑尺寸，与浮窗一致以避免控件与弹窗重叠。
+pub const MIN_SETTINGS_WINDOW_SIZE: [u32; 2] = FLYOUT_WINDOW_SIZE;
+/// 设置窗口持久化保存的最大逻辑尺寸上限，防止异常超大数值破坏布局。
+pub const MAX_SETTINGS_WINDOW_SIZE: [u32; 2] = [3840, 2160];
+
+/// 校验设置的窗口尺寸是否处于允许范围内；合法则返回规范化尺寸，越界返回 `None`。
+pub fn normalize_settings_window_size(size: [u32; 2]) -> Option<[u32; 2]> {
+    let [w, h] = size;
+    (w >= MIN_SETTINGS_WINDOW_SIZE[0]
+        && w <= MAX_SETTINGS_WINDOW_SIZE[0]
+        && h >= MIN_SETTINGS_WINDOW_SIZE[1]
+        && h <= MAX_SETTINGS_WINDOW_SIZE[1])
+        .then_some([w, h])
+}
+
+/// 将任意读取到的设置窗口尺寸钳制到 `[MIN_SETTINGS_WINDOW_SIZE, MAX_SETTINGS_WINDOW_SIZE]`。
+pub fn clamp_settings_window_size(size: [u32; 2]) -> [u32; 2] {
+    [
+        size[0].clamp(MIN_SETTINGS_WINDOW_SIZE[0], MAX_SETTINGS_WINDOW_SIZE[0]),
+        size[1].clamp(MIN_SETTINGS_WINDOW_SIZE[1], MAX_SETTINGS_WINDOW_SIZE[1]),
+    ]
+}
+
 /// 托盘弹窗中 GitHub Star 支持提示的弹出间隔（15 天，单位：秒）。
 pub const STAR_PROMPT_INTERVAL_SECS: u64 = 15 * 24 * 60 * 60;
 /// 普通模式下，标记需要切回兼容模式才能识别的离线绑定。
@@ -190,6 +217,9 @@ pub struct Prefs {
     /// 版本更新后是否在托盘和主面板提示更新内容（默认开启）。
     #[serde(default = "default_true")]
     pub show_release_notes_on_update: bool,
+    /// 用户手动调整后的设置窗口逻辑尺寸 `[宽, 高]`；为 `None` 时使用默认 `540×680`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_window_size: Option<[u32; 2]>,
 }
 impl Default for Prefs {
     fn default() -> Self {
@@ -219,6 +249,7 @@ impl Default for Prefs {
             last_star_prompt_at: 0,
             last_seen_release_notes_version: String::new(),
             show_release_notes_on_update: true,
+            settings_window_size: None,
         }
     }
 }
@@ -228,6 +259,12 @@ impl Prefs {
         now_secs > 0
             && (self.last_star_prompt_at == 0
                 || now_secs.saturating_sub(self.last_star_prompt_at) >= STAR_PROMPT_INTERVAL_SECS)
+    }
+    /// 获取最终生效的设置窗口逻辑尺寸 `[宽, 高]`；未自定义时返回默认值，越界值会钳制到合法区间。
+    pub fn settings_window_size(&self) -> [u32; 2] {
+        self.settings_window_size
+            .map(clamp_settings_window_size)
+            .unwrap_or(DEFAULT_SETTINGS_WINDOW_SIZE)
     }
     /// 判断指定设备是否已固定显示到任务栏。
     pub fn taskbar_pinned(&self, id: &str) -> bool {
@@ -1108,6 +1145,8 @@ pub enum Command {
     MarkReleaseNotesSeen(String),
     /// 控制版本更新后是否自动提醒并展示更新说明。
     SetShowReleaseNotesOnUpdate(bool),
+    /// 保存用户手动调整后的设置窗口逻辑尺寸 `[宽, 高]`。
+    SetSettingsWindowSize([u32; 2]),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
@@ -1235,6 +1274,12 @@ impl Prefs {
             }
             Command::SetShowReleaseNotesOnUpdate(v) => {
                 self.show_release_notes_on_update = *v;
+            }
+            Command::SetSettingsWindowSize(size) => {
+                let Some(valid) = normalize_settings_window_size(*size) else {
+                    return false;
+                };
+                self.settings_window_size = Some(valid);
             }
             Command::Alias(id, name)
                 if (list.iter().any(|d| d.id == *id) || self.bound_names.contains_key(id))
@@ -2131,5 +2176,40 @@ mod formal_review_tests {
             "English only"
         );
         assert_eq!(select_release_notes(true, "仅中文", "   "), "仅中文");
+    }
+
+    #[test]
+    fn settings_window_size_persistence_and_bounds() {
+        // 旧配置缺失字段时返回默认设置窗口尺寸。
+        let legacy: Prefs = serde_json::from_str(r#"{"glass":20}"#).unwrap();
+        assert_eq!(legacy.settings_window_size, None);
+        assert_eq!(legacy.settings_window_size(), DEFAULT_SETTINGS_WINDOW_SIZE);
+
+        // 合法范围的缩放尺寸可持久化并往返反序列化。
+        let mut prefs = Prefs::default();
+        assert!(prefs.change(
+            &Command::SetSettingsWindowSize(MIN_SETTINGS_WINDOW_SIZE),
+            &[]
+        ));
+        assert_eq!(prefs.settings_window_size(), MIN_SETTINGS_WINDOW_SIZE);
+        assert!(prefs.change(&Command::SetSettingsWindowSize([640, 720]), &[]));
+        let serialized = serde_json::to_string(&prefs).unwrap();
+        let restored: Prefs = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored.settings_window_size(), [640, 720]);
+
+        // 越界尺寸命令必须被拒绝且不覆盖已有配置。
+        assert!(!prefs.change(&Command::SetSettingsWindowSize([300, 540]), &[]));
+        assert!(!prefs.change(&Command::SetSettingsWindowSize([380, 400]), &[]));
+        assert!(!prefs.change(&Command::SetSettingsWindowSize([0, 0]), &[]));
+        assert!(!prefs.change(&Command::SetSettingsWindowSize([5000, 600]), &[]));
+        assert_eq!(prefs.settings_window_size(), [640, 720]);
+
+        // 手改配置文件中的越界尺寸在读取时自动钳制到合法范围。
+        let clamped: Prefs =
+            serde_json::from_str(r#"{"settings_window_size":[120,9999]}"#).unwrap();
+        assert_eq!(
+            clamped.settings_window_size(),
+            [MIN_SETTINGS_WINDOW_SIZE[0], MAX_SETTINGS_WINDOW_SIZE[1]]
+        );
     }
 }

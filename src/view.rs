@@ -216,11 +216,82 @@ fn send(c: &Command) {
     let _ = o.write_all(b"\n");
     let _ = o.flush();
 }
-fn place(w: &Window, m: Mode, a: Option<[i32; 2]>, show: bool) {
-    let h = hwnd(w);
+/// 将当前窗口样式同步为目标模式所需的边框与按钮标志位，禁止最大化并按需启用/关闭四边缩放。
+fn sync_window_style(h: HWND, resizable: bool) {
     if h.is_null() {
         return;
     }
+    unsafe {
+        let old_bits = GetWindowLongPtrW(h, GWL_STYLE) as u32;
+        let mut new_bits = old_bits & !WS_MAXIMIZEBOX;
+        if resizable {
+            new_bits |= WS_THICKFRAME;
+        } else {
+            new_bits &= !WS_THICKFRAME;
+        }
+        if new_bits != old_bits {
+            SetWindowLongPtrW(h, GWL_STYLE, new_bits as isize);
+            SetWindowPos(
+                h,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
+/// 判定当前逻辑视口尺寸是否构成需要持久化的设置窗口缩放变更。
+/// 未进入防抖序列时过滤 0 尺寸与 `<= 1px` DPI 舍入抖动；已在防抖序列中时保留最新 1px 调整。
+fn settings_resize_candidate(
+    current_logical: [u32; 2],
+    settled_baseline: [u32; 2],
+    pending: Option<[u32; 2]>,
+) -> Option<[u32; 2]> {
+    if current_logical[0] == 0 || current_logical[1] == 0 {
+        return None;
+    }
+    let clamped = clamp_settings_window_size(current_logical);
+    if let Some(pending) = pending {
+        return (clamped != pending).then_some(clamped);
+    }
+    if clamped[0].abs_diff(settled_baseline[0]) <= 1
+        && clamped[1].abs_diff(settled_baseline[1]) <= 1
+    {
+        return None;
+    }
+    Some(clamped)
+}
+
+/// 判断收到的 Host 状态快照是否已确认（或明确失败拒绝）本地待确认的设置窗口尺寸。
+fn reconcile_unconfirmed_settings_size(
+    unconfirmed: &mut Option<[u32; 2]>,
+    prefs_size: Option<[u32; 2]>,
+    note: Option<&Notice>,
+) {
+    if let Some(pending) = *unconfirmed
+        && (prefs_size == Some(pending) || matches!(note, Some(Notice::OperationFailed)))
+    {
+        *unconfirmed = None;
+    }
+}
+
+fn place(
+    w: &Window,
+    m: Mode,
+    a: Option<[i32; 2]>,
+    show: bool,
+    settings_size: [u32; 2],
+) -> Option<[u32; 2]> {
+    let h = hwnd(w);
+    if h.is_null() {
+        return None;
+    }
+    // 在读取非客户区边距差值前先同步 WS_THICKFRAME/WS_MAXIMIZEBOX，确保测量基于当前模式样式。
+    sync_window_style(h, m == Mode::Settings);
     unsafe {
         let mut p = POINT::default();
         if let Some([x, y]) = a {
@@ -234,7 +305,7 @@ fn place(w: &Window, m: Mode, a: Option<[i32; 2]>, show: bool) {
             ..Default::default()
         };
         if GetMonitorInfoW(mon, &mut mi) == 0 {
-            return;
+            return None;
         }
         let r = mi.rcWork;
         let mut dx = 0u32;
@@ -250,10 +321,10 @@ fn place(w: &Window, m: Mode, a: Option<[i32; 2]>, show: bool) {
         } else {
             GetDpiForWindow(h).max(96)
         };
-        let (bw, bh) = if m == Mode::Flyout {
-            (380, 540)
+        let [bw, bh] = if m == Mode::Flyout {
+            FLYOUT_WINDOW_SIZE
         } else {
-            (540, 680)
+            clamp_settings_window_size(settings_size)
         };
         let ww = ((bw * dpi / 96) as i32).min(r.right - r.left);
         let hh = ((bh * dpi / 96) as i32).min(r.bottom - r.top);
@@ -304,8 +375,14 @@ fn place(w: &Window, m: Mode, a: Option<[i32; 2]>, show: bool) {
         if GetClientRect(h, &mut actual) != 0 {
             let lp = (actual.right as u16 as usize) | ((actual.bottom as u16 as usize) << 16);
             PostMessageW(h, WM_SIZE, SIZE_RESTORED as usize, lp as isize);
+            let scale = dpi as f32 / 96.;
+            return Some([
+                (actual.right as f32 / scale).round().max(0.) as u32,
+                (actual.bottom as f32 / scale).round().max(0.) as u32,
+            ]);
         }
     }
+    None
 }
 pub(crate) fn apps_use_dark_theme() -> bool {
     use windows_sys::Win32::System::Registry::*;
@@ -366,10 +443,86 @@ struct Panel {
     manual: Option<(u64, bool)>,
     toast: Option<(Toast, u64)>,
     compat_hint: CompatibleHintTracker,
+    /// 标记托管窗口是否已完成 `Event::Open` 的初次与次帧定位，避免把程序定位误记为用户缩放。
+    placement_settled: bool,
+    /// 最近一次 `place()` 后在当前工作区实际落地的设置窗口逻辑尺寸，用于过滤工作区钳制引发的伪缩放事件。
+    settled_settings_size: Option<[u32; 2]>,
+    /// 待防抖提交的设置窗口逻辑尺寸及对应递增令牌。
+    pending_settings_size: Option<([u32; 2], u64)>,
+    /// 已发往 Host 但尚未在快照中确认的最新设置窗口尺寸，防止旧快照覆盖快速重开尺寸。
+    unconfirmed_settings_size: Option<[u32; 2]>,
+    /// 递增生成用于设置窗口尺寸防抖的本地令牌。
+    resize_token: u64,
     _sub: Option<Subscription>,
+    _bounds_sub: Option<Subscription>,
 }
 impl Panel {
+    /// 获取当前设置窗口应使用的有效逻辑尺寸（优先未提交/待确认尺寸，其次持久化偏好）。
+    fn effective_settings_window_size(&self) -> [u32; 2] {
+        self.pending_settings_size
+            .map(|(size, _)| size)
+            .or(self.unconfirmed_settings_size)
+            .unwrap_or_else(|| self.state.prefs.settings_window_size())
+    }
+
+    /// 记录设置窗口的缩放结果并在 300ms 无新变化后持久化；隐藏或切模式前会先强制提交。
+    fn on_window_bounds_changed(&mut self, w: &Window, cx: &mut Context<Self>) {
+        if !self.visible || self.mode != Mode::Settings || !self.placement_settled {
+            return;
+        }
+        let vp = w.viewport_size();
+        let current = [
+            f32::from(vp.width).round().max(0.) as u32,
+            f32::from(vp.height).round().max(0.) as u32,
+        ];
+        let settled = self
+            .settled_settings_size
+            .unwrap_or_else(|| self.effective_settings_window_size());
+        let pending = self.pending_settings_size.map(|(size, _)| size);
+        let Some(next) = settings_resize_candidate(current, settled, pending) else {
+            return;
+        };
+        self.resize_token = self.resize_token.wrapping_add(1);
+        let token = self.resize_token;
+        self.pending_settings_size = Some((next, token));
+        cx.spawn(async move |weak, cx| {
+            Timer::after(std::time::Duration::from_millis(300)).await;
+            let _ = weak.update(cx, |s, cx| {
+                s.commit_pending_settings_size(Some(token), cx);
+            });
+        })
+        .detach();
+    }
+
+    /// 提交待保存的设置窗口尺寸；当 `expected_token` 为 `None` 时立即强制冲刷。
+    fn commit_pending_settings_size(
+        &mut self,
+        expected_token: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((size, token)) = self.pending_settings_size else {
+            return;
+        };
+        if expected_token.is_some_and(|expected| expected != token) {
+            return;
+        }
+        self.pending_settings_size = None;
+        self.settled_settings_size = Some(size);
+        if self.state.prefs.settings_window_size != Some(size)
+            || self
+                .unconfirmed_settings_size
+                .is_some_and(|pending| pending != size)
+        {
+            self.state.prefs.settings_window_size = Some(size);
+            if self.managed {
+                self.unconfirmed_settings_size = Some(size);
+            }
+            self.issue(Command::SetSettingsWindowSize(size), cx);
+        }
+    }
+
     fn hide(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        self.commit_pending_settings_size(None, cx);
         if !self.managed {
             cx.quit();
             return;
@@ -455,6 +608,11 @@ impl Panel {
             None
         };
         self.state = st;
+        reconcile_unconfirmed_settings_size(
+            &mut self.unconfirmed_settings_size,
+            self.state.prefs.settings_window_size,
+            self.state.note.as_ref(),
+        );
         if self.state.prefs.engine_mode != EngineMode::Normal {
             self.compat_hint
                 .on_mode_changed(self.state.prefs.engine_mode);
@@ -619,7 +777,16 @@ pub fn run(managed: bool, initial: Mode) {
         .run(move |cx| {
             crate::entry::register(cx);
             cx.on_window_closed(|cx| cx.quit()).detach();
-            let bounds = Bounds::centered(None, size(px(380.), px(540.)), cx);
+            let initial_size = if initial == Mode::Settings {
+                DEFAULT_SETTINGS_WINDOW_SIZE
+            } else {
+                FLYOUT_WINDOW_SIZE
+            };
+            let bounds = Bounds::centered(
+                None,
+                size(px(initial_size[0] as f32), px(initial_size[1] as f32)),
+                cx,
+            );
             let h = cx.open_window(
                 WindowOptions {
                     titlebar: None,
@@ -627,12 +794,17 @@ pub fn run(managed: bool, initial: Mode) {
                     focus: !managed,
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_background: WindowBackgroundAppearance::Blurred,
-                    is_resizable: false,
+                    is_resizable: true,
+                    window_min_size: Some(size(
+                        px(MIN_SETTINGS_WINDOW_SIZE[0] as f32),
+                        px(MIN_SETTINGS_WINDOW_SIZE[1] as f32),
+                    )),
                     ..Default::default()
                 },
                 |w, cx| {
                     cx.new(|cx| {
                         let dark_auto = apps_use_dark_theme();
+                        sync_window_style(hwnd(w), initial == Mode::Settings);
                         material::apply(hwnd(w), dark_auto);
                         w.set_window_title(&format!(
                             "{} · GPUI",
@@ -644,6 +816,9 @@ pub fn run(managed: bool, initial: Mode) {
                             } else if s.managed && s.has_focus && s.mode == Mode::Flyout {
                                 s.hide(w, cx)
                             }
+                        });
+                        let bounds_sub = cx.observe_window_bounds(w, |s: &mut Panel, w, cx| {
+                            s.on_window_bounds_changed(w, cx);
                         });
                         let focus = cx.focus_handle();
                         w.focus(&focus);
@@ -674,7 +849,13 @@ pub fn run(managed: bool, initial: Mode) {
                             manual: None,
                             toast: None,
                             compat_hint: Default::default(),
+                            placement_settled: !managed,
+                            settled_settings_size: None,
+                            pending_settings_size: None,
+                            unconfirmed_settings_size: None,
+                            resize_token: 0,
                             _sub: Some(sub),
+                            _bounds_sub: Some(bounds_sub),
                         }
                     })
                 },
@@ -713,6 +894,9 @@ pub fn run(managed: bool, initial: Mode) {
                                         }
                                     }
                                     Event::Open(m, g, a) => {
+                                        s.commit_pending_settings_size(None, cx);
+                                        s.placement_settled = false;
+                                        s.settled_settings_size = None;
                                         s.generation = g;
                                         s.mode = m;
                                         s.settings_open = m == Mode::Settings;
@@ -746,7 +930,8 @@ pub fn run(managed: bool, initial: Mode) {
                                         s.dark_auto = apps_use_dark_theme();
                                         s.visible = true;
                                         s.has_focus = false;
-                                        place(w, m, a, true);
+                                        let target = s.effective_settings_window_size();
+                                        let _ = place(w, m, a, true, target);
                                         material::apply(hwnd(w), s.skin().dark);
                                         w.activate_window();
                                         // Windows may apply GPUI's initial hidden-window placement during the first ShowWindow.
@@ -755,8 +940,16 @@ pub fn run(managed: bool, initial: Mode) {
                                         w.on_next_frame(move |w, cx| {
                                             let _ = weak.update(cx, |s, _| {
                                                 if s.visible && s.generation == g {
-                                                    place(w, m, a, false);
+                                                    let target = s.effective_settings_window_size();
+                                                    let placed = place(w, m, a, false, target);
+                                                    s.settled_settings_size = if m == Mode::Settings
+                                                    {
+                                                        placed
+                                                    } else {
+                                                        None
+                                                    };
                                                     send(&Command::Presented(g));
+                                                    s.placement_settled = true;
                                                 }
                                             });
                                         });
@@ -1073,5 +1266,69 @@ mod audit_child_mail {
             EngineMode::Normal,
             t0 + Duration::from_secs(3)
         ));
+    }
+
+    #[test]
+    fn settings_resize_candidate_filters_jitter_and_clamps_bounds() {
+        use super::{reconcile_unconfirmed_settings_size, settings_resize_candidate};
+        // 0 尺寸与 <= 1px 的 DPI 舍入抖动（或工作区钳制落地尺寸）不应触发持久化命令。
+        assert_eq!(settings_resize_candidate([0, 680], [540, 680], None), None);
+        assert_eq!(settings_resize_candidate([540, 0], [540, 680], None), None);
+        assert_eq!(
+            settings_resize_candidate([540, 680], [540, 680], None),
+            None
+        );
+        assert_eq!(
+            settings_resize_candidate([541, 679], [540, 680], None),
+            None
+        );
+        // 即使偏好为 [1000, 800]，若工作区钳制落地基线为 [800, 700]，异步 WM_SIZE 不应覆盖偏好。
+        assert_eq!(
+            settings_resize_candidate([800, 700], [800, 700], None),
+            None
+        );
+
+        // 超过 1px 变化且在区间内应返回目标尺寸；已在防抖序列中时保留最后 1px 调整。
+        assert_eq!(
+            settings_resize_candidate([542, 680], [540, 680], None),
+            Some([542, 680])
+        );
+        assert_eq!(
+            settings_resize_candidate([543, 680], [540, 680], Some([542, 680])),
+            Some([543, 680])
+        );
+        assert_eq!(
+            settings_resize_candidate([543, 680], [540, 680], Some([543, 680])),
+            None
+        );
+        assert_eq!(
+            settings_resize_candidate([380, 540], [540, 680], None),
+            Some([380, 540])
+        );
+
+        // 低于最小或高于最大边界应钳制到合法范围。
+        assert_eq!(
+            settings_resize_candidate([200, 300], [540, 680], None),
+            Some(crate::model::MIN_SETTINGS_WINDOW_SIZE)
+        );
+        assert_eq!(
+            settings_resize_candidate([5000, 3000], [540, 680], None),
+            Some(crate::model::MAX_SETTINGS_WINDOW_SIZE)
+        );
+
+        // 旧 Host 快照不应清除待确认尺寸，确认匹配或明确操作失败后才清除。
+        let mut unconfirmed = Some([620, 700]);
+        reconcile_unconfirmed_settings_size(&mut unconfirmed, Some([540, 680]), None);
+        assert_eq!(unconfirmed, Some([620, 700]));
+        reconcile_unconfirmed_settings_size(&mut unconfirmed, Some([620, 700]), None);
+        assert_eq!(unconfirmed, None);
+
+        let mut failed = Some([620, 700]);
+        reconcile_unconfirmed_settings_size(
+            &mut failed,
+            Some([540, 680]),
+            Some(&crate::model::Notice::OperationFailed),
+        );
+        assert_eq!(failed, None);
     }
 }

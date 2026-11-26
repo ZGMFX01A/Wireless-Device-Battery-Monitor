@@ -2195,6 +2195,7 @@ impl Service {
                         | Command::RecordStarPrompt(_)
                         | Command::MarkReleaseNotesSeen(_)
                         | Command::SetShowReleaseNotesOnUpdate(_)
+                        | Command::SetSettingsWindowSize(_)
                         | Command::UpdateDeviceDisplay { .. }
                 ) {
                     self.signals.both(PREFS)

@@ -178,39 +178,48 @@ impl Panel {
                     icon(glyph, 16., col).into_any_element()
                 })
         };
+        let title_drag = row()
+            .relative()
+            .flex_1()
+            .h_full()
+            .pl(px(15.))
+            .gap(px(8.))
+            .child(dot(8., GREEN).shadow(vec![BoxShadow {
+                color: rgba(0x10b981ba).into(),
+                offset: point(px(0.), px(0.)),
+                blur_radius: px(8.),
+                spread_radius: px(0.),
+            }]))
+            .child(txt(self.t("app.header_title"), 13., k.text()).font_weight(FontWeight::SEMIBOLD))
+            .child(
+                txt(concat!("v", env!("APP_VERSION")), 11., k.dim())
+                    .px(px(6.))
+                    .py(px(1.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(k.line())
+                    .bg(k.grad(false)),
+            );
+        let title_drag = if self.mode == Mode::Settings {
+            // 设置窗口允许顶边拉伸，顶部 4px 留给 GPUI WM_NCHITTEST 的 HTTOP 命中区。
+            title_drag.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .top(px(4.))
+                    .window_control_area(WindowControlArea::Drag),
+            )
+        } else {
+            title_drag.window_control_area(WindowControlArea::Drag)
+        };
         row()
             .h(px(47.))
             .flex_none()
-            .px(px(15.))
+            .pr(px(15.))
             .justify_between()
             .border_b_1()
             .border_color(k.line())
-            .child(
-                row()
-                    .flex_1()
-                    .h_full()
-                    .gap(px(8.))
-                    .child(dot(8., GREEN).shadow(vec![BoxShadow {
-                        color: rgba(0x10b981ba).into(),
-                        offset: point(px(0.), px(0.)),
-                        blur_radius: px(8.),
-                        spread_radius: px(0.),
-                    }]))
-                    .child(
-                        txt(self.t("app.header_title"), 13., k.text())
-                            .font_weight(FontWeight::SEMIBOLD),
-                    )
-                    .child(
-                        txt(concat!("v", env!("APP_VERSION")), 11., k.dim())
-                            .px(px(6.))
-                            .py(px(1.))
-                            .rounded(px(8.))
-                            .border_1()
-                            .border_color(k.line())
-                            .bg(k.grad(false)),
-                    )
-                    .on_mouse_down(Button::Left, |_, w, _| w.start_window_move()),
-            )
+            .child(title_drag)
             .child(
                 row()
                     .gap(px(4.))
@@ -484,8 +493,8 @@ impl Panel {
         let title = txt(name, 15.5, k.text())
             .font_weight(FontWeight::SEMIBOLD)
             .truncate()
-            .min_w_0()
-            .max_w(px(200.));
+            .flex_1()
+            .min_w_0();
         let mut numbers = row().items_baseline().gap(px(3.)).flex_none().child(
             txt(
                 if show_percent {
@@ -546,6 +555,7 @@ impl Panel {
                 row()
                     .items_baseline()
                     .justify_between()
+                    .gap(px(12.))
                     .mb(px(10.))
                     .child(title)
                     .child(numbers),
@@ -1161,7 +1171,6 @@ impl Render for Panel {
         let mut root = col()
             .relative()
             .size_full()
-            .track_focus(&self.focus)
             .font_family("Segoe UI")
             .text_color(k.text())
             .text_size(px(13.))
@@ -1177,6 +1186,8 @@ impl Render for Panel {
                     } else {
                         "devices-scroll"
                     })
+                    // 将焦点跟踪限制在内容滚动区，避免根节点的自动 prevent_default 吞掉标题栏的 WM_NCLBUTTONDOWN 拖动。
+                    .track_focus(&self.focus)
                     .min_h_0()
                     .flex_1()
                     .overflow_y_scroll()
