@@ -67,12 +67,12 @@ impl Content {
                                 .map_or_else(|| "—".into(), |p| format!("{p}%"))
                         },
                         charge: battery.map(|b| b.charge),
-                        tone: BatteryTone::for_sample(
+                        tone: BatteryTone::for_reading(
                             battery.is_some(),
                             battery.is_some_and(|b| {
                                 matches!(b.charge, Charge::Charging | Charge::Full)
                             }),
-                            battery.map_or(0, |b| b.display),
+                            battery.and_then(|b| b.percentage()),
                         ),
                     }
                 })
@@ -128,6 +128,35 @@ fn charging_without_percentage_is_online_without_a_zero_or_tray_selection() {
     state.rows[0].battery = Reading::new(0, Charge::Discharging, Source::Atk(Provider::Hfd));
     assert_eq!(Content::of(&state).rows[0].value, "0%");
     assert!(state.selected().is_some());
+}
+
+#[cfg(test)]
+#[test]
+fn eightbitdo_raw_status_is_not_presented_as_percentage_or_charging() {
+    use battery_protocol::{Reading, Source};
+    let mut state = State::demo();
+    state.rows.truncate(1);
+    for raw in [0, 67, 255] {
+        state.rows[0].battery = Some(Reading {
+            raw,
+            display: 0,
+            percentage_known: false,
+            charge: Charge::Unknown,
+            source: Source::VendorKeyboard,
+            mv: None,
+        });
+        state.rows[0].error = None;
+        let content = Content::of(&state);
+        assert_eq!(content.rows[0].value, "—");
+        assert_eq!(content.rows[0].charge, Some(Charge::Unknown));
+        assert_eq!(content.rows[0].tone, BatteryTone::Normal);
+        assert!(state.selected().is_none());
+    }
+    state.rows[0].battery = Reading::new(76, Charge::Unknown, Source::VendorKeyboard);
+    assert_eq!(Content::of(&state).rows[0].value, "76%");
+    assert!(state.selected().is_some());
+    state.rows[0].battery = Reading::new(0, Charge::Discharging, Source::VendorKeyboard);
+    assert_eq!(Content::of(&state).rows[0].tone, BatteryTone::Critical);
 }
 
 const ENTER: u32 = WM_APP + 1;

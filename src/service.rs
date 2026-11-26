@@ -3316,6 +3316,43 @@ mod tests {
     }
 
     #[test]
+    fn eightbitdo_accessory_clears_unavailable_sample_and_recovers() {
+        let device = Descriptor {
+            id: "hid:2dc8:203a:Keyboard:slot:7:test".into(),
+            name: "8BitDo Keyboard Accessory 8".into(),
+            kind: Kind::Keyboard,
+            legacy_ids: vec![],
+            identity: None,
+            generic_name: None,
+        };
+        let mut slot = Slot::new(device, 0);
+        let reading = Reading::new(76, Charge::Unknown, Source::VendorKeyboard).unwrap();
+        slot.apply(Ok(reading), 100, false);
+        let sampled = slot.row.sampled;
+        slot.apply(
+            Err("8BitDo accessory battery unavailable".into()),
+            1000,
+            false,
+        );
+        assert_eq!(slot.row.battery, None);
+        assert_eq!(slot.row.sampled, sampled);
+        assert!(!slot.row.held && slot.row.error.is_some());
+        let mut state = State::demo();
+        assert!(state.prefs.change(
+            &Command::Bind(slot.row.device.id.clone()),
+            &[slot.row.device.clone()],
+        ));
+        state.rows = vec![slot.row.clone()];
+        assert!(state.selected().is_none());
+        let recovered = Reading::new(53, Charge::Unknown, Source::VendorKeyboard).unwrap();
+        slot.apply(Ok(recovered), 2000, false);
+        assert_eq!(slot.row.battery, Some(recovered));
+        assert!(!slot.row.held && slot.row.error.is_none());
+        state.rows = vec![slot.row];
+        assert_eq!(state.selected().unwrap().battery, Some(recovered));
+    }
+
+    #[test]
     fn ardor_fury_keeps_sleeping_samples_and_accepts_fresh_battery_tiers() {
         let device = Descriptor {
             id: "hid:1d57:fa60:Mouse:test".into(),

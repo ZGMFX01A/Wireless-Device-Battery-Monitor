@@ -334,7 +334,8 @@ impl Panel {
             online && b.is_some_and(|x| matches!(x.charge, Charge::Charging | Charge::Full));
         let pct = b.map_or(0, |x| x.display);
         let (ink, fill_start, fill_end) =
-            BatteryTone::for_sample(online, charge, pct).palette(k.dark);
+            BatteryTone::for_reading(online, charge, b.and_then(|x| x.percentage()))
+                .palette(k.dark);
         let src = b.map(|b| b.source);
         let (brand, bg, fg) =
             if matches!(src, Some(Source::Hidpp(_))) || id.starts_with("hid:046d:") {

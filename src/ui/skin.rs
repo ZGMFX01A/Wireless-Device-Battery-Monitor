@@ -160,17 +160,17 @@ pub enum BatteryTone {
     Critical,
 }
 impl BatteryTone {
-    pub fn for_sample(online: bool, charging: bool, p: u8) -> Self {
+    pub fn for_reading(online: bool, charging: bool, percentage: Option<u8>) -> Self {
         if !online {
             Self::Offline
         } else if charging {
             Self::Charging
-        } else if p >= 50 {
-            Self::Normal
-        } else if p >= 20 {
-            Self::Warning
         } else {
-            Self::Critical
+            match percentage {
+                None | Some(50..) => Self::Normal,
+                Some(20..50) => Self::Warning,
+                Some(0..20) => Self::Critical,
+            }
         }
     }
     pub fn palette(self, dark: bool) -> (u32, u32, u32) {
@@ -212,11 +212,15 @@ mod material_tests {
             (50, Normal),
             (100, Normal),
         ] {
-            assert_eq!(BatteryTone::for_sample(true, false, pct), want);
-            assert_eq!(BatteryTone::for_sample(true, true, pct), Charging);
-            assert_eq!(BatteryTone::for_sample(false, true, pct), Offline);
-            assert_eq!(BatteryTone::for_sample(false, false, pct), Offline);
+            assert_eq!(BatteryTone::for_reading(true, false, Some(pct)), want);
+            assert_eq!(BatteryTone::for_reading(true, true, Some(pct)), Charging);
+            assert_eq!(BatteryTone::for_reading(false, true, Some(pct)), Offline);
+            assert_eq!(BatteryTone::for_reading(false, false, Some(pct)), Offline);
         }
+        assert_eq!(BatteryTone::for_reading(true, false, None), Normal);
+        assert_eq!(BatteryTone::for_reading(true, true, None), Charging);
+        assert_eq!(BatteryTone::for_reading(false, false, None), Offline);
+        assert_eq!(BatteryTone::for_reading(true, false, Some(0)), Critical);
     }
     fn luminance(rgb: u32) -> f64 {
         let linear = |v: u32| {
